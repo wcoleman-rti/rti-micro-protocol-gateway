@@ -124,5 +124,5 @@ initialization, at portable epoch time; transport command range/baseline
 validation remains in the codec/adapter. `tests/codegen/test_dds_conversion.c`
 checks typed conversion against the installed Micro-generated type support.
 Run Micro type generation on the emitted **`signals.idl`**, not directly on
-`schemas/signal.idl`: a generated header named `signal.h` can shadow the POSIX
+`resources/signal.idl`: a generated header named `signal.h` can shadow the POSIX
 system header when its directory is added to compiler include paths.

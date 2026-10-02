@@ -12,83 +12,64 @@
 
 # RTI Micro protocol gateway
 
-Resource-bounded C11 protocol gateway with opaque samples, statically registered
-bindings, build-time configuration and Connext Micro-backed sequences.
-Adapters own connectivity and sample metadata; the core never interprets DDS
-samples or CAN frames.
+A resource-bounded C11 gateway for routing data between protocol adapters. The
+core uses opaque samples and statically registered bindings; adapters own
+connectivity and sample metadata.
 
-## Build
+## Quick start
 
-Requires CMake 3.24+, a C11 compiler, licensed Connext Micro 4.3.0 installed
-libraries/tools, Python 3 for host generation, and Java 17 for RTI generators.
+You need CMake 3.24+, a C11 compiler, Python 3, a licensed Connext Micro 4.3.0
+installation, and Java 17 for the RTI generators. Install the host-tool
+dependencies and configure with the paths/architecture for your SDK:
 
 ```sh
 python3 -m venv .venv
 .venv/bin/python -m pip install \
   -r tools/dbc_codegen/requirements.txt \
   -r tools/config_codegen/requirements.txt
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+cmake -S . -B build \
   -DPGW_PYTHON_EXECUTABLE="$PWD/.venv/bin/python" \
   -DRTIMEHOME="<installed Micro 4.3.0 SDK root>" \
   -DRTIME_PIL_ARCH="<installed PIL architecture>" \
   -DRTIME_PSL_ARCH="<installed PSL architecture>" \
   -DRTIME_TARGET_NAME="<installed target name>" \
-  -DPGW_JREHOME="<installed Java 17 runtime>" \
-  -DPGW_BUILD_BENCHMARKS=ON
-cmake --build build -j 4
+  -DPGW_JREHOME="<installed Java 17 runtime>"
+cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-See [build configuration](docs/build.md) for SDK/JRE selection and independent
-component options. Generated files stay in build trees; the executable does not
-parse XML or DBC at runtime.
-
-Core-only validation links real installed Micro infrastructure without creating
-DDS entities:
+Try the safe, no-CAN-interface demo after building. Run each command in a
+separate terminal; DDS uses the licensed Micro implementation:
 
 ```sh
-cmake -S . -B build-core -DPGW_ENABLE_CAN=OFF -DPGW_ENABLE_DDS=OFF \
-  -DPGW_PYTHON_EXECUTABLE="$PWD/.venv/bin/python" \
-  -DRTIMEHOME="<installed Micro 4.3.0 SDK root>" \
-  -DRTIME_PIL_ARCH="<installed PIL architecture>" \
-  -DRTIME_PSL_ARCH="<installed PSL architecture>" \
-  -DRTIME_TARGET_NAME="<installed target name>" \
-  -DPGW_JREHOME="<installed Java 17 runtime>" \
-  -DPGW_BUILD_TESTS=ON -DPGW_BUILD_BENCHMARKS=ON
-cmake --build build-core -j 4
-ctest --test-dir build-core --output-on-failure
-python3 benchmarks/runner/run.py build-core/benchmarks/pgw_core_benchmark
+build/examples/can_dds/pgw_can_dds_gateway --memory 10000
+build/examples/can_dds/pgw_dds_companion 123.4 500
 ```
 
-Generic libraries and headers support relocatable `find_package(PGW CONFIG)`
-installation; see [package consumption](docs/build.md). Licensed SDK libraries
-remain external, and application-generated bindings remain application-owned.
+Full SDK selection, component options, and package-consumer instructions are in
+the [build guide](https://wcoleman-rti.github.io/rti-micro-protocol-gateway/docs/build.html).
+For more detail, start at the [hosted documentation site](https://wcoleman-rti.github.io/rti-micro-protocol-gateway/).
 
-## Components
+## Project map
 
-- [Core](core/): versioned C interfaces, exact schema negotiation, native
-  fixed-buffer sequences, fair synchronous routing, diagnostics and optional
-  scheduler worker policy over RTI OSAPI.
-- [Adapters](adapters/): CAN transports/codec integration and Micro DDS
-  generated entity adoption.
-- [Bindings](bindings/): application schema and compiled value conversion.
-- [Host tools](tools/): strict DBC/schema and XML configuration generation.
-- [Examples](examples/): separated state/command flows.
-- [Tests](tests/), [benchmarks](benchmarks/): requirement checks and persistent
-  measurement reports.
+- **Core** — bounded synchronous routing, lifecycle, schemas, diagnostics, and
+  optional scheduler policy.
+- **Adapters** — CAN transports and the Connext Micro DDS integration.
+- **Bindings and tools** — application value conversion and build-time
+  configuration/DBC code generation.
+- **Resources** — shared IDL schema and XML configuration grammar.
+- **Examples, tests, benchmarks** — runnable integration example, verification,
+  and measurement workloads.
 
-The runnable bidirectional Micro DDS/CAN example, its `--memory` invocation,
-and signal/topic/domain customization workflow are documented in
-[examples/can_dds/README.md](examples/can_dds/README.md).
+Browse the [C API reference](https://wcoleman-rti.github.io/rti-micro-protocol-gateway/reference/index.html)
+or the guides on [core contracts](https://wcoleman-rti.github.io/rti-micro-protocol-gateway/docs/core.html),
+[testing](https://wcoleman-rti.github.io/rti-micro-protocol-gateway/docs/testing.html),
+[performance](https://wcoleman-rti.github.io/rti-micro-protocol-gateway/docs/performance.html),
+and [migration boundaries](https://wcoleman-rti.github.io/rti-micro-protocol-gateway/docs/limitations.html).
 
-Read [core contracts](docs/core.md), [verification scope](docs/testing.md) and
-[typed sequence support](docs/sequences.md), plus
-[performance measurement boundaries](docs/performance.md). No physical CAN
-interface or shared virtual CAN interface is configured automatically.
-
-This is a prototype, not a certified implementation, an SDK-free core,
-an arbitrary-topic router, an end-to-end zero-copy claim or a whole-process
-allocation guarantee. See [migration boundaries](docs/limitations.md).
+This is a prototype, not a certified implementation, an SDK-free core, an
+arbitrary-topic router, or a whole-process allocation guarantee. No physical or
+shared virtual CAN interface is configured automatically.
 
 ## License
 

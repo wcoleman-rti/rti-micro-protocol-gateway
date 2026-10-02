@@ -1,0 +1,42 @@
+# (c) 2026 Copyright, Real-Time Innovations, Inc. All rights reserved.
+#
+# RTI grants Licensee a license to use, modify, compile, and create derivative
+# works of the Software. Licensee has the right to distribute object form only
+# for use with RTI products. The Software is provided "as is", with no warranty
+# of any type, including any warranty for fitness for any purpose. RTI is under no
+# obligation to maintain or support the Software. RTI shall not be liable for any
+# incidental or consequential damages arising out of the use or inability to use
+# the software.
+
+PROJECT_NAME           = "RTI Micro Protocol Gateway"
+OUTPUT_DIRECTORY       = build/docs-source
+CREATE_SUBDIRS         = NO
+OUTPUT_LANGUAGE        = English
+
+# These paths mirror the public-header install rules in cmake/PGWInstall.cmake.
+INPUT                  = core/include/pgw \
+                         adapters/can/include/pgw \
+                         adapters/dds/connext_micro/include/pgw \
+                         bindings/signal/include/pgw/signal.h
+FILE_PATTERNS          = *.h
+RECURSIVE              = YES
+EXCLUDE_PATTERNS       =
+STRIP_FROM_PATH        = core/include adapters/can/include adapters/dds/connext_micro/include bindings/signal/include
+
+OPTIMIZE_OUTPUT_FOR_C  = YES
+EXTRACT_ALL            = YES
+EXTRACT_PRIVATE        = NO
+EXTRACT_STATIC         = NO
+
+GENERATE_HTML          = YES
+HTML_OUTPUT            = reference
+GENERATE_LATEX          = NO
+GENERATE_MAN            = NO
+GENERATE_RTF            = NO
+GENERATE_XML            = NO
+
+QUIET                  = YES
+WARN_IF_UNDOCUMENTED   = YES
+WARN_IF_DOC_ERROR       = YES
+WARN_AS_ERROR           = YES
+HAVE_DOT                = NO

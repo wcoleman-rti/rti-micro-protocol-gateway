@@ -15,9 +15,25 @@
 
 #include "reda/reda_sequence.h"
 
+/** @brief Opaque sample delivered by a stream reader.
+ * Its concrete representation is adapter-defined. Use the bound
+ * PGW_Representation access operations when the value must be inspected
+ * without knowing its native type.
+ */
 typedef struct PGW_Sample PGW_Sample;
+/** @brief Non-owning reference to an immutable sample.
+ * The reference remains valid only while the reader's sample loan is active.
+ */
 typedef const PGW_Sample *PGW_SampleRef;
 
+/** @brief Sequence of sample references used by stream readers and routes.
+ *
+ * The generated REDA sequence API provides initialization, finalization,
+ * length/capacity access, and contiguous-storage loan operations. A caller
+ * supplies backing storage where required; a borrowed buffer must remain valid
+ * until the matching unloan/finalize operation. A reader loan is separately
+ * returned through its PGW_StreamReaderI::return_loan callback.
+ */
 #define T PGW_SampleRef
 #define TSeq PGW_SampleSeq
 #define REDA_SEQUENCE_API REDA_SEQUENCE_API_UNTYPED
@@ -36,6 +52,7 @@ typedef const PGW_Sample *PGW_SampleRef;
 #undef TSeq
 #undef REDA_SEQUENCE_API
 #undef concatenate
+/** @brief Opaque generated sequence of PGW_SampleRef values. */
 typedef struct PGW_SampleSeq PGW_SampleSeq;
 
 #endif

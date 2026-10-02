@@ -1,6 +1,7 @@
 /.venv/
 /build/
 /build-*/
+/site/
 /results/
 /build-dds-domain-locks/
 
