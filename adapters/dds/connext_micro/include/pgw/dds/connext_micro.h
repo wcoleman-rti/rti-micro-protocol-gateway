@@ -16,32 +16,64 @@
 #include "rti_me_c.h"
 #include "app_gen/app_gen.h"
 
-/* Typed implementations own native DDS sequence descriptors and scratch storage. */
+/** @brief Type-specific bridge between Connext Micro DDS data and the gateway.
+ *
+ * A binding supplies operations for its native sample type. Its implementation
+ * owns the native sequence descriptors and scratch storage provisioned from
+ * the caller's arena. The binding table, representation, and callback code are
+ * borrowed and must outlive all connections using them. Reader samples/metadata
+ * are valid only while the DDS loan remains outstanding; return every
+ * successful take with @c return_loan before reusing reader storage.
+ */
 typedef struct {
-    const PGW_Representation *representation;
-    const char *dds_type_name;
-    size_t native_size;
+    const PGW_Representation *representation; /**< Gateway view of the native type. */
+    const char *dds_type_name;                 /**< Generated DDS type name. */
+    size_t native_size;                        /**< Native sample size in bytes. */
+    /** Initialize type-specific sequences/scratch storage from the arena.
+     * The arena is caller-owned; capacity is the maximum endpoint sample
+     * count; the output state pointer receives the initialized binding state.
+     * @return PGW_OK or a gateway status describing allocation/setup failure.
+     */
     PGW_Status (*initialize)(PGW_Arena *, size_t, void **);
+    /** Take up to @p maximum native samples from a reader.
+     * Returns a native DDS result code; a successful take's loan must be
+     * returned before the storage is reused. Use DDS_RETCODE_NO_DATA when no
+     * samples are available.
+     */
     DDS_ReturnCode_t (*take)(void *, DDS_DataReader *, size_t);
+    /** Return current native sample count after take. */
     size_t (*length)(void *);
+    /** Return a borrowed native sample by index while its DDS loan is active. */
     const void *(*data)(void *, size_t);
+    /** Return sample metadata corresponding to a loaned sample index. */
     const struct DDS_SampleInfo *(*info)(void *, size_t);
+    /** Return the DDS loan associated with the most recent take. */
     DDS_ReturnCode_t (*return_loan)(void *, DDS_DataReader *);
+    /** Copy one native sample into caller storage of the advertised representation. */
     PGW_Status (*copy_native)(const void *, void *, size_t);
+    /** Write one native sample, optionally with a source timestamp. */
     DDS_ReturnCode_t (*write)(void *, DDS_DataWriter *, const void *,
                              const struct DDS_Time_t *);
+    /** Register instance keys with a writer when the type requires it. */
     PGW_Status (*register_keys)(void *, DDS_DataWriter *);
 } PGW_DDSBinding;
 
+/** @brief Select one named DDS reader or writer endpoint for a connection.
+ * @c name is the gateway-facing endpoint name; @c entity_name is the generated
+ * participant entity name used for DDS lookup. Strings and binding are borrowed
+ * for the connection lifetime. Capacity must be nonzero and fit in INT_MAX.
+ * A reader cannot request preserve_source_timestamp.
+ */
 typedef struct {
-    const char *name;
-    const char *entity_name;
-    const PGW_DDSBinding *binding;
-    size_t capacity;
-    bool reader;
-    bool preserve_source_timestamp;
+    const char *name;                           /**< Unique gateway endpoint name. */
+    const char *entity_name;                    /**< DDS participant entity lookup name. */
+    const PGW_DDSBinding *binding;              /**< Borrowed generated type binding. */
+    size_t capacity;                            /**< Nonzero endpoint sample capacity. */
+    bool reader;                                /**< True for reader; false for writer. */
+    bool preserve_source_timestamp;             /**< Preserve valid portable source time on writes. */
 } PGW_DDSEndpointConfig;
 
+/** @brief Read-only endpoint configuration element used by endpoint sequences. */
 typedef const PGW_DDSEndpointConfig PGW_DDSEndpointConfigElement;
 #define REDA_SEQUENCE_USER_API
 #define T PGW_DDSEndpointConfigElement
@@ -49,51 +81,108 @@ typedef const PGW_DDSEndpointConfig PGW_DDSEndpointConfigElement;
 #include <reda/reda_sequence_decl.h>
 #undef T
 #undef TSeq
+/** @brief Sequence of borrowed endpoint configuration elements. */
 typedef struct PGW_DDSEndpointConfigSeq PGW_DDSEndpointConfigSeq;
 
+/** @brief DDS participant and endpoint configuration for one connection.
+ * Endpoint sequence storage, endpoint strings, and binding descriptors are
+ * borrowed; keep them alive until the connection is closed. The participant
+ * name must identify a participant in the model registered with
+ * PGW_DDS_register_model().
+ */
 typedef struct {
-    const char *participant_name;
-    PGW_DDSEndpointConfigSeq endpoints;
-    bool endpoints_initialized;
+    const char *participant_name;        /**< Registered generated participant name. */
+    PGW_DDSEndpointConfigSeq endpoints;  /**< Non-empty endpoint configuration sequence. */
+    bool endpoints_initialized;           /**< True when the sequence is ready for use. */
 } PGW_DDSConfig;
 
+/** @brief Effective Connext Micro resource allocations for a connection. */
 typedef struct {
-    DDS_Long local_readers, local_writers, local_topics;
-    DDS_Long remote_participants, remote_readers, remote_writers;
-    DDS_Long factory_participants, factory_components;
-    size_t gateway_storage_bytes;
+    DDS_Long local_readers, local_writers, local_topics; /**< Local endpoint/topic limits. */
+    DDS_Long remote_participants, remote_readers, remote_writers; /**< Remote discovery limits. */
+    DDS_Long factory_participants, factory_components;    /**< Factory-wide limits. */
+    size_t gateway_storage_bytes;                          /**< Arena bytes consumed by gateway. */
 } PGW_DDSResources;
+/** @brief Effective per-endpoint history and blocking QoS resources. */
 typedef struct {
     DDS_Long instances, samples, samples_per_instance, history_depth;
-    DDS_Long blocking_seconds;
-    DDS_UnsignedLong blocking_nanoseconds;
+    /**< Maximum instance/sample limits and configured history depth. */
+    DDS_Long blocking_seconds;          /**< Writer maximum-blocking seconds (zero for readers). */
+    DDS_UnsignedLong blocking_nanoseconds; /**< Writer maximum-blocking nanoseconds. */
 } PGW_DDSHistoryResources;
+/** @brief Gateway and DDS status counters for one endpoint. */
 typedef struct {
     uint64_t valid_samples, lifecycle_samples, loans, loan_errors;
-    uint64_t accepted, backpressure, invalid, fatal;
+    /**< Valid/lifecycle samples taken, DDS loans, and loan-return failures. */
+    uint64_t accepted, backpressure, invalid, fatal; /**< Gateway stream-write outcomes. */
     DDS_Long lost, rejected, matched, incompatible_qos;
+    /**< DDS lost/rejected totals, current matches, and incompatible-QoS total. */
 } PGW_DDSStatistics;
+/** @brief Metadata copied from Connext Micro sample information.
+ * The sample state, view state, and instance state values are native DDS enums.
+ */
 typedef struct {
     struct DDS_Time_t source_timestamp, reception_timestamp;
-    struct DDS_SequenceNumber_t publication_sequence_number;
-    DDS_InstanceHandle_t publication_handle;
-    DDS_InstanceStateKind instance_state;
-    DDS_Boolean valid_data;
-    DDS_SampleStateKind sample_state;
-    DDS_ViewStateKind view_state;
-    DDS_InstanceHandle_t instance_handle;
+    /**< Writer source and reader reception timestamps. */
+    struct DDS_SequenceNumber_t publication_sequence_number; /**< Writer sequence number. */
+    DDS_InstanceHandle_t publication_handle;                /**< Publishing data-writer handle. */
+    DDS_InstanceStateKind instance_state;                   /**< DDS instance lifecycle state. */
+    DDS_Boolean valid_data;                                 /**< Whether sample payload is valid. */
+    DDS_SampleStateKind sample_state;                       /**< DDS sample state. */
+    DDS_ViewStateKind view_state;                           /**< DDS view state. */
+    DDS_InstanceHandle_t instance_handle;                   /**< DDS instance handle. */
 } PGW_DDSMetadata;
 
+/** @brief Register a generated AppGen library model with the process-global DDS factory.
+ * The factory retains the model pointer; the model storage must remain valid
+ * for the process lifetime. Re-registering the same pointer succeeds;
+ * registering a different model after the first succeeds is invalid.
+ * @return PGW_OK on success, PGW_INVALID for malformed/conflicting input,
+ *         PGW_UNSUPPORTED for incompatible factory QoS across libraries, or
+ *         PGW_FATAL for factory/model registration failure.
+ */
 PGW_Status PGW_DDS_register_model(const struct APPGEN_LibraryModelSeq *);
+/** @brief Register the Connext Micro adapter in a gateway registry. */
 PGW_Status PGW_DDS_register_adapter(PGW_Registry *);
+/** @brief Create a DDS connection using registered model entities and an arena.
+ * The connection owns the DDS participant/endpoints it creates; the arena,
+ * config, endpoint definitions, and bindings are borrowed. The caller must
+ * close the connection before releasing the arena or borrowed configuration.
+ * @return PGW_OK on success or an applicable PGW_Status for invalid config,
+ *         unsupported representation, allocation, discovery entity, or DDS
+ *         creation failures.
+ */
 PGW_Status PGW_DDS_create(const PGW_DDSConfig *, PGW_Arena *, PGW_Connection **);
+/** @brief Query effective participant/factory resource limits.
+ * @return PGW_OK on success, PGW_INVALID for invalid input/participant query,
+ *         or PGW_IO_ERROR if factory QoS cannot be read.
+ */
 PGW_Status PGW_DDS_effective_resources(PGW_Connection *, PGW_DDSResources *);
+/** @brief Query effective history resources for a named endpoint.
+ * @return PGW_OK on success, PGW_INVALID for invalid/unknown endpoint, or
+ *         PGW_IO_ERROR if DDS QoS cannot be read.
+ */
 PGW_Status PGW_DDS_effective_history(PGW_Connection *, const char *,
                                    PGW_DDSHistoryResources *);
+/** @brief Copy gateway and DDS status counters for a named endpoint.
+ * @return PGW_OK on success, PGW_INVALID for invalid/unknown endpoint, or
+ *         PGW_IO_ERROR if a DDS status query fails.
+ */
 PGW_Status PGW_DDS_statistics(PGW_Connection *, const char *, PGW_DDSStatistics *);
+/** @brief Copy DDS metadata from a sample belonging to this adapter.
+ * The sample must still be valid, typically within its outstanding reader
+ * loan, and the representation must be the Connext Micro representation.
+ * @return PGW_OK on success or PGW_INVALID for unrelated/invalid inputs.
+ */
 PGW_Status PGW_DDS_metadata(const PGW_Representation *, const PGW_Sample *,
                           PGW_DDSMetadata *);
+/** @brief Get the connection-owned DDS participant.
+ * The returned participant is borrowed; do not delete it. It becomes invalid
+ * when the connection is closed. Returns null for a null connection.
+ */
 DDS_DomainParticipant *PGW_DDS_participant(PGW_Connection *);
+/** @brief Connext Micro adapter descriptor. */
 extern const PGW_AdapterI PGW_DDSConnextMicroAdapter;
+/** @brief Connext Micro connection interface descriptor. */
 extern const PGW_ConnectionI PGW_DDSConnextMicroConnection;
 #endif

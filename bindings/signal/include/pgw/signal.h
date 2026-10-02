@@ -21,84 +21,114 @@
 extern "C" {
 #endif
 
+/** @brief Native value arm used by a signal. */
 typedef enum PGW_ValueKind {
-    PGW_VALUE_BOOLEAN = 0,
-    PGW_VALUE_INT64 = 1,
-    PGW_VALUE_DOUBLE = 2
+    PGW_VALUE_BOOLEAN = 0, /**< Boolean value. */
+    PGW_VALUE_INT64 = 1,   /**< Signed 64-bit engineering value. */
+    PGW_VALUE_DOUBLE = 2   /**< Double-precision engineering value. */
 } PGW_ValueKind;
 
+/** @brief Typed value carried by a signal.
+ * Read only the union member selected by @c kind.
+ */
 typedef struct PGW_Value {
-    PGW_ValueKind kind;
+    PGW_ValueKind kind; /**< Active member of @c data. */
     union {
-        bool boolean;
-        int64_t integer;
-        double real;
+        bool boolean;   /**< Value when kind is PGW_VALUE_BOOLEAN. */
+        int64_t integer; /**< Value when kind is PGW_VALUE_INT64. */
+        double real;    /**< Value when kind is PGW_VALUE_DOUBLE. */
     } data;
 } PGW_Value;
 
+/** @brief A signal value identified by its schema-defined signal ID. */
 typedef struct PGW_Signal {
-    uint32_t id;
-    PGW_Value value;
+    uint32_t id;      /**< Signal identifier. */
+    PGW_Value value;  /**< Typed engineering value. */
 } PGW_Signal;
 
+/** @brief Versioned identity of a signal schema.
+ * Strings are borrowed, null-terminated, and must outlive descriptors using
+ * this schema. The fingerprint identifies the complete schema contents.
+ */
 typedef struct PGW_SignalSchema {
-    const char *name;
-    uint32_t version;
-    const char *fingerprint;
+    const char *name;         /**< Schema name. */
+    uint32_t version;         /**< Schema version. */
+    const char *fingerprint;  /**< Stable schema fingerprint. */
 } PGW_SignalSchema;
 
+/** @brief Label for one raw enumerated signal value.
+ * Labels are borrowed strings; @c raw is the encoded, unscaled value.
+ */
 typedef struct PGW_SignalChoice {
-    int64_t raw;
-    const char *label;
+    int64_t raw;         /**< Raw encoded value. */
+    const char *label;   /**< Human-readable choice label. */
 } PGW_SignalChoice;
 
+/** @brief DBC-derived description of a signal's frame layout and value mapping.
+ *
+ * The descriptor is immutable after construction. String pointers and the
+ * choices array are borrowed and must remain valid while the descriptor is in
+ * use. @c start_bit and @c bit_length describe the encoded field; byte order
+ * and signedness control raw extraction. Engineering values use the physical
+ * range and, for integer values, the integer scale/offset mapping. For
+ * multiplexed messages, @c multiplexer_index identifies the selector within
+ * the descriptor array (negative means no selector) and @c multiplex_value
+ * specifies the selector value that activates this branch.
+ */
 typedef struct PGW_SignalDescriptor {
-    uint32_t id;
-    uint32_t message_index;
-    const char *name;
-    const char *category;
-    const char *unit;
-    PGW_ValueKind kind;
-    uint16_t start_bit;
-    uint8_t bit_length;
-    bool little_endian;
-    bool is_signed;
-    bool is_multiplexer;
-    int64_t multiplex_value;
-    int32_t multiplexer_index;
-    double scale;
-    double offset;
-    double minimum;
-    double maximum;
-    int64_t raw_minimum;
-    int64_t raw_maximum;
-    int64_t integer_minimum;
-    int64_t integer_maximum;
-    int64_t integer_scale;
-    int64_t integer_offset;
-    const PGW_SignalChoice *choices;
-    size_t choice_count;
+    uint32_t id;                    /**< Unique signal identifier. */
+    uint32_t message_index;          /**< Index into the message descriptor array. */
+    const char *name;                /**< Signal name. */
+    const char *category;            /**< Output category name. */
+    const char *unit;                /**< Engineering unit; may be empty. */
+    PGW_ValueKind kind;              /**< Engineering value type. */
+    uint16_t start_bit;              /**< DBC start bit in the containing message. */
+    uint8_t bit_length;              /**< Encoded field width in bits. */
+    bool little_endian;              /**< True for little-endian bit numbering. */
+    bool is_signed;                  /**< Whether the raw field is signed. */
+    bool is_multiplexer;             /**< True when this signal selects a branch. */
+    int64_t multiplex_value;         /**< Selector value required for this branch. */
+    int32_t multiplexer_index;       /**< Selector descriptor index; negative if none. */
+    double scale;                    /**< Physical-value scale applied to raw value. */
+    double offset;                   /**< Physical-value offset applied to raw value. */
+    double minimum;                  /**< Minimum allowed engineering value. */
+    double maximum;                  /**< Maximum allowed engineering value. */
+    int64_t raw_minimum;             /**< Minimum value representable by raw field. */
+    int64_t raw_maximum;             /**< Maximum value representable by raw field. */
+    int64_t integer_minimum;         /**< Minimum allowed integer engineering value. */
+    int64_t integer_maximum;         /**< Maximum allowed integer engineering value. */
+    int64_t integer_scale;           /**< Integer raw-to-engineering multiplier. */
+    int64_t integer_offset;          /**< Integer raw-to-engineering offset. */
+    const PGW_SignalChoice *choices; /**< Borrowed raw-value labels, if any. */
+    size_t choice_count;             /**< Number of entries in @c choices. */
 } PGW_SignalDescriptor;
 
+/** @brief CAN message identity and payload layout.
+ * The name is borrowed and must remain valid while the descriptor is used.
+ */
 typedef struct PGW_MessageDescriptor {
-    uint32_t frame_id;
-    const char *name;
-    uint8_t length;
-    bool extended;
-    bool fd;
-    size_t signal_count;
+    uint32_t frame_id;      /**< CAN identifier without format flag bits. */
+    const char *name;       /**< Message name. */
+    uint8_t length;         /**< Expected payload length in bytes. */
+    bool extended;          /**< Whether the identifier uses extended format. */
+    bool fd;                /**< Whether this is a CAN FD message. */
+    size_t signal_count;    /**< Number of descriptors associated with message. */
 } PGW_MessageDescriptor;
 
+/** @brief Outcomes reported by signal codec operations.
+ * Codec callbacks return these codes instead of PGW_Status; callers map them
+ * to gateway-level errors as appropriate.
+ */
 typedef enum PGW_CodecStatus {
-    PGW_CODEC_OK = 0,
-    PGW_CODEC_INVALID_ARGUMENT,
-    PGW_CODEC_UNKNOWN_MESSAGE,
-    PGW_CODEC_UNKNOWN_SIGNAL,
-    PGW_CODEC_BUFFER_TOO_SMALL,
-    PGW_CODEC_WRONG_TYPE,
-    PGW_CODEC_OUT_OF_RANGE,
-    PGW_CODEC_INACTIVE_MULTIPLEX,
-    PGW_CODEC_SELECTOR_CHANGE
+    PGW_CODEC_OK = 0,              /**< Decode/patch completed successfully. */
+    PGW_CODEC_INVALID_ARGUMENT,    /**< Null, inconsistent, or otherwise invalid input. */
+    PGW_CODEC_UNKNOWN_MESSAGE,     /**< No descriptor matches the requested message. */
+    PGW_CODEC_UNKNOWN_SIGNAL,      /**< No descriptor matches the signal ID. */
+    PGW_CODEC_BUFFER_TOO_SMALL,    /**< Output buffer cannot hold decoded values/payload. */
+    PGW_CODEC_WRONG_TYPE,          /**< Value kind does not match the signal descriptor. */
+    PGW_CODEC_OUT_OF_RANGE,        /**< Raw or engineering value is outside the valid range. */
+    PGW_CODEC_INACTIVE_MULTIPLEX,  /**< Signal branch is inactive for the current selector. */
+    PGW_CODEC_SELECTOR_CHANGE      /**< Patch would change a multiplexer selector. */
 } PGW_CodecStatus;
 
 #ifdef __cplusplus

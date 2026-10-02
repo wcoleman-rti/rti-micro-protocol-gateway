@@ -114,7 +114,7 @@ def endpoint_qos(model, endpoint, role):
 
 
 def compile_config(gateway, dds=None, inventory=None):
-    schema_path = Path(__file__).resolve().parents[2] / "config" / "gateway.xsd"
+    schema_path = Path(__file__).resolve().parents[2] / "resources" / "gateway.xsd"
     schema = etree.XMLSchema(etree.parse(str(schema_path)))
     xml_parser = etree.XMLParser(resolve_entities=False, no_network=True, load_dtd=False)
     try:

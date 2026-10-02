@@ -1,0 +1,84 @@
+# (c) 2026 Copyright, Real-Time Innovations, Inc. All rights reserved.
+#
+# RTI grants Licensee a license to use, modify, compile, and create derivative
+# works of the Software. Licensee has the right to distribute object form only
+# for use with RTI products. The Software is provided "as is", with no warranty
+# of any type, including any warranty for fitness for any purpose. RTI is under no
+# obligation to maintain or support the Software. RTI shall not be liable for any
+# incidental or consequential damages arising out of the use or inability to use
+# the software.
+
+name: Documentation
+
+on:
+  pull_request:
+  push:
+    branches:
+      - develop
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and validate docs
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Zensical
+        run: python -m pip install -r docs/requirements.txt
+
+      - name: Install Doxygen
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends doxygen
+
+      - name: Build combined documentation site
+        run: bash tools/docs/build.sh
+
+      - name: Verify combined site output
+        run: |
+          test -s site/index.html
+          test -s site/docs/build.html
+          test -s site/docs/core.html
+          test -s site/docs/testing.html
+          test -s site/docs/performance.html
+          test -s site/docs/limitations.html
+          test -s site/reference/index.html
+          test -s site/adapters/can/index.html
+
+      - name: Upload Pages artifact
+        if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Deploy site
+        id: deployment
+        uses: actions/deploy-pages@v4

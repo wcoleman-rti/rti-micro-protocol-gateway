@@ -69,7 +69,7 @@ add_custom_command(OUTPUT "${gen}/gateway_config.c"
         --output "${gen}/gateway_config.c"
     DEPENDS "${gen}/gateway.xml" "${gen}/dds.xml" "${gen}/manifest.json"
         "${PROJECT_SOURCE_DIR}/tools/config_codegen/config_codegen.py"
-        "${PROJECT_SOURCE_DIR}/config/gateway.xsd" VERBATIM)
+        "${PROJECT_SOURCE_DIR}/resources/gateway.xsd" VERBATIM)
 pgw_micro_appgen(XML_FILE "${gen}/dds.xml" IDL_FILE model.idl
     OUTPUT_DIRECTORY "${gen}" VAR DDS)
 add_library(pgw_example_dds_model STATIC

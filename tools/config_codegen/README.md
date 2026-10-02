@@ -18,7 +18,7 @@ Install the pinned host dependency into the project's selected environment:
 .venv/bin/pip install -r tools/config_codegen/requirements.txt
 ```
 
-`config_codegen.py` validates `config/gateway.xsd` with lxml, then applies
+`config_codegen.py` validates `resources/gateway.xsd` with lxml, then applies
 semantic checks before emitting C. The parser rejects DTD/entities, unknown
 elements/attributes, duplicate IDs/native endpoints, unresolved participants,
 topics/types/bindings/routes, role mismatch, stale mapping fingerprints,
