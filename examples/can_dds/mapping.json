@@ -1,0 +1,14 @@
+{
+  "schema": "pgw.signal",
+  "version": 1,
+  "signals": [
+    {"message": "Engine", "signal": "Speed", "id": 1001, "category": "powertrain"},
+    {"message": "Engine", "signal": "Torque", "id": 1002, "category": "powertrain"},
+    {"message": "Engine", "signal": "Enabled", "id": 1003, "category": "powertrain", "kind": "boolean"},
+    {"message": "Engine", "signal": "State", "id": 1004, "category": "powertrain"},
+    {"message": "Auxiliary", "signal": "Mode", "id": 2001, "category": "auxiliary"},
+    {"message": "Auxiliary", "signal": "Temperature", "id": 2002, "category": "auxiliary"},
+    {"message": "Auxiliary", "signal": "Pressure", "id": 2003, "category": "auxiliary"},
+    {"message": "Auxiliary", "signal": "Count", "id": 2004, "category": "auxiliary"}
+  ]
+}

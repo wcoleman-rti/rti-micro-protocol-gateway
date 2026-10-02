@@ -1,0 +1,10 @@
+module PGWManagement {
+    struct Snapshot {
+        unsigned long entity_kind; //@key
+        unsigned long entity_id; //@key
+        unsigned long version;
+        unsigned long long snapshot_sequence;
+        unsigned long long collected_ns;
+        unsigned long long counters[12];
+    };
+};

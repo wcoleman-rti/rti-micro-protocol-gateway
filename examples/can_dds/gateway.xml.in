@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<gateway dds="dds.xml" route-budget="4" sample-budget="8" diagnostic-period-steps="1000">
+  <binding id="powertrain" symbol="PGW_signal_dds_binding_powertrain" type="PGW_DDS::Signal" schema="pgw.signal" fingerprint="@fingerprint@"/>
+  <binding id="auxiliary" symbol="PGW_signal_dds_binding_auxiliary" type="PGW_DDS::Signal" schema="pgw.signal" fingerprint="@fingerprint@"/>
+  <binding id="probe" symbol="PGW_probe_binding" type="PGWTest::Probe" schema="pgw.probe" fingerprint="@probe_fingerprint@"/>
+  <binding id="diagnostics" symbol="PGW_diagnostics_binding" type="PGWManagement::Snapshot" schema="pgw.diagnostics" fingerprint="@diagnostics_fingerprint@"/>
+  <connection id="gateway" participant="GatewayParticipants::Gateway">
+    <stream name="state_powertrain" endpoint="Out::StatePowertrain" binding="powertrain" role="writer" capacity="8"/>
+    <stream name="state_auxiliary" endpoint="Out::StateAuxiliary" binding="auxiliary" role="writer" capacity="8"/>
+    <stream name="command_powertrain" endpoint="In::CommandPowertrain" binding="powertrain" role="reader" capacity="8"/>
+    <stream name="command_auxiliary" endpoint="In::CommandAuxiliary" binding="auxiliary" role="reader" capacity="8"/>
+    <stream name="probe" endpoint="Out::Probe" binding="probe" role="writer" capacity="1" preserve-source-timestamp="true"/>
+    <stream name="diagnostics" endpoint="Out::Diagnostics" binding="diagnostics" role="writer" capacity="4"/>
+  </connection>
+  <connection id="companion" participant="GatewayParticipants::Companion">
+    <stream name="state_powertrain" endpoint="In::StatePowertrain" binding="powertrain" role="reader" capacity="8"/>
+    <stream name="state_auxiliary" endpoint="In::StateAuxiliary" binding="auxiliary" role="reader" capacity="8"/>
+    <stream name="command_powertrain" endpoint="Out::CommandPowertrain" binding="powertrain" role="writer" capacity="8"/>
+    <stream name="command_auxiliary" endpoint="Out::CommandAuxiliary" binding="auxiliary" role="writer" capacity="8"/>
+    <stream name="probe" endpoint="In::Probe" binding="probe" role="reader" capacity="1"/>
+    <stream name="diagnostics" endpoint="In::Diagnostics" binding="diagnostics" role="reader" capacity="4"/>
+  </connection>
+  <native-connection id="can" adapter="can" receive-budget="4" write-capacity="8">
+    <stream name="state_powertrain" endpoint="powertrain" binding="powertrain" role="reader" capacity="8"/>
+    <stream name="state_auxiliary" endpoint="auxiliary" binding="auxiliary" role="reader" capacity="8"/>
+    <stream name="command_powertrain" endpoint="powertrain" binding="powertrain" role="writer" capacity="8"/>
+    <stream name="command_auxiliary" endpoint="auxiliary" binding="auxiliary" role="writer" capacity="8"/>
+  </native-connection>
+  <route id="state_powertrain" input="can::state_powertrain" output="gateway::state_powertrain"/>
+  <route id="state_auxiliary" input="can::state_auxiliary" output="gateway::state_auxiliary"/>
+  <route id="command_powertrain" input="gateway::command_powertrain" output="can::command_powertrain"/>
+  <route id="command_auxiliary" input="gateway::command_auxiliary" output="can::command_auxiliary"/>
+</gateway>

@@ -1,0 +1,32 @@
+include_guard(GLOBAL)
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+option(PGW_GENERATOR_WARNINGS_AS_ERRORS "Reject RTI generator warnings" ON)
+set(PGW_GENERATOR_WARNING_ALLOW_REGEX "" CACHE STRING
+    "Explicit regular expression of accepted RTI warnings; empty rejects all warnings")
+foreach(_item IN ITEMS JRE WARNING_ALLOW_REGEX)
+    if(_item STREQUAL "JRE")
+        set(_value "${PGW_JREHOME}")
+    else()
+        set(_value "${PGW_GENERATOR_WARNING_ALLOW_REGEX}")
+    endif()
+    string(REPLACE "\\" "\\\\" _value "${_value}")
+    string(REPLACE "\"" "\\\"" _value "${_value}")
+    string(REPLACE "\n" "\\n" _value "${_value}")
+    string(REPLACE "\r" "\\r" _value "${_value}")
+    set(PGW_GENERATOR_${_item}_ESCAPED "${_value}")
+endforeach()
+set(PGW_GENERATOR_STRICT "${PGW_GENERATOR_WARNINGS_AS_ERRORS}")
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/pgw-tools")
+configure_file("${CMAKE_CURRENT_LIST_DIR}/rti_generator.py.in"
+    "${CMAKE_BINARY_DIR}/pgw-tools/rti_generator.py" @ONLY)
+set(PGW_GENERATOR_WRAPPER "${CMAKE_BINARY_DIR}/pgw-tools/rti_generator.py")
+include(ConnextDdsCodegen)
+
+# Preserve the helper's return-variable convention in the caller's scope.
+macro(pgw_micro_codegen)
+    connextdds_rtiddsgen_run(MICRO LANG C EXTRA_ARGS -interpreted 0 ${ARGN})
+endmacro()
+
+macro(pgw_micro_appgen)
+    connextdds_rtiddsmag_run(LANG C ${ARGN})
+endmacro()

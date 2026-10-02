@@ -1,0 +1,28 @@
+VERSION "PGW example 1"
+
+NS_ :
+    CM_
+    BA_DEF_
+    BA_
+    VAL_
+
+BS_:
+
+BU_: Gateway ECU
+
+BO_ 256 Engine: 8 ECU
+ SG_ Speed : 0|16@1+ (0.1,0) [0|6553.5] "rpm" Gateway
+ SG_ Torque : 23|12@0- (1,0) [-2048|2047] "Nm" Gateway
+ SG_ Enabled : 32|1@1+ (1,0) [0|1] "" Gateway
+ SG_ State : 40|8@1+ (1,0) [0|3] "" Gateway
+
+BO_ 2147483939 Auxiliary: 16 ECU
+ SG_ Mode M : 0|4@1+ (1,0) [0|15] "" Gateway
+ SG_ Temperature m1 : 8|12@1- (0.25,-40) [-552|471.75] "degC" Gateway
+ SG_ Pressure m2 : 8|12@1+ (2,10) [10|8200] "kPa" Gateway
+ SG_ Count : 64|16@1+ (1,0) [0|65535] "" Gateway
+
+BA_DEF_ BO_ "VFrameFormat" ENUM "StandardCAN","ExtendedCAN","StandardCAN_FD","ExtendedCAN_FD";
+BA_ "VFrameFormat" BO_ 2147483939 3;
+VAL_ 256 Enabled 0 "Off" 1 "On";
+VAL_ 256 State 0 "Idle" 1 "Running" 2 "Fault" 3 "Service";

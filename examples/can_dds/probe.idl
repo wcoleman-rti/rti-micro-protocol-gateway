@@ -1,0 +1,6 @@
+module PGWTest {
+    struct Probe {
+        unsigned long id; //@key
+        long reading;
+    };
+};

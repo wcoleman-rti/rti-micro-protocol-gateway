@@ -1,0 +1,109 @@
+<?xml version="1.0"?>
+<dds>
+  <qos_library name="GatewayQos">
+    <qos_profile name="Bounded" is_default_participant_factory_profile="true">
+      <domain_participant_qos>
+        <discovery>
+          <accept_unknown_peers>false</accept_unknown_peers>
+          <initial_peers><element>127.0.0.1</element></initial_peers>
+          <enabled_transports><element>udpv4</element></enabled_transports>
+        </discovery>
+        <discovery_config><builtin_discovery_plugins>SDP</builtin_discovery_plugins></discovery_config>
+        <transport_builtin>
+          <mask>UDPv4</mask>
+          <udpv4><ignore_loopback_interface>0</ignore_loopback_interface><allow_interfaces_list><element>lo</element></allow_interfaces_list></udpv4>
+        </transport_builtin>
+      </domain_participant_qos>
+    </qos_profile>
+    <qos_profile name="Powertrain" base_name="Bounded">
+      <datawriter_qos>
+        <history><kind>KEEP_LAST_HISTORY_QOS</kind><depth>1</depth></history>
+        <resource_limits><max_instances>@powertrain@</max_instances><max_samples>@powertrain@</max_samples><max_samples_per_instance>1</max_samples_per_instance></resource_limits>
+        <reliability><kind>BEST_EFFORT_RELIABILITY_QOS</kind><max_blocking_time><sec>0</sec><nanosec>0</nanosec></max_blocking_time></reliability>
+      </datawriter_qos>
+      <datareader_qos>
+        <history><kind>KEEP_LAST_HISTORY_QOS</kind><depth>1</depth></history>
+        <!-- One retained sample plus one outstanding loan per key. -->
+        <resource_limits><max_instances>@powertrain@</max_instances><max_samples>@powertrain_reader_samples@</max_samples><max_samples_per_instance>2</max_samples_per_instance></resource_limits>
+        <reliability><kind>BEST_EFFORT_RELIABILITY_QOS</kind></reliability>
+      </datareader_qos>
+    </qos_profile>
+    <qos_profile name="Auxiliary" base_name="Bounded">
+      <datawriter_qos>
+        <history><kind>KEEP_LAST_HISTORY_QOS</kind><depth>1</depth></history>
+        <resource_limits><max_instances>@auxiliary@</max_instances><max_samples>@auxiliary@</max_samples><max_samples_per_instance>1</max_samples_per_instance></resource_limits>
+        <reliability><kind>BEST_EFFORT_RELIABILITY_QOS</kind><max_blocking_time><sec>0</sec><nanosec>0</nanosec></max_blocking_time></reliability>
+      </datawriter_qos>
+      <datareader_qos>
+        <history><kind>KEEP_LAST_HISTORY_QOS</kind><depth>1</depth></history>
+        <resource_limits><max_instances>@auxiliary@</max_instances><max_samples>@auxiliary_reader_samples@</max_samples><max_samples_per_instance>2</max_samples_per_instance></resource_limits>
+        <reliability><kind>BEST_EFFORT_RELIABILITY_QOS</kind></reliability>
+      </datareader_qos>
+    </qos_profile>
+    <qos_profile name="Probe" base_name="Bounded">
+      <datawriter_qos>
+        <history><kind>KEEP_LAST_HISTORY_QOS</kind><depth>1</depth></history>
+        <resource_limits><max_instances>1</max_instances><max_samples>1</max_samples><max_samples_per_instance>1</max_samples_per_instance></resource_limits>
+        <reliability><kind>BEST_EFFORT_RELIABILITY_QOS</kind><max_blocking_time><sec>0</sec><nanosec>0</nanosec></max_blocking_time></reliability>
+      </datawriter_qos>
+      <datareader_qos>
+        <history><kind>KEEP_LAST_HISTORY_QOS</kind><depth>1</depth></history>
+        <resource_limits><max_instances>1</max_instances><max_samples>2</max_samples><max_samples_per_instance>2</max_samples_per_instance></resource_limits>
+        <reliability><kind>BEST_EFFORT_RELIABILITY_QOS</kind></reliability>
+      </datareader_qos>
+    </qos_profile>
+    <qos_profile name="Diagnostics" base_name="Bounded">
+      <datawriter_qos>
+        <history><kind>KEEP_LAST_HISTORY_QOS</kind><depth>1</depth></history>
+        <resource_limits><max_instances>4</max_instances><max_samples>4</max_samples><max_samples_per_instance>1</max_samples_per_instance></resource_limits>
+        <reliability><kind>BEST_EFFORT_RELIABILITY_QOS</kind><max_blocking_time><sec>0</sec><nanosec>0</nanosec></max_blocking_time></reliability>
+      </datawriter_qos>
+      <datareader_qos>
+        <history><kind>KEEP_LAST_HISTORY_QOS</kind><depth>1</depth></history>
+        <resource_limits><max_instances>4</max_instances><max_samples>8</max_samples><max_samples_per_instance>2</max_samples_per_instance></resource_limits>
+        <reliability><kind>BEST_EFFORT_RELIABILITY_QOS</kind></reliability>
+      </datareader_qos>
+    </qos_profile>
+  </qos_library>
+  <domain_library name="GatewayDomains">
+    <domain name="Private" domain_id="@domain@">
+      <register_type name="Signal" type_ref="PGW_DDS::Signal"/>
+      <register_type name="Probe" type_ref="PGWTest::Probe"/>
+      <register_type name="Snapshot" type_ref="PGWManagement::Snapshot"/>
+      <topic name="StatePowertrain" register_type_ref="Signal"/>
+      <topic name="CommandPowertrain" register_type_ref="Signal"/>
+      <topic name="StateAuxiliary" register_type_ref="Signal"/>
+      <topic name="CommandAuxiliary" register_type_ref="Signal"/>
+      <topic name="Probe" register_type_ref="Probe"/>
+      <topic name="Diagnostics" register_type_ref="Snapshot"/>
+    </domain>
+  </domain_library>
+  <domain_participant_library name="GatewayParticipants">
+    <domain_participant name="Gateway" domain_ref="GatewayDomains::Private">
+      <publisher name="Out">
+        <data_writer name="StatePowertrain" topic_ref="StatePowertrain"><datawriter_qos base_name="GatewayQos::Powertrain"/></data_writer>
+        <data_writer name="StateAuxiliary" topic_ref="StateAuxiliary"><datawriter_qos base_name="GatewayQos::Auxiliary"/></data_writer>
+        <data_writer name="Probe" topic_ref="Probe"><datawriter_qos base_name="GatewayQos::Probe"/></data_writer>
+        <data_writer name="Diagnostics" topic_ref="Diagnostics"><datawriter_qos base_name="GatewayQos::Diagnostics"/></data_writer>
+      </publisher>
+      <subscriber name="In">
+        <data_reader name="CommandPowertrain" topic_ref="CommandPowertrain"><datareader_qos base_name="GatewayQos::Powertrain"/></data_reader>
+        <data_reader name="CommandAuxiliary" topic_ref="CommandAuxiliary"><datareader_qos base_name="GatewayQos::Auxiliary"/></data_reader>
+      </subscriber>
+      <domain_participant_qos base_name="GatewayQos::Bounded"/>
+    </domain_participant>
+    <domain_participant name="Companion" domain_ref="GatewayDomains::Private">
+      <publisher name="Out">
+        <data_writer name="CommandPowertrain" topic_ref="CommandPowertrain"><datawriter_qos base_name="GatewayQos::Powertrain"/></data_writer>
+        <data_writer name="CommandAuxiliary" topic_ref="CommandAuxiliary"><datawriter_qos base_name="GatewayQos::Auxiliary"/></data_writer>
+      </publisher>
+      <subscriber name="In">
+        <data_reader name="StatePowertrain" topic_ref="StatePowertrain"><datareader_qos base_name="GatewayQos::Powertrain"/></data_reader>
+        <data_reader name="StateAuxiliary" topic_ref="StateAuxiliary"><datareader_qos base_name="GatewayQos::Auxiliary"/></data_reader>
+        <data_reader name="Probe" topic_ref="Probe"><datareader_qos base_name="GatewayQos::Probe"/></data_reader>
+        <data_reader name="Diagnostics" topic_ref="Diagnostics"><datareader_qos base_name="GatewayQos::Diagnostics"/></data_reader>
+      </subscriber>
+      <domain_participant_qos base_name="GatewayQos::Bounded"/>
+    </domain_participant>
+  </domain_participant_library>
+</dds>

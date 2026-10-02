@@ -1,0 +1,2 @@
+add_subdirectory(dbc_codegen)
+add_subdirectory(config_codegen)

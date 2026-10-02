@@ -1,0 +1,140 @@
+#include "pgw_codec.h"
+#include <limits.h>
+#include <math.h>
+
+/*TABLES*/
+
+static uint64_t raw_read(const PGW_SignalDescriptor *s, const uint8_t *data)
+{
+    uint64_t raw = 0;
+    unsigned pos = s->start_bit;
+    for (unsigned i = 0; i < s->bit_length; ++i) {
+        unsigned shift = s->little_endian ? i : s->bit_length - i - 1;
+        raw |= (uint64_t)((data[pos / 8] >> (pos % 8)) & 1u) << shift;
+        pos = s->little_endian ? pos + 1 : (pos % 8 == 0 ? pos + 15 : pos - 1);
+    }
+    return raw;
+}
+
+static int64_t signed_raw(const PGW_SignalDescriptor *s, uint64_t raw)
+{
+    if (s->is_signed && (raw & (UINT64_C(1) << (s->bit_length - 1)))) {
+        if (s->bit_length < 64) raw |= UINT64_MAX << s->bit_length;
+        return -(int64_t)(~raw) - 1;
+    }
+    return (int64_t)raw;
+}
+
+static void raw_write(const PGW_SignalDescriptor *s, uint8_t *data, uint64_t raw)
+{
+    unsigned pos = s->start_bit;
+    for (unsigned i = 0; i < s->bit_length; ++i) {
+        unsigned shift = s->little_endian ? i : s->bit_length - i - 1;
+        uint8_t mask = (uint8_t)(1u << (pos % 8));
+        data[pos / 8] = (uint8_t)((data[pos / 8] & (uint8_t)~mask)
+            | (((raw >> shift) & 1u) ? mask : 0));
+        pos = s->little_endian ? pos + 1 : (pos % 8 == 0 ? pos + 15 : pos - 1);
+    }
+}
+
+const PGW_SignalDescriptor *PGW_codec_signal_find(uint32_t id)
+{
+    for (size_t i = 0; i < PGW_codec_signal_count; ++i)
+        if (PGW_codec_signals[i].id == id) return &PGW_codec_signals[i];
+    return NULL;
+}
+
+const PGW_MessageDescriptor *PGW_codec_message_find(uint32_t id, bool extended)
+{
+    for (size_t i = 0; i < PGW_codec_message_count; ++i)
+        if (PGW_codec_messages[i].frame_id == id
+            && PGW_codec_messages[i].extended == extended) return &PGW_codec_messages[i];
+    return NULL;
+}
+
+static bool active(const PGW_SignalDescriptor *s, const uint8_t *data)
+{
+    return s->multiplexer_index < 0 ||
+        signed_raw(&PGW_codec_signals[s->multiplexer_index],
+            raw_read(&PGW_codec_signals[s->multiplexer_index], data)) == s->multiplex_value;
+}
+
+PGW_CodecStatus PGW_codec_decode(uint32_t id, bool extended, bool fd,
+    const uint8_t *data, size_t length, PGW_Signal *output, size_t capacity,
+    size_t *count)
+{
+    if (!data || !count || (!output && capacity)) return PGW_CODEC_INVALID_ARGUMENT;
+    *count = 0;
+    const PGW_MessageDescriptor *m = PGW_codec_message_find(id, extended);
+    if (!m) return PGW_CODEC_UNKNOWN_MESSAGE;
+    if (length != m->length || fd != m->fd) return PGW_CODEC_INVALID_ARGUMENT;
+    size_t mi = (size_t)(m - PGW_codec_messages);
+    for (size_t i = 0; i < PGW_codec_signal_count; ++i)
+        if (PGW_codec_signals[i].message_index == mi && active(&PGW_codec_signals[i], data))
+            ++*count;
+    if (*count > capacity) return PGW_CODEC_BUFFER_TOO_SMALL;
+    size_t n = 0;
+    for (size_t i = 0; i < PGW_codec_signal_count; ++i) {
+        const PGW_SignalDescriptor *s = &PGW_codec_signals[i];
+        if (s->message_index != mi || !active(s, data)) continue;
+        int64_t raw = signed_raw(s, raw_read(s, data));
+        output[n].id = s->id;
+        output[n].value.kind = s->kind;
+        if (s->kind == PGW_VALUE_BOOLEAN) output[n].value.data.boolean = raw != 0;
+        else if (s->kind == PGW_VALUE_INT64)
+            output[n].value.data.integer = raw * s->integer_scale + s->integer_offset;
+        else output[n].value.data.real = (double)raw * s->scale + s->offset;
+        ++n;
+    }
+    return PGW_CODEC_OK;
+}
+
+PGW_CodecStatus PGW_codec_patch(const PGW_Signal *signal, uint8_t *baseline,
+    size_t length)
+{
+    if (!signal || !baseline) return PGW_CODEC_INVALID_ARGUMENT;
+    const PGW_SignalDescriptor *s = PGW_codec_signal_find(signal->id);
+    if (!s) return PGW_CODEC_UNKNOWN_SIGNAL;
+    if (length != PGW_codec_messages[s->message_index].length)
+        return PGW_CODEC_INVALID_ARGUMENT;
+    if (signal->value.kind != s->kind) return PGW_CODEC_WRONG_TYPE;
+    if (!active(s, baseline)) return PGW_CODEC_INACTIVE_MULTIPLEX;
+    if (s->kind == PGW_VALUE_INT64 &&
+        (signal->value.data.integer < s->integer_minimum ||
+         signal->value.data.integer > s->integer_maximum)) return PGW_CODEC_OUT_OF_RANGE;
+    int64_t raw;
+    if (s->kind == PGW_VALUE_INT64) {
+        /* Generated bounds guarantee subtraction is representable. Unsigned
+           magnitudes also cover INT64_MIN without signed abs/division overflow. */
+        int64_t delta = signal->value.data.integer - s->integer_offset;
+        bool negative = (delta < 0) != (s->integer_scale < 0);
+        uint64_t numerator = delta < 0 ? UINT64_C(0) - (uint64_t)delta : (uint64_t)delta;
+        uint64_t divisor = s->integer_scale < 0
+            ? UINT64_C(0) - (uint64_t)s->integer_scale : (uint64_t)s->integer_scale;
+        uint64_t magnitude = numerator / divisor;
+        uint64_t remainder = numerator % divisor;
+        if (remainder >= divisor - remainder) ++magnitude;
+        if (negative) {
+            if (magnitude > (UINT64_C(1) << 63)) return PGW_CODEC_OUT_OF_RANGE;
+            raw = magnitude == (UINT64_C(1) << 63) ? INT64_MIN : -(int64_t)magnitude;
+        } else {
+            if (magnitude > INT64_MAX) return PGW_CODEC_OUT_OF_RANGE;
+            raw = (int64_t)magnitude;
+        }
+    } else {
+        long double physical;
+        if (s->kind == PGW_VALUE_BOOLEAN) physical = signal->value.data.boolean ? 1 : 0;
+        else physical = signal->value.data.real;
+        if (!isfinite(physical) || physical < s->minimum || physical > s->maximum)
+            return PGW_CODEC_OUT_OF_RANGE;
+        long double rounded = roundl((physical - s->offset) / s->scale);
+        if (rounded < (long double)s->raw_minimum || rounded > (long double)s->raw_maximum)
+            return PGW_CODEC_OUT_OF_RANGE;
+        raw = (int64_t)rounded;
+    }
+    if (raw < s->raw_minimum || raw > s->raw_maximum) return PGW_CODEC_OUT_OF_RANGE;
+    if (s->is_multiplexer && raw != signed_raw(s, raw_read(s, baseline)))
+        return PGW_CODEC_SELECTOR_CHANGE;
+    raw_write(s, baseline, (uint64_t)raw);
+    return PGW_CODEC_OK;
+}

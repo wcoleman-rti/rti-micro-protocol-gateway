@@ -1,0 +1,12 @@
+module PGW_DDS {
+    enum ValueKind { VALUE_BOOLEAN, VALUE_INT64, VALUE_DOUBLE };
+    union Value switch (ValueKind) {
+        case VALUE_BOOLEAN: boolean boolean_value;
+        case VALUE_INT64: long long integer_value;
+        case VALUE_DOUBLE: double real_value;
+    };
+    struct Signal {
+        unsigned long id; //@key
+        Value value;
+    };
+};

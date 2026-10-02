@@ -1,0 +1,10 @@
+/.venv/
+/build/
+/build-*/
+/results/
+/build-dds-domain-locks/
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/

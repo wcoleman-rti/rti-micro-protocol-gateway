@@ -1,0 +1,25 @@
+"""Persistent build-time RTI launcher; never depend on the invoking shell's JRE."""
+import os
+import re
+import subprocess
+import sys
+
+JREHOME = "@PGW_GENERATOR_JRE_ESCAPED@"
+STRICT = "@PGW_GENERATOR_STRICT@" in ("ON", "TRUE", "1")
+ALLOW = "@PGW_GENERATOR_WARNING_ALLOW_REGEX_ESCAPED@"
+
+environment = dict(os.environ, JREHOME=JREHOME)
+result = subprocess.run(sys.argv[1:], env=environment, text=True, capture_output=True)
+sys.stdout.write(result.stdout)
+sys.stderr.write(result.stderr)
+if result.returncode:
+    sys.exit(result.returncode)
+if re.search(r"\bERROR\b", result.stdout + result.stderr):
+    sys.stderr.write("PGW: RTI generator reported an error despite zero exit status.\n")
+    sys.exit(1)
+warnings = [line for line in (result.stdout + result.stderr).splitlines()
+            if re.search(r"\bwarn(?:ing)?\b", line, re.IGNORECASE)]
+rejected = [line for line in warnings if not ALLOW or not re.search(ALLOW, line)]
+if STRICT and rejected:
+    sys.stderr.write("PGW: RTI generator warnings rejected; fix inputs or explicitly allow known warnings.\n")
+    sys.exit(1)

@@ -1,0 +1,69 @@
+<?xml version="1.0"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+  <xs:simpleType name="identifier">
+    <xs:restriction base="xs:string"><xs:pattern value="[A-Za-z_][A-Za-z0-9_]*"/></xs:restriction>
+  </xs:simpleType>
+  <xs:element name="gateway">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element name="binding" minOccurs="1" maxOccurs="unbounded">
+          <xs:complexType>
+            <xs:attribute name="id" type="identifier" use="required"/>
+            <xs:attribute name="symbol" type="identifier" use="required"/>
+            <xs:attribute name="type" type="xs:string" use="required"/>
+            <xs:attribute name="schema" type="xs:string" use="required"/>
+            <xs:attribute name="fingerprint" type="xs:string" use="required"/>
+          </xs:complexType>
+        </xs:element>
+        <xs:element name="connection" minOccurs="1" maxOccurs="unbounded">
+          <xs:complexType>
+            <xs:sequence>
+              <xs:element name="stream" minOccurs="1" maxOccurs="unbounded">
+                <xs:complexType>
+                  <xs:attribute name="name" type="identifier" use="required"/>
+                  <xs:attribute name="endpoint" type="xs:string" use="required"/>
+                  <xs:attribute name="binding" type="identifier" use="required"/>
+                  <xs:attribute name="role" use="required"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="reader"/><xs:enumeration value="writer"/></xs:restriction></xs:simpleType></xs:attribute>
+                  <xs:attribute name="capacity" type="xs:positiveInteger" use="required"/>
+                  <xs:attribute name="preserve-source-timestamp" type="xs:boolean" default="false"/>
+                </xs:complexType>
+              </xs:element>
+            </xs:sequence>
+            <xs:attribute name="id" type="identifier" use="required"/>
+            <xs:attribute name="participant" type="xs:string" use="required"/>
+          </xs:complexType>
+        </xs:element>
+        <xs:element name="native-connection" minOccurs="0" maxOccurs="unbounded">
+          <xs:complexType>
+            <xs:sequence>
+              <xs:element name="stream" minOccurs="1" maxOccurs="unbounded">
+                <xs:complexType>
+                  <xs:attribute name="name" type="identifier" use="required"/>
+                  <xs:attribute name="endpoint" type="identifier" use="required"/>
+                  <xs:attribute name="binding" type="identifier" use="required"/>
+                  <xs:attribute name="role" use="required"><xs:simpleType><xs:restriction base="xs:string"><xs:enumeration value="reader"/><xs:enumeration value="writer"/></xs:restriction></xs:simpleType></xs:attribute>
+                  <xs:attribute name="capacity" type="xs:positiveInteger" use="required"/>
+                </xs:complexType>
+              </xs:element>
+            </xs:sequence>
+            <xs:attribute name="id" type="identifier" use="required"/>
+            <xs:attribute name="adapter" type="identifier" use="required"/>
+            <xs:attribute name="receive-budget" type="xs:positiveInteger" use="required"/>
+            <xs:attribute name="write-capacity" type="xs:positiveInteger" use="required"/>
+          </xs:complexType>
+        </xs:element>
+        <xs:element name="route" minOccurs="0" maxOccurs="unbounded">
+          <xs:complexType>
+            <xs:attribute name="id" type="identifier" use="required"/>
+            <xs:attribute name="input" type="xs:string" use="required"/>
+            <xs:attribute name="output" type="xs:string" use="required"/>
+          </xs:complexType>
+        </xs:element>
+      </xs:sequence>
+      <xs:attribute name="dds" type="xs:string" use="required"/>
+      <xs:attribute name="route-budget" type="xs:positiveInteger" use="required"/>
+      <xs:attribute name="sample-budget" type="xs:positiveInteger" use="required"/>
+      <xs:attribute name="diagnostic-period-steps" type="xs:nonNegativeInteger" default="0"/>
+    </xs:complexType>
+  </xs:element>
+</xs:schema>

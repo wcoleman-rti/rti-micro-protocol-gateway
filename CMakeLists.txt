@@ -1,0 +1,75 @@
+cmake_minimum_required(VERSION 3.24)
+project(protocol_gateway VERSION 0.1.0 LANGUAGES C)
+
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS OFF)
+list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+
+option(PGW_BUILD_TESTS "Build requirement verification tests" ON)
+option(PGW_BUILD_EXAMPLES "Build runnable examples" ON)
+option(PGW_BUILD_BENCHMARKS "Build benchmark workloads" OFF)
+option(PGW_ENABLE_CAN "Build the CAN adapter" ON)
+option(PGW_ENABLE_DDS "Build the Connext Micro DDS adapter" ON)
+option(PGW_ENABLE_RUNNER "Build core's optional initialization-created scheduler runner" ON)
+option(PGW_WARNINGS_AS_ERRORS "Treat gateway compiler warnings as errors" OFF)
+set(PGW_PYTHON_EXECUTABLE "" CACHE FILEPATH
+    "Explicit host Python interpreter for all generators/tests (e.g. .venv/bin/python)")
+if(PGW_PYTHON_EXECUTABLE)
+    get_filename_component(PGW_PYTHON_EXECUTABLE "${PGW_PYTHON_EXECUTABLE}" ABSOLUTE
+        BASE_DIR "${PROJECT_SOURCE_DIR}")
+    set(Python3_EXECUTABLE "${PGW_PYTHON_EXECUTABLE}" CACHE FILEPATH
+        "Python interpreter selected by PGW_PYTHON_EXECUTABLE" FORCE)
+endif()
+
+include(PGWMicro)
+include(PGWCodegen)
+include(PGWProvenance)
+pgw_generate_provenance()
+add_library(pgw_build_options INTERFACE)
+add_library(PGW::build_options ALIAS pgw_build_options)
+target_compile_options(pgw_build_options INTERFACE
+    "$<$<C_COMPILER_ID:GNU,Clang>:-Wall;-Wextra;-Wpedantic>"
+    "$<$<AND:$<BOOL:${PGW_WARNINGS_AS_ERRORS}>,$<C_COMPILER_ID:GNU,Clang>>:-Werror>")
+
+if(PGW_BUILD_TESTS)
+    enable_testing()
+    add_test(NAME build.rti_launcher COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/tests/test_rti_launcher.py"
+        "${PGW_GENERATOR_WRAPPER}" "${PGW_JREHOME}"
+        "${PGW_GENERATOR_WARNINGS_AS_ERRORS}" "${PGW_GENERATOR_WARNING_ALLOW_REGEX}")
+endif()
+
+function(pgw_add_component path)
+    if(EXISTS "${PROJECT_SOURCE_DIR}/${path}/CMakeLists.txt")
+        add_subdirectory("${path}")
+    endif()
+endfunction()
+
+pgw_add_component(core)
+pgw_add_component(tools)
+if(PGW_ENABLE_CAN)
+    pgw_add_component(adapters/can)
+endif()
+if(PGW_ENABLE_DDS)
+    pgw_add_component(adapters/dds_micro)
+endif()
+if(EXISTS "${PROJECT_SOURCE_DIR}/bindings/CMakeLists.txt")
+    pgw_add_component(bindings)
+else()
+    pgw_add_component(bindings/signal)
+endif()
+if(PGW_BUILD_EXAMPLES)
+    pgw_add_component(examples)
+endif()
+if(PGW_BUILD_TESTS)
+    pgw_add_component(tests)
+    if(PGW_ENABLE_RUNNER AND TARGET pgw_runtime_test AND TARGET pgw_allocation_probe)
+        target_link_libraries(pgw_runtime_test PRIVATE pgw_allocation_probe)
+        target_compile_definitions(pgw_runtime_test PRIVATE PGW_TEST_ALLOCATION_PROBE=1)
+    endif()
+endif()
+if(PGW_BUILD_BENCHMARKS)
+    pgw_add_component(benchmarks)
+endif()
+include(PGWInstall)
