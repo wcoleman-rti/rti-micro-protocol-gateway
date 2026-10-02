@@ -1,4 +1,16 @@
-#include "pgw/dds_micro.h"
+/*
+ * (c) 2026 Copyright, Real-Time Innovations, Inc. All rights reserved.
+ *
+ * RTI grants Licensee a license to use, modify, compile, and create derivative
+ * works of the Software. Licensee has the right to distribute object form only
+ * for use with RTI products. The Software is provided "as is", with no warranty
+ * of any type, including any warranty for fitness for any purpose. RTI is under no
+ * obligation to maintain or support the Software. RTI shall not be liable for any
+ * incidental or consequential damages arising out of the use or inability to use
+ * the software.
+ */
+
+#include "pgw/dds/connext_micro.h"
 #include "pgw/can_memory.h"
 #include "pgw_codec.h"
 #include "probe_binding.h"
@@ -152,8 +164,8 @@ int main(void)
         CHECK(PGW_RepresentationSeq_loan_contiguous(&binding_sequence, binding_slots, 0, 1));
         CHECK(PGW_Registry_initialize(&registry, &adapter_sequence, &binding_sequence) == PGW_OK);
         CHECK(PGW_DDS_register_adapter(&registry) == PGW_OK);
-        CHECK(PGW_Registry_find_adapter(&registry, "dds_micro") == &PGW_DDSMicroAdapter);
-        CHECK(PGW_DDSMicroAdapter.connection == &PGW_DDSMicroConnection);
+        CHECK(PGW_Registry_find_adapter(&registry, "connext_micro") == &PGW_DDSConnextMicroAdapter);
+        CHECK(PGW_DDSConnextMicroAdapter.connection == &PGW_DDSConnextMicroConnection);
         CHECK(PGW_Registry_finalize(&registry) == PGW_OK);
         CHECK(PGW_AdapterSeq_unloan(&adapter_sequence));
         CHECK(PGW_AdapterSeq_finalize(&adapter_sequence));
@@ -184,18 +196,18 @@ int main(void)
         PGW_Connection *unused = NULL;
         size_t used = arena.used;
         endpoint_storage[0].binding = NULL;
-        CHECK(PGW_DDSMicroAdapter.create(&invalid, &arena, &unused) == PGW_INVALID);
+        CHECK(PGW_DDSConnextMicroAdapter.create(&invalid, &arena, &unused) == PGW_INVALID);
         CHECK(arena.used == used && !unused);
         endpoint_storage[0] = *PGW_DDSEndpointConfigSeq_get_reference(
             &pgw_config_gateway.endpoints, 0);
         endpoint_storage[0].entity_name = "In::CommandPowertrain";
-        CHECK(PGW_DDSMicroAdapter.create(&invalid, &arena, &unused) == PGW_INVALID);
+        CHECK(PGW_DDSConnextMicroAdapter.create(&invalid, &arena, &unused) == PGW_INVALID);
         CHECK(arena.used == used && !unused);
         CHECK(PGW_DDSEndpointConfigSeq_unloan(&invalid.endpoints));
         CHECK(PGW_DDSEndpointConfigSeq_finalize(&invalid.endpoints));
     }
     CHECK(PGW_DDS_create(&pgw_config_gateway, &arena, &gateway) == PGW_OK);
-    CHECK(PGW_DDSMicroAdapter.create(&pgw_config_companion, &arena, &companion) == PGW_OK);
+    CHECK(PGW_DDSConnextMicroAdapter.create(&pgw_config_companion, &arena, &companion) == PGW_OK);
     CHECK(PGW_DDS_effective_resources(gateway, &resources) == PGW_OK);
     CHECK(resources.local_readers > 0 && resources.local_writers > 0 &&
           resources.remote_readers > 0 && resources.remote_writers > 0 &&
@@ -241,7 +253,7 @@ int main(void)
         atomic_store(&frozen, false);
         atomic_store(&runtime_arena_calls, 0);
     }
-    CHECK(PGW_DDSMicroAdapter.connection->reader(companion, "state_powertrain", &reader) == PGW_OK);
+    CHECK(PGW_DDSConnextMicroAdapter.connection->reader(companion, "state_powertrain", &reader) == PGW_OK);
     CHECK(PGW_SampleSeq_initialize(&loan));
     CHECK(PGW_WriteResultSeq_initialize(&result_sequence));
     CHECK(PGW_WriteResultSeq_loan_contiguous(&result_sequence, &result, 0, 1));
@@ -280,7 +292,7 @@ int main(void)
                 }
             }
             CHECK(reader.iface->read(reader.state, &loan, 8) == PGW_LOAN_ERROR);
-            CHECK(PGW_DDSMicroAdapter.connection->close(companion) == PGW_LOAN_ERROR);
+            CHECK(PGW_DDSConnextMicroAdapter.connection->close(companion) == PGW_LOAN_ERROR);
             CHECK(reader.iface->return_loan(reader.state, &loan) == PGW_OK);
             CHECK(reader.iface->return_loan(reader.state, &loan) == PGW_LOAN_ERROR);
             received = state_keys == 15u;
@@ -293,9 +305,9 @@ int main(void)
         PGW_StreamWriter exporter;
         PGW_StreamReader subscriber;
         PGW_CounterSnapshot snapshot;
-        CHECK(PGW_DDSMicroAdapter.connection->writer(gateway, "diagnostics", &exporter) == PGW_OK);
+        CHECK(PGW_DDSConnextMicroAdapter.connection->writer(gateway, "diagnostics", &exporter) == PGW_OK);
         CHECK(exporter.iface->bind(exporter.state, PGW_diagnostics_binding.representation) == PGW_OK);
-        CHECK(PGW_DDSMicroAdapter.connection->reader(companion, "diagnostics", &subscriber) == PGW_OK);
+        CHECK(PGW_DDSConnextMicroAdapter.connection->reader(companion, "diagnostics", &subscriber) == PGW_OK);
         CHECK(PGW_Counters_snapshot(&routes[0].counters, 1, 17, 0, &snapshot));
         CHECK(snapshot.values[PGW_COUNT_ACCEPTED] == 4);
         snapshot.entity_id = 5;
@@ -328,7 +340,7 @@ int main(void)
         CHECK(received);
     }
 #endif
-    CHECK(PGW_DDSMicroAdapter.connection->writer(companion, "command_powertrain", &command) == PGW_OK);
+    CHECK(PGW_DDSConnextMicroAdapter.connection->writer(companion, "command_powertrain", &command) == PGW_OK);
     CHECK(command.iface->bind(command.state, &signal_rep) == PGW_OK);
     CHECK(PGW_SampleSeq_set_length(&loan, 1));
     refs[0] = (const PGW_Sample *)&update;
@@ -364,8 +376,8 @@ int main(void)
         }
         CHECK(received);
     }
-    CHECK(PGW_DDSMicroAdapter.connection->writer(gateway, "probe", &probe_writer) == PGW_OK);
-    CHECK(PGW_DDSMicroAdapter.connection->reader(companion, "probe", &probe_reader) == PGW_OK);
+    CHECK(PGW_DDSConnextMicroAdapter.connection->writer(gateway, "probe", &probe_writer) == PGW_OK);
+    CHECK(PGW_DDSConnextMicroAdapter.connection->reader(companion, "probe", &probe_reader) == PGW_OK);
     probe_rep.access = &probe_access;
     CHECK(probe_writer.iface->bind(probe_writer.state, &signal_rep) == PGW_UNSUPPORTED);
     probe_rep.access = &probe_payload_only;
@@ -467,8 +479,8 @@ int main(void)
     CHECK(PGW_CANConfig_finalize(&can_config) == PGW_OK);
     CHECK(PGW_CANCategorySeq_unloan(&category_sequence));
     CHECK(PGW_CANCategorySeq_finalize(&category_sequence));
-    CHECK(PGW_DDSMicroAdapter.connection->close(companion) == PGW_OK);
-    CHECK(PGW_DDSMicroAdapter.connection->close(gateway) == PGW_OK);
+    CHECK(PGW_DDSConnextMicroAdapter.connection->close(companion) == PGW_OK);
+    CHECK(PGW_DDSConnextMicroAdapter.connection->close(gateway) == PGW_OK);
     free(memory);
     printf("Arena backing: fixed initialization malloc bytes=%zu; freed after shutdown\n",
            memory_capacity);

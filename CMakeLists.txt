@@ -1,3 +1,15 @@
+#
+# (c) 2026 Copyright, Real-Time Innovations, Inc. All rights reserved.
+#
+# RTI grants Licensee a license to use, modify, compile, and create derivative
+# works of the Software. Licensee has the right to distribute object form only
+# for use with RTI products. The Software is provided "as is", with no warranty
+# of any type, including any warranty for fitness for any purpose. RTI is under no
+# obligation to maintain or support the Software. RTI shall not be liable for any
+# incidental or consequential damages arising out of the use or inability to use
+# the software.
+#
+
 cmake_minimum_required(VERSION 3.24)
 project(protocol_gateway VERSION 0.1.0 LANGUAGES C)
 
@@ -52,7 +64,7 @@ if(PGW_ENABLE_CAN)
     pgw_add_component(adapters/can)
 endif()
 if(PGW_ENABLE_DDS)
-    pgw_add_component(adapters/dds_micro)
+    pgw_add_component(adapters/dds/connext_micro)
 endif()
 if(EXISTS "${PROJECT_SOURCE_DIR}/bindings/CMakeLists.txt")
     pgw_add_component(bindings)

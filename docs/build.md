@@ -1,3 +1,15 @@
+<!--
+  (c) 2026 Copyright, Real-Time Innovations, Inc. All rights reserved.
+
+  RTI grants Licensee a license to use, modify, compile, and create derivative
+  works of the Software. Licensee has the right to distribute object form only
+  for use with RTI products. The Software is provided "as is", with no warranty
+  of any type, including any warranty for fitness for any purpose. RTI is under no
+  obligation to maintain or support the Software. RTI shall not be liable for any
+  incidental or consequential damages arising out of the use or inability to use
+  the software.
+-->
+
 # Building with installed Connext Micro
 
 ## Prerequisites
@@ -206,10 +218,11 @@ Configure with `-DCMAKE_PREFIX_PATH=/path/to/package-prefix` and the selected
 external SDK root, e.g. `-DRTIMEHOME=/path/to/rti_connext_dds_micro-4.3.0`. The
 installed package supplies its required PIL/PSL/target names. It discovers RTI archives
 externally; it contains only PGW archives/public headers and the three licensed
-CMake utility modules, not RTI archives or SDK implementations. Runtime-only
+CMake utility modules, not RTI archives or SDK implementations. The project
+license is installed at `${CMAKE_INSTALL_DATADIR}/pgw/LICENSE`. Runtime-only
 consumers need neither Python nor Java. Exported names preserve `PGW::core`,
 `PGW::diagnostics_local`, `PGW::adapter_can`,
-`PGW::can_memory`, `PGW::can_socketcan`, `PGW::adapter_dds_micro`, and
+`PGW::can_memory`, `PGW::can_socketcan`, `PGW::adapter_dds_connext_micro`, and
 `PGW::binding_signal`, when those components were built. The infrastructure and
 optional DDS convenience targets are also exported for dependency closure.
 

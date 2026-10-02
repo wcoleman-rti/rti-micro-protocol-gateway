@@ -1,5 +1,17 @@
+/*
+ * (c) 2026 Copyright, Real-Time Innovations, Inc. All rights reserved.
+ *
+ * RTI grants Licensee a license to use, modify, compile, and create derivative
+ * works of the Software. Licensee has the right to distribute object form only
+ * for use with RTI products. The Software is provided "as is", with no warranty
+ * of any type, including any warranty for fitness for any purpose. RTI is under no
+ * obligation to maintain or support the Software. RTI shall not be liable for any
+ * incidental or consequential damages arising out of the use or inability to use
+ * the software.
+ */
+
 #define _POSIX_C_SOURCE 200809L
-#include "pgw/dds_micro.h"
+#include "pgw/dds/connext_micro.h"
 #include "pgw/can_memory.h"
 #include "pgw/runtime.h"
 #include "pgw/compiled_config.h"
@@ -312,10 +324,10 @@ int main(int argc, char **argv)
     assert(PGW_Service_initialize(&service) == PGW_OK);
     PGW_StreamReader state_reader, probe_reader;
     PGW_StreamWriter command_writer, probe_writer;
-    assert(PGW_DDSMicroConnection.reader(companion, "state_powertrain", &state_reader) == PGW_OK);
-    assert(PGW_DDSMicroConnection.writer(companion, "command_powertrain", &command_writer) == PGW_OK);
-    assert(PGW_DDSMicroConnection.reader(companion, "probe", &probe_reader) == PGW_OK);
-    assert(PGW_DDSMicroConnection.writer(gateway, "probe", &probe_writer) == PGW_OK);
+    assert(PGW_DDSConnextMicroConnection.reader(companion, "state_powertrain", &state_reader) == PGW_OK);
+    assert(PGW_DDSConnextMicroConnection.writer(companion, "command_powertrain", &command_writer) == PGW_OK);
+    assert(PGW_DDSConnextMicroConnection.reader(companion, "probe", &probe_reader) == PGW_OK);
+    assert(PGW_DDSConnextMicroConnection.writer(gateway, "probe", &probe_writer) == PGW_OK);
     PGW_Representation signal_rep = {&schema, "benchmark.signal", sizeof(SignalSample),
                                      _Alignof(SignalSample), &signal_access};
     PGW_Representation probe_rep = *PGW_probe_binding.representation;
@@ -337,9 +349,9 @@ int main(int argc, char **argv)
     PGW_StreamReader diagnostic_reader;
     PGW_SampleSeq diagnostic_loan;
     PGW_SampleRef diagnostic_refs[4];
-    assert(PGW_DDSMicroConnection.writer(gateway, "diagnostics", &exporter) == PGW_OK);
+    assert(PGW_DDSConnextMicroConnection.writer(gateway, "diagnostics", &exporter) == PGW_OK);
     assert(exporter.iface->bind(exporter.state, PGW_diagnostics_binding.representation) == PGW_OK);
-    assert(PGW_DDSMicroConnection.reader(companion, "diagnostics", &diagnostic_reader) == PGW_OK);
+    assert(PGW_DDSConnextMicroConnection.reader(companion, "diagnostics", &diagnostic_reader) == PGW_OK);
     initialize_sequence(&diagnostic_loan, diagnostic_refs, 4);
 #endif
     size_t route_capacities[] = {8, 8, 8, 8};
@@ -526,8 +538,8 @@ int main(int argc, char **argv)
     assert(PGW_CANConfig_finalize(&can_config) == PGW_OK);
     assert(PGW_CANCategorySeq_unloan(&category_sequence));
     assert(PGW_CANCategorySeq_finalize(&category_sequence));
-    assert(PGW_DDSMicroConnection.close(companion) == PGW_OK);
-    assert(PGW_DDSMicroConnection.close(gateway) == PGW_OK);
+    assert(PGW_DDSConnextMicroConnection.close(companion) == PGW_OK);
+    assert(PGW_DDSConnextMicroConnection.close(gateway) == PGW_OK);
     assert(PGW_DDSEndpointConfigSeq_unloan(&gateway_config.endpoints));
     assert(PGW_DDSEndpointConfigSeq_finalize(&gateway_config.endpoints));
     free(storage);

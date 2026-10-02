@@ -1,3 +1,15 @@
+#
+# (c) 2026 Copyright, Real-Time Innovations, Inc. All rights reserved.
+#
+# RTI grants Licensee a license to use, modify, compile, and create derivative
+# works of the Software. Licensee has the right to distribute object form only
+# for use with RTI products. The Software is provided "as is", with no warranty
+# of any type, including any warranty for fitness for any purpose. RTI is under no
+# obligation to maintain or support the Software. RTI shall not be liable for any
+# incidental or consequential damages arising out of the use or inability to use
+# the software.
+#
+
 include_guard(GLOBAL)
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
@@ -8,7 +20,7 @@ endif()
 set(_pgw_install_targets "")
 set(PGW_INSTALLED_COMPONENTS "")
 foreach(_component IN ITEMS core diagnostics_local
-        adapter_can can_memory can_socketcan adapter_dds_micro binding_signal
+        adapter_can can_memory can_socketcan adapter_dds_connext_micro binding_signal
         micro_infrastructure micro_dds build_options)
     if(TARGET pgw_${_component})
         set_target_properties(pgw_${_component} PROPERTIES EXPORT_NAME "${_component}")
@@ -38,10 +50,12 @@ if(TARGET pgw_adapter_can)
     install(DIRECTORY "${PROJECT_SOURCE_DIR}/adapters/can/include/"
         DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}" FILES_MATCHING PATTERN "*.h")
 endif()
-if(TARGET pgw_adapter_dds_micro)
-    install(DIRECTORY "${PROJECT_SOURCE_DIR}/adapters/dds_micro/include/"
+if(TARGET pgw_adapter_dds_connext_micro)
+    install(DIRECTORY "${PROJECT_SOURCE_DIR}/adapters/dds/connext_micro/include/"
         DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}" FILES_MATCHING PATTERN "*.h")
 endif()
+install(FILES "${PROJECT_SOURCE_DIR}/LICENSE"
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/pgw")
 if(TARGET pgw_binding_signal)
     install(FILES "${PROJECT_SOURCE_DIR}/bindings/signal/include/pgw/signal.h"
         DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/pgw")

@@ -1,5 +1,17 @@
-#ifndef PGW_DDS_MICRO_H
-#define PGW_DDS_MICRO_H
+/*
+ * (c) 2026 Copyright, Real-Time Innovations, Inc. All rights reserved.
+ *
+ * RTI grants Licensee a license to use, modify, compile, and create derivative
+ * works of the Software. Licensee has the right to distribute object form only
+ * for use with RTI products. The Software is provided "as is", with no warranty
+ * of any type, including any warranty for fitness for any purpose. RTI is under no
+ * obligation to maintain or support the Software. RTI shall not be liable for any
+ * incidental or consequential damages arising out of the use or inability to use
+ * the software.
+ */
+
+#ifndef PGW_DDS_CONNEXT_MICRO_H
+#define PGW_DDS_CONNEXT_MICRO_H
 #include "pgw/core.h"
 #include "rti_me_c.h"
 #include "app_gen/app_gen.h"
@@ -82,6 +94,6 @@ PGW_Status PGW_DDS_statistics(PGW_Connection *, const char *, PGW_DDSStatistics 
 PGW_Status PGW_DDS_metadata(const PGW_Representation *, const PGW_Sample *,
                           PGW_DDSMetadata *);
 DDS_DomainParticipant *PGW_DDS_participant(PGW_Connection *);
-extern const PGW_AdapterI PGW_DDSMicroAdapter;
-extern const PGW_ConnectionI PGW_DDSMicroConnection;
+extern const PGW_AdapterI PGW_DDSConnextMicroAdapter;
+extern const PGW_ConnectionI PGW_DDSConnextMicroConnection;
 #endif

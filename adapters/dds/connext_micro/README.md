@@ -1,8 +1,21 @@
+<!--
+  (c) 2026 Copyright, Real-Time Innovations, Inc. All rights reserved.
+
+  RTI grants Licensee a license to use, modify, compile, and create derivative
+  works of the Software. Licensee has the right to distribute object form only
+  for use with RTI products. The Software is provided "as is", with no warranty
+  of any type, including any warranty for fitness for any purpose. RTI is under no
+  obligation to maintain or support the Software. RTI shall not be liable for any
+  incidental or consequential damages arising out of the use or inability to use
+  the software.
+-->
+
 # Connext Micro adapter
 
-`PGW::adapter_dds_micro` uses the installed Micro 4.3.0 C, Appgen, DPDE,
+`PGW::adapter_dds_connext_micro` uses the installed Micro 4.3.0 C, Appgen, DPDE,
 history, UDP, and OSAPI libraries. It neither creates replacement endpoints
 nor interprets unknown discovered types.
+The public API is declared in `<pgw/dds/connext_micro.h>`.
 
 It does not complete the public opaque `PGW_Connection` or `PGW_Sample` tags.
 Connection/sample storage uses distinct private `PGW_DDSConnection` and
@@ -29,12 +42,12 @@ type.
    resource-adjustment mode. Never pass `-dontUpdateResourceLimits`.
 3. Call `PGW_DDS_register_model(APPGEN_get_library_seq())` once.
 4. Supply immutable `PGW_DDSConfig` and endpoint/type-binding descriptors to
-   `PGW_DDSMicroAdapter.create`. The adapter instantiates the named participant
+   `PGW_DDSConnextMicroAdapter.create`. The adapter instantiates the named participant
    and adopts named readers/writers.
 5. Bind the source representation before writing.
 
-The built-in immutable descriptors `PGW_DDSMicroAdapter` and
-`PGW_DDSMicroConnection` are public. `PGW_DDS_register_adapter(registry)` registers
+The built-in immutable descriptors `PGW_DDSConnextMicroAdapter` and
+`PGW_DDSConnextMicroConnection` are public. `PGW_DDS_register_adapter(registry)` registers
 the adapter in the core's static registry without creating DDS entities.
 Applications can construct through the registered adapter callback or the typed
 `PGW_DDS_create(config, arena, out)` convenience function; both share the same

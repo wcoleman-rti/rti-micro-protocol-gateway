@@ -1,4 +1,16 @@
-#include "pgw/dds_micro.h"
+/*
+ * (c) 2026 Copyright, Real-Time Innovations, Inc. All rights reserved.
+ *
+ * RTI grants Licensee a license to use, modify, compile, and create derivative
+ * works of the Software. Licensee has the right to distribute object form only
+ * for use with RTI products. The Software is provided "as is", with no warranty
+ * of any type, including any warranty for fitness for any purpose. RTI is under no
+ * obligation to maintain or support the Software. RTI shall not be liable for any
+ * incidental or consequential damages arising out of the use or inability to use
+ * the software.
+ */
+
+#include "pgw/dds/connext_micro.h"
 #include "pgw/can_socketcan.h"
 #include "pgw/can_memory.h"
 #include "pgw_codec.h"
@@ -121,7 +133,7 @@ int main(int argc, char **argv)
     if (!memory) goto done;
     arena.storage = memory;
     if (PGW_DDS_register_model(APPGEN_get_library_seq()) != PGW_OK ||
-        PGW_DDSMicroAdapter.create(&pgw_config_gateway, &arena, &dds) != PGW_OK ||
+        PGW_DDSConnextMicroAdapter.create(&pgw_config_gateway, &arena, &dds) != PGW_OK ||
         PGW_CANAdapter.create(&config, &arena, &can) != PGW_OK) goto done;
     {
         PGW_DDSResources resources;
@@ -144,7 +156,7 @@ int main(int argc, char **argv)
         }
     }
 #if PGW_DDS_DIAGNOSTICS
-    if (PGW_DDSMicroAdapter.connection->writer(dds, "diagnostics", &exporter) != PGW_OK ||
+    if (PGW_DDSConnextMicroAdapter.connection->writer(dds, "diagnostics", &exporter) != PGW_OK ||
         exporter.iface->bind(exporter.state, PGW_diagnostics_binding.representation) != PGW_OK)
         goto done;
 #endif
@@ -246,7 +258,7 @@ done:
         closed = false;
     if (socket_config.filters_initialized &&
         PGW_CANSocketConfig_finalize(&socket_config) != PGW_OK) closed = false;
-    if (dds && PGW_DDSMicroAdapter.connection->close(dds) != PGW_OK) closed = false;
+    if (dds && PGW_DDSConnextMicroAdapter.connection->close(dds) != PGW_OK) closed = false;
     if (closed) free(memory);
     else failed = 1;
     return failed;

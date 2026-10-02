@@ -1,3 +1,15 @@
+<!--
+  (c) 2026 Copyright, Real-Time Innovations, Inc. All rights reserved.
+
+  RTI grants Licensee a license to use, modify, compile, and create derivative
+  works of the Software. Licensee has the right to distribute object form only
+  for use with RTI products. The Software is provided "as is", with no warranty
+  of any type, including any warranty for fitness for any purpose. RTI is under no
+  obligation to maintain or support the Software. RTI shall not be liable for any
+  incidental or consequential damages arising out of the use or inability to use
+  the software.
+-->
+
 # DBC signal generator
 
 Use the pinned build-time parser in the repository-local environment:
@@ -96,7 +108,7 @@ not stale generated source files.
 `bindings/signal/src/dds_binding.c` is separate from the pure codec and native
 header-only target. Compile it alongside generated `signals.c`,
 `signalsPlugin.c`, `signalsSupport.c`, and `pgw_codec.c`; link
-`PGW::adapter_dds_micro`. Include `<pgw/signal_dds.h>` for the adapter-owned
+`PGW::adapter_dds_connext_micro`. Include `<pgw/signal_dds.h>` for the adapter-owned
 `PGW_DDSBinding` interface. `PGW_signal_dds_binding` registers all inventory
 keys; `PGW_signal_dds_binding_<category>` registers only its category keys, so
 category writers can retain category-sized key/history bounds. All share the

@@ -1,9 +1,21 @@
+/*
+ * (c) 2026 Copyright, Real-Time Innovations, Inc. All rights reserved.
+ *
+ * RTI grants Licensee a license to use, modify, compile, and create derivative
+ * works of the Software. Licensee has the right to distribute object form only
+ * for use with RTI products. The Software is provided "as is", with no warranty
+ * of any type, including any warranty for fitness for any purpose. RTI is under no
+ * obligation to maintain or support the Software. RTI shall not be liable for any
+ * incidental or consequential damages arising out of the use or inability to use
+ * the software.
+ */
+
 #include <pgw/core.h>
 #include <pgw/runtime.h>
 #include <pgw/local_sink.h>
 #include <pgw/can_memory.h>
 #include <pgw/can_socketcan.h>
-#include <pgw/dds_micro.h>
+#include <pgw/dds/connext_micro.h>
 #include <pgw/signal.h>
 #include <osapi/osapi_system.h>
 
@@ -76,7 +88,7 @@ int main(void)
                                                representation_refs, 0, 1) ||
         PGW_Registry_initialize(&registry, &adapter_sequence, &representation_sequence) != PGW_OK ||
         PGW_Registry_register_adapter(&registry, &PGW_CANAdapter) != PGW_OK ||
-        PGW_Registry_register_adapter(&registry, &PGW_DDSMicroAdapter) != PGW_OK ||
+        PGW_Registry_register_adapter(&registry, &PGW_DDSConnextMicroAdapter) != PGW_OK ||
         PGW_AdapterSeq_get_length(&registry.adapters) != 2 ||
         PGW_Registry_finalize(&registry) != PGW_OK ||
         !PGW_AdapterSeq_unloan(&adapter_sequence) ||
@@ -87,7 +99,7 @@ int main(void)
     }
     if (PGW_CANMemory_initialize(&memory, rx, 1, tx, 1) != PGW_OK ||
         PGW_CANAdapter.version != PGW_ABI_VERSION ||
-        PGW_DDSMicroAdapter.version != PGW_ABI_VERSION ||
+        PGW_DDSConnextMicroAdapter.version != PGW_ABI_VERSION ||
         PGW_DDS_participant(NULL) != NULL) {
         return 2;
     }

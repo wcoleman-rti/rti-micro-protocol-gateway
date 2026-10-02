@@ -1,4 +1,16 @@
 <?xml version="1.0"?>
+<!--
+  (c) 2026 Copyright, Real-Time Innovations, Inc. All rights reserved.
+
+  RTI grants Licensee a license to use, modify, compile, and create derivative
+  works of the Software. Licensee has the right to distribute object form only
+  for use with RTI products. The Software is provided "as is", with no warranty
+  of any type, including any warranty for fitness for any purpose. RTI is under no
+  obligation to maintain or support the Software. RTI shall not be liable for any
+  incidental or consequential damages arising out of the use or inability to use
+  the software.
+-->
+
 <gateway dds="dds.xml" route-budget="4" sample-budget="8" diagnostic-period-steps="1000">
   <binding id="powertrain" symbol="PGW_signal_dds_binding_powertrain" type="PGW_DDS::Signal" schema="pgw.signal" fingerprint="@fingerprint@"/>
   <binding id="auxiliary" symbol="PGW_signal_dds_binding_auxiliary" type="PGW_DDS::Signal" schema="pgw.signal" fingerprint="@fingerprint@"/>

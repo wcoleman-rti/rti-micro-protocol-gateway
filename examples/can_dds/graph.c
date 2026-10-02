@@ -1,5 +1,17 @@
+/*
+ * (c) 2026 Copyright, Real-Time Innovations, Inc. All rights reserved.
+ *
+ * RTI grants Licensee a license to use, modify, compile, and create derivative
+ * works of the Software. Licensee has the right to distribute object form only
+ * for use with RTI products. The Software is provided "as is", with no warranty
+ * of any type, including any warranty for fitness for any purpose. RTI is under no
+ * obligation to maintain or support the Software. RTI shall not be liable for any
+ * incidental or consequential damages arising out of the use or inability to use
+ * the software.
+ */
+
 #include "graph.h"
-#include "pgw/dds_micro.h"
+#include "pgw/dds/connext_micro.h"
 #include "pgw/can.h"
 #include "pgw/compiled_config.h"
 #include <string.h>
@@ -62,7 +74,7 @@ PGW_Status PGW_example_attach_routes(PGW_Connection *can, PGW_Connection *dds,
         PGW_Status status;
         target->id = route->id;
         if (!strcmp(route->input_connection, "gateway"))
-            status = PGW_DDSMicroAdapter.connection->reader(dds, route->input_stream,
+            status = PGW_DDSConnextMicroAdapter.connection->reader(dds, route->input_stream,
                                                            &target->reader);
         else {
             const char *endpoint = native_endpoint(route->input_connection, route->input_stream, true);
@@ -71,7 +83,7 @@ PGW_Status PGW_example_attach_routes(PGW_Connection *can, PGW_Connection *dds,
         }
         if (status != PGW_OK) return status;
         if (!strcmp(route->output_connection, "gateway"))
-            status = PGW_DDSMicroAdapter.connection->writer(dds, route->output_stream,
+            status = PGW_DDSConnextMicroAdapter.connection->writer(dds, route->output_stream,
                                                            &target->writer);
         else {
             const char *endpoint = native_endpoint(route->output_connection, route->output_stream, false);

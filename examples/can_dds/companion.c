@@ -1,4 +1,16 @@
-#include "pgw/dds_micro.h"
+/*
+ * (c) 2026 Copyright, Real-Time Innovations, Inc. All rights reserved.
+ *
+ * RTI grants Licensee a license to use, modify, compile, and create derivative
+ * works of the Software. Licensee has the right to distribute object form only
+ * for use with RTI products. The Software is provided "as is", with no warranty
+ * of any type, including any warranty for fitness for any purpose. RTI is under no
+ * obligation to maintain or support the Software. RTI shall not be liable for any
+ * incidental or consequential damages arising out of the use or inability to use
+ * the software.
+ */
+
+#include "pgw/dds/connext_micro.h"
 #include "pgw/signal.h"
 #include "ddsAppgen.h"
 #include "osapi/osapi_thread.h"
@@ -48,10 +60,10 @@ int main(int argc, char **argv)
     if (!storage) return 1;
     arena.storage = storage;
     if (PGW_DDS_register_model(APPGEN_get_library_seq()) != PGW_OK ||
-        PGW_DDSMicroAdapter.create(&pgw_config_companion, &arena, &connection) != PGW_OK)
+        PGW_DDSConnextMicroAdapter.create(&pgw_config_companion, &arena, &connection) != PGW_OK)
         goto done;
-    if (PGW_DDSMicroAdapter.connection->reader(connection, "state_powertrain", &reader) != PGW_OK ||
-        PGW_DDSMicroAdapter.connection->writer(connection, "command_powertrain", &writer) != PGW_OK ||
+    if (PGW_DDSConnextMicroAdapter.connection->reader(connection, "state_powertrain", &reader) != PGW_OK ||
+        PGW_DDSConnextMicroAdapter.connection->writer(connection, "command_powertrain", &writer) != PGW_OK ||
         !PGW_SampleSeq_initialize(&seq) ||
         !PGW_SampleSeq_loan_contiguous(&seq, refs, 0, 8) ||
         !PGW_WriteResultSeq_initialize(&result_sequence) ||
@@ -93,7 +105,7 @@ int main(int argc, char **argv)
     PGW_WriteResultSeq_finalize(&result_sequence);
     if (!observed || send) failed = 1;
 done:
-    if (connection && PGW_DDSMicroAdapter.connection->close(connection) != PGW_OK)
+    if (connection && PGW_DDSConnextMicroAdapter.connection->close(connection) != PGW_OK)
         return 1;
     free(storage);
     return failed;

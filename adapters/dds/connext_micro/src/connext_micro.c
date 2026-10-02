@@ -1,4 +1,16 @@
-#include "pgw/dds_micro.h"
+/*
+ * (c) 2026 Copyright, Real-Time Innovations, Inc. All rights reserved.
+ *
+ * RTI grants Licensee a license to use, modify, compile, and create derivative
+ * works of the Software. Licensee has the right to distribute object form only
+ * for use with RTI products. The Software is provided "as is", with no warranty
+ * of any type, including any warranty for fitness for any purpose. RTI is under no
+ * obligation to maintain or support the Software. RTI shall not be liable for any
+ * incidental or consequential damages arising out of the use or inability to use
+ * the software.
+ */
+
+#include "pgw/dds/connext_micro.h"
 #include "app_gen/app_gen_plugin.h"
 #include <limits.h>
 #include <string.h>
@@ -439,15 +451,15 @@ fail:
     arena->used = initial_used;
     return status;
 }
-const PGW_ConnectionI PGW_DDSMicroConnection = {
+const PGW_ConnectionI PGW_DDSConnextMicroConnection = {
     PGW_ABI_VERSION, sizeof(PGW_ConnectionI), get_reader, get_writer, close_connection
 };
-const PGW_AdapterI PGW_DDSMicroAdapter = {
-    PGW_ABI_VERSION, sizeof(PGW_AdapterI), "dds_micro", create_connection, &PGW_DDSMicroConnection
+const PGW_AdapterI PGW_DDSConnextMicroAdapter = {
+    PGW_ABI_VERSION, sizeof(PGW_AdapterI), "connext_micro", create_connection, &PGW_DDSConnextMicroConnection
 };
 PGW_Status PGW_DDS_register_adapter(PGW_Registry *registry)
 {
-    return PGW_Registry_register_adapter(registry, &PGW_DDSMicroAdapter);
+    return PGW_Registry_register_adapter(registry, &PGW_DDSConnextMicroAdapter);
 }
 PGW_Status PGW_DDS_create(const PGW_DDSConfig *config, PGW_Arena *arena,
                         PGW_Connection **out)
