@@ -48,7 +48,10 @@ Connext Micro and the gateway:
   binding before READY; a paired `write-view` callback translates the borrowed
   pair directly into the statically typed DDS sample without first copying the
   source into scratch storage. Neither callback may retain borrowed pointers.
-  The DDS service XML requires both callbacks for cross-schema translation.
+  Configure both callbacks for explicit view translation. A cross-schema
+  direct-native write is also possible when a binding opts into
+  `direct-native-write="true"` and the source and destination use the exact same
+  generated DDS type; that path does not require a translator.
   `PGW_UNSUPPORTED` from `bind-view` rejects the route before READY.
   `PGW_UNSUPPORTED` from `write-view` falls back to canonical copy/write only
   when schemas match; on a negotiated cross-schema route it becomes
@@ -96,8 +99,10 @@ type can be forwarded without semantic conversion. Callback-mode bindings must
 also name `validate-native`; the DDS adapter checks that callback before writing
 the borrowed sample. The adapter verifies source/destination generated type
 identity at bind time and on every borrowed view; schema names and topic names
-do not determine this exact generated-type match. A mismatch uses the negotiated
-sample-view writer or schema-compatible canonical conversion. The direct DDS
+do not determine this exact generated-type match. Separately generated type
+plugins are not assumed to have equivalent C layouts, even if their IDL fields
+look alike; use an explicit view translator or schema-compatible canonical
+conversion unless they share the exact generated type identity. The direct DDS
 writer call still performs the middleware's normal write/history/transport
 work.
 
@@ -106,13 +111,15 @@ alternating their order over repeated batches. The result is a target
 measurement for this signal type and QoS, not a universal DDS performance
 claim. `PGW_DDSStatistics` reports direct and converted write attempts.
 
-On the Linux6 developer target (Micro 4.3.0), five repeated runs of 50,000
-writes per path measured direct medians of 1677-1733 ns/sample and canonical
-medians of 1715-1803 ns/sample. The pooled medians were 1699 and 1737 ns/sample,
-respectively—about 2.2% apart, with overlapping run-to-run ranges and no
-demonstrated meaningful speedup. This benchmark holds one valid reader-loaned
-sample while measuring the writer-side path; it is not a full route throughput
-or WCET qualification.
+An earlier five-run Linux6/Micro 4.3.0 measurement of 50,000 writes per path
+recorded direct medians of 1,677–1,733 ns/sample and canonical medians of
+1,715–1,803 ns/sample; the pooled medians were 1,699 and 1,737 ns/sample.
+Those runs predate the final sample-view/bind-negotiation changes. A single
+current integration run measured 1,695 ns/sample direct and 1,843 ns/sample
+canonical. Neither the old multi-run measurements nor this single current run
+establish a repeatable improvement. This benchmark holds one valid
+reader-loaned sample while measuring the writer-side path; it is not a full
+route throughput or WCET qualification.
 
 With `PGW_ENABLE_ROUTE_LATENCY_METRICS=ON`, `dds.real_gateway` also measures
 real CAN-to-DDS route batches through the core with a deliberately different
@@ -123,12 +130,15 @@ write microbenchmark; its clock starts after CAN polling/decoding, before the
 route reader callback, and stops when the DDS writer callback returns. It
 excludes downstream subscriber delivery.
 
-On the Linux6 developer target (Micro 4.3.0), five runs of 1,000 four-signal
-batches per path produced median per-run average batch latencies of 12,283 ns
-for `write-view` and 12,298 ns for canonical fallback. The observed per-run
-ranges were 8,346-39,771 ns and 6,704-16,704 ns, respectively. These medians
-are effectively equal and the ranges show substantial run-to-run noise; this
-does not demonstrate a meaningful speedup.
+The current integration setup deliberately assigns the CAN route a different
+schema and checks the negotiated `write-view` path against canonical fallback.
+One current Linux6/Micro 4.3.0 validation run measured 12,162 ns and 12,146 ns
+per four-signal batch, respectively, with 4,000 writes accepted on each path.
+This is a correctness/instrumentation smoke test, not repeated performance
+qualification. The earlier five-run route comparison used the prior
+schema-compatible route setup and should not be treated as a measurement of
+this cross-schema configuration. Repeat comparable runs on the target of
+interest; no meaningful route-latency advantage has been established.
 
 ## Add a DDS topic or type
 

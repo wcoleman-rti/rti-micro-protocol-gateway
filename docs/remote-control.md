@@ -17,10 +17,21 @@
 Remote control is compile-time opt-in and requires the DDS adapter:
 
 ```sh
-cmake -S . -B build-control \
+cmake -S . -B build-control -DCMAKE_BUILD_TYPE=Release \
+  -DPGW_PYTHON_EXECUTABLE="$PWD/.venv/bin/python" \
+  -DRTIMEHOME="<installed Micro 4.3.0 SDK root>" \
+  -DRTIME_PIL_ARCH="<installed PIL architecture>" \
+  -DRTIME_PSL_ARCH="<installed PSL architecture>" \
+  -DRTIME_TARGET_NAME="<installed target name>" \
+  -DPGW_JREHOME="<installed Java 17 runtime>" \
   -DPGW_ENABLE_DDS=ON -DPGW_ENABLE_REMOTE_CONTROL=ON
 cmake --build build-control --parallel
+ctest --test-dir build-control --output-on-failure
 ```
+
+Create the local Python environment and select an installed SDK/JRE as
+described in the [build guide](build.md); the SDK, architecture, and JRE
+arguments are required even when only changing the feature option.
 
 The default is `PGW_ENABLE_REMOTE_CONTROL=OFF`; that build creates no control
 IDL, participant, endpoint, or command-processing path. In an opt-in build the
@@ -136,6 +147,11 @@ selected metric to 10 samples/second. A 1,000-step active gateway run emitted
 10 telemetry samples with zero telemetry read/write failures. This is a target
 measurement for the one-metric example, not a WCET claim or a ceiling for other
 compositions.
+
+The following executable-size and RSS figures are historical measurements from
+the original remote-control qualification build, before the later direct-write
+and optional route-latency additions. They describe that captured build, not
+the current worktree's linked-image sizes or a general RAM budget.
 
 The generated gateway executable `size` totals were 1,077,385 bytes with
 `PGW_ENABLE_REMOTE_CONTROL=OFF`, 1,141,003 bytes with remote control compiled

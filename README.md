@@ -14,7 +14,9 @@
 
 A resource-bounded C11 gateway for routing data between protocol adapters. The
 core uses opaque samples and statically registered bindings; adapters own
-connectivity and sample metadata.
+connectivity and sample metadata. DDS bindings can use loan-scoped sample/context
+views for direct native writes or explicitly negotiated static cross-schema
+translation. Remote control is optional and defaults off.
 
 ## Quick start
 
@@ -47,7 +49,9 @@ build/examples/can_dds/pgw_dds_companion 123.4 500
 ```
 
 Full SDK selection, component options, and package-consumer instructions are in
-the [build guide](https://wcoleman-rti.github.io/rti-micro-protocol-gateway/docs/build.html).
+the [build guide](docs/build.md). Developers extending the system can start with
+[adapter and DDS binding development](docs/developing-adapters.md); the optional
+[DDS remote-control interface](docs/remote-control.md) has its own guide.
 For more detail, start at the [hosted documentation site](https://wcoleman-rti.github.io/rti-micro-protocol-gateway/).
 
 ## Project map
@@ -57,7 +61,8 @@ For more detail, start at the [hosted documentation site](https://wcoleman-rti.g
 - **Adapters** — CAN transports and the Connext Micro DDS integration.
 - **Bindings and tools** — application value conversion and build-time
   configuration/DBC code generation.
-- **Resources** — shared IDL schema and XML configuration grammar.
+- **Schemas and bindings** — strict XML configuration schemas and IDL stored
+  with the core or the binding that owns each wire type.
 - **Examples, tests, benchmarks** — runnable integration example, verification,
   and measurement workloads.
 

@@ -18,7 +18,7 @@ after a build; component test names identify their requirement scope.
 
 | Requirement | Verification | Observable / remaining scope |
 | --- | --- | --- |
-| CORE-OPAQUE | core requirement executable | Negotiated accessors, exact schema rejection, fixed native pointer sequence |
+| CORE-OPAQUE | core requirement executable | Negotiated accessors, writer-owned source compatibility (the fake writer rejects mismatched schemas; DDS bindings may explicitly negotiate views), fixed native pointer sequence |
 | CORE-LOAN | core requirement executable | Normal, empty, NO_DATA, invalid, backpressure and fatal writes return exactly once |
 | CORE-FAIR | core requirement executable | 10,000 steps; saturated route does not stop second route |
 | CORE-BOUNDS | core requirement executable | Arithmetic overflow, arena alignment/exhaustion, registry freeze, no sequence growth |

@@ -15,7 +15,7 @@
 Install the pinned host dependency into the project's selected environment:
 
 ```sh
-.venv/bin/pip install -r tools/config_codegen/requirements.txt
+.venv/bin/python -m pip install -r tools/config_codegen/requirements.txt
 ```
 
 `config_codegen.py` validates `resources/schema/gateway.xsd` with lxml, then applies

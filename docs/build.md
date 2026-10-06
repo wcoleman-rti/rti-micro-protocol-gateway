@@ -209,9 +209,6 @@ cmake -S . -B build-package -DCMAKE_BUILD_TYPE=Release \
   -DRTIME_PSL_ARCH="<installed PSL architecture>" \
   -DRTIME_TARGET_NAME="<installed target name>" \
   -DPGW_JREHOME="<installed Java 17 runtime>" \
-  -DRTIME_PIL_ARCH="<installed PIL architecture>" \
-  -DRTIME_PSL_ARCH="<installed PSL architecture>" \
-  -DRTIME_TARGET_NAME="<installed target name>" \
   -DPGW_BUILD_TESTS=OFF -DPGW_BUILD_EXAMPLES=OFF \
   -DCMAKE_INSTALL_PREFIX="$PWD/build-package/package-prefix"
 cmake --build build-package --parallel
