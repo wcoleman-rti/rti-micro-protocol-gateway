@@ -15,6 +15,20 @@
   <xs:simpleType name="identifier">
     <xs:restriction base="xs:string"><xs:pattern value="[A-Za-z_][A-Za-z0-9_]*"/></xs:restriction>
   </xs:simpleType>
+  <xs:simpleType name="controlResourceKind">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="connection"/>
+      <xs:enumeration value="input"/>
+      <xs:enumeration value="output"/>
+      <xs:enumeration value="route"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="bindingConversion">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="fieldwise"/>
+      <xs:enumeration value="callbacks"/>
+    </xs:restriction>
+  </xs:simpleType>
   <xs:element name="gateway">
     <xs:complexType>
       <xs:sequence>
@@ -25,6 +39,18 @@
             <xs:attribute name="type" type="xs:string" use="required"/>
             <xs:attribute name="schema" type="xs:string" use="required"/>
             <xs:attribute name="fingerprint" type="xs:string" use="required"/>
+            <xs:attribute name="schema-version" type="xs:positiveInteger"/>
+            <xs:attribute name="representation-name" type="xs:string"/>
+            <xs:attribute name="native-type" type="identifier"/>
+            <xs:attribute name="native-header" type="xs:string"/>
+            <xs:attribute name="support-header" type="xs:string"/>
+            <xs:attribute name="conversion" type="bindingConversion"/>
+            <xs:attribute name="dds-to-native" type="identifier"/>
+            <xs:attribute name="native-to-dds" type="identifier"/>
+            <xs:attribute name="register-keys" type="identifier"/>
+            <xs:attribute name="register-key-value" type="xs:string"/>
+            <xs:attribute name="sample-copy" type="identifier"/>
+            <xs:attribute name="supports-timestamp" type="xs:boolean" default="false"/>
           </xs:complexType>
         </xs:element>
         <xs:element name="connection" minOccurs="1" maxOccurs="unbounded">
@@ -43,6 +69,7 @@
             </xs:sequence>
             <xs:attribute name="id" type="identifier" use="required"/>
             <xs:attribute name="participant" type="xs:string" use="required"/>
+            <xs:attribute name="adapter" type="identifier" use="required"/>
           </xs:complexType>
         </xs:element>
         <xs:element name="native-connection" minOccurs="0" maxOccurs="unbounded">
@@ -69,6 +96,31 @@
             <xs:attribute name="id" type="identifier" use="required"/>
             <xs:attribute name="input" type="xs:string" use="required"/>
             <xs:attribute name="output" type="xs:string" use="required"/>
+          </xs:complexType>
+        </xs:element>
+        <xs:element name="control" minOccurs="0" maxOccurs="1">
+          <xs:complexType>
+            <xs:sequence>
+              <xs:choice minOccurs="1" maxOccurs="unbounded">
+                <xs:element name="resource">
+                  <xs:complexType>
+                    <xs:attribute name="kind" type="controlResourceKind" use="required"/>
+                    <xs:attribute name="ref" type="xs:string" use="required"/>
+                    <xs:attribute name="actions" type="xs:string" use="required"/>
+                  </xs:complexType>
+                </xs:element>
+                <xs:element name="metric">
+                  <xs:complexType>
+                    <xs:attribute name="resource-kind" type="controlResourceKind" use="required"/>
+                    <xs:attribute name="resource" type="xs:string" use="required"/>
+                    <xs:attribute name="name" type="identifier" use="required"/>
+                  </xs:complexType>
+                </xs:element>
+              </xs:choice>
+            </xs:sequence>
+            <xs:attribute name="max-controller-peers" type="xs:positiveInteger" default="1"/>
+            <xs:attribute name="minimum-telemetry-period-ms"
+                          type="xs:nonNegativeInteger" default="0"/>
           </xs:complexType>
         </xs:element>
       </xs:sequence>

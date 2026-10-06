@@ -12,6 +12,9 @@
 
 add_library(pgw_adapter_dds_connext_micro src/connext_micro.c)
 add_library(PGW::adapter_dds_connext_micro ALIAS pgw_adapter_dds_connext_micro)
+set_property(TARGET pgw_adapter_dds_connext_micro PROPERTY PGW_ADAPTER_MANIFEST
+    "${CMAKE_CURRENT_SOURCE_DIR}/adapter.xml")
+pgw_generate_adapter_control_idl(pgw_adapter_dds_connext_micro)
 target_include_directories(pgw_adapter_dds_connext_micro PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>)

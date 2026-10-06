@@ -23,6 +23,9 @@ parser.add_argument("--diagnostics", choices=("0", "1"), default="1")
 parser.add_argument("--probe-idl", required=True)
 parser.add_argument("--diagnostics-idl", required=True)
 parser.add_argument("--schema-header", required=True)
+parser.add_argument("--remote-control", action="store_true")
+parser.add_argument("--telemetry", action="store_true")
+parser.add_argument("--max-controller-peers", type=int, default=1)
 args = parser.parse_args()
 inventory = json.loads(Path(args.inventory).read_text())
 text = Path(args.template).read_text().replace("@fingerprint@", inventory["fingerprint"])
@@ -39,5 +42,44 @@ if args.diagnostics == "0":
         for child in list(parent):
             if child.get("id") == "diagnostics" or child.get("binding") == "diagnostics":
                 parent.remove(child)
+if args.remote_control:
+    if not 1 <= args.max_controller_peers <= 32:
+        parser.error("maximum controller peers must be 1..32")
+    control_attributes = {
+        "max-controller-peers": str(args.max_controller_peers)
+    }
+    if args.telemetry:
+        control_attributes["minimum-telemetry-period-ms"] = "100"
+    control = ET.SubElement(root, "control", control_attributes)
+    controlled_connections = {"can", "gateway"}
+    for connection in root.findall("connection") + root.findall("native-connection"):
+        connection_id = connection.get("id")
+        if connection_id not in controlled_connections:
+            continue
+        ET.SubElement(control, "resource", {
+            "kind": "connection", "ref": connection_id, "actions": "up down"})
+        for stream in connection.findall("stream"):
+            role = stream.get("role")
+            if role == "reader":
+                ET.SubElement(control, "resource", {
+                    "kind": "input",
+                    "ref": f"{connection_id}::{stream.get('name')}",
+                    "actions": "enable disable"})
+            elif role == "writer":
+                ET.SubElement(control, "resource", {
+                    "kind": "output",
+                    "ref": f"{connection_id}::{stream.get('name')}",
+                    "actions": "enable disable"})
+    for route in root.findall("route"):
+        ET.SubElement(control, "resource", {
+            "kind": "route", "ref": route.get("id"), "actions": "pause resume"})
+    if args.telemetry:
+        ET.SubElement(control, "metric", {
+            "resource-kind": "connection",
+            "resource": "can",
+            "name": "received_frames",
+        })
+elif args.telemetry:
+    parser.error("--telemetry requires --remote-control")
 ET.indent(root)
 ET.ElementTree(root).write(args.output, encoding="utf-8", xml_declaration=True)

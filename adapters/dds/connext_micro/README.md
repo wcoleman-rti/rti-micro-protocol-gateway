@@ -69,11 +69,21 @@ The embedding application owns final process-global middleware shutdown.
 
 ## Typed plugins and loans
 
-`PGW_DDSBinding` is a compiled dispatch table, independent of CAN. Its operations
-use generated typed `take`, typed `return_loan`, and typed writes. Each binding
-defines its canonical logical native value, conversion, fixed scratch state,
-and initialization-time known-key registrations. The gateway does not cast
-foreign source samples to the destination's C structure.
+`PGW_DDSBinding` is a compiled dispatch table, independent of CAN. The example
+generates its per-type table and the repeated sequence, typed `take`,
+`return_loan`, and write wrappers from RTI type XML. Its bounded typed state and
+scratch are initialized from the caller's arena. The application declares the
+canonical representation and selects fieldwise generation or explicit
+conversion/key callbacks.
+
+This dispatch table complements rather than duplicates RTI's generated type
+support. `rtiddsgen` provides the concrete DDS type and type-specific APIs; it
+does not define the gateway representation. The generated table lets the
+generic connection code call different generated types through one interface.
+Fieldwise scalar conversion and simple key registration can be generated;
+union validation and application-specific mappings remain explicit callbacks.
+See [developing adapters and DDS bindings](../../../docs/developing-adapters.md)
+for the extension workflow.
 
 The current example bindings use pointer-free fixed scalars, arrays, and the
 signal tagged union. A binding with heap-owned strings/collections would need

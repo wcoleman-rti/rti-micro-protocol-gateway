@@ -17,7 +17,6 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-extern const PGW_DDSBinding PGW_signal_dds_binding;
 #define PGW_SIGNAL_DECLARE_CATEGORY(name) \
     extern const PGW_DDSBinding PGW_signal_dds_binding_##name;
 PGW_CODEC_CATEGORIES(PGW_SIGNAL_DECLARE_CATEGORY)

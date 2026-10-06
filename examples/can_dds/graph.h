@@ -17,5 +17,11 @@
 PGW_Status PGW_example_attach_routes(PGW_Connection *, PGW_Connection *,
                                     PGW_RouteSeq *);
 PGW_Status PGW_example_can_categories(const PGW_Schema *, PGW_CANCategorySeq *);
+#if defined(PGW_ENABLE_REMOTE_CONTROL)
+PGW_Status PGW_example_control_resources(PGW_Connection *, PGW_Connection *,
+    PGW_Route *, size_t, PGW_ControlResource *, size_t, size_t *);
+PGW_Status PGW_example_control_telemetry(PGW_Connection *, PGW_Connection *,
+    PGW_ControlTelemetryMetric *, size_t, size_t *);
+#endif
 extern const unsigned pgw_config_can_receive_budget, pgw_config_can_write_capacity;
 #endif

@@ -142,6 +142,93 @@ typedef struct {
  *         PGW_FATAL for factory/model registration failure.
  */
 PGW_Status PGW_DDS_register_model(const struct APPGEN_LibraryModelSeq *);
+#if defined(PGW_ENABLE_REMOTE_CONTROL)
+#define PGW_DDS_REMOTE_CONTROL_OPTIONS_VERSION 1u
+typedef struct {
+    uint32_t version;
+    size_t size;
+    bool enabled;
+    DDS_DomainId_t domain_id;
+    uint32_t max_controller_peers;
+    uint32_t telemetry_period_ms;
+    uint32_t minimum_telemetry_period_ms;
+} PGW_DDSRemoteControlOptions;
+
+typedef struct {
+    uint32_t version;
+    size_t size;
+    PGW_Status (*take_command)(DDS_DataReader *, PGW_ControlCommand *,
+                               PGW_ControlCorrelation *);
+    PGW_Status (*register_state)(DDS_DataWriter *, uint32_t,
+                                DDS_InstanceHandle_t *);
+    PGW_Status (*register_telemetry)(DDS_DataWriter *,
+        const PGW_ControlTelemetryMetric *, DDS_InstanceHandle_t *);
+    PGW_Status (*write_state)(DDS_DataWriter *, const PGW_ControlState *,
+                              const DDS_InstanceHandle_t *);
+    PGW_Status (*write_telemetry)(DDS_DataWriter *, const PGW_ControlTelemetry *,
+                                  const DDS_InstanceHandle_t *);
+    PGW_Status (*write_result)(DDS_DataWriter *, const PGW_ControlResult *);
+    DDS_ReturnCode_t (*write_command)(DDS_DataWriter *, const PGW_ControlCommand *);
+    PGW_Status (*take_state)(DDS_DataReader *, PGW_ControlState *);
+    PGW_Status (*take_result)(DDS_DataReader *, PGW_ControlResult *);
+    PGW_Status (*take_telemetry)(DDS_DataReader *, PGW_ControlTelemetry *);
+} PGW_DDSControlTypeI;
+
+typedef struct {
+    DDS_DataReader *command_reader;
+    DDS_DataWriter *state_writer;
+    DDS_DataWriter *result_writer;
+    DDS_DataWriter *telemetry_writer;
+    const PGW_DDSControlTypeI *types;
+    DDS_InstanceHandle_t *state_handles;
+    size_t state_handle_count;
+    DDS_InstanceHandle_t *telemetry_handles;
+    size_t telemetry_handle_count;
+    bool initialized;
+} PGW_DDSControlTransport;
+
+typedef struct {
+    const char *name;
+    bool reader;
+    DDS_DataReader *datareader;
+    DDS_DataWriter *datawriter;
+} PGW_DDSStaticEndpoint;
+/** @brief Create one participant and its static AppGen model at a startup-selected domain.
+ * The model must already be registered. Missing model factory components are
+ * registered from its static descriptors. Static type registrations, topics,
+ * endpoint QoS, and entities are reused; only the DDS domain ID is selected at
+ * this call. The caller supplies fixed storage for the model's endpoint
+ * handles and owns the returned participant.
+ */
+PGW_Status PGW_DDS_create_participant_at_domain(const char *, DDS_DomainId_t,
+    PGW_DDSStaticEndpoint *, size_t, size_t *, DDS_DomainParticipant **);
+PGW_Status PGW_DDS_create_control_participant(
+    const PGW_DDSRemoteControlOptions *, PGW_DDSStaticEndpoint *, size_t,
+    size_t *, DDS_DomainParticipant **);
+PGW_Status PGW_DDS_create_controller_participant(
+    const PGW_DDSRemoteControlOptions *, PGW_DDSStaticEndpoint *, size_t,
+    size_t *, DDS_DomainParticipant **);
+/** @brief Create the gateway's dedicated, resource-bounded control participant. */
+PGW_Status PGW_DDS_create_control_participant(const PGW_DDSRemoteControlOptions *,
+    PGW_DDSStaticEndpoint *, size_t, size_t *, DDS_DomainParticipant **);
+/** @brief Create the controller-side participant with the inverse fixed bounds. */
+PGW_Status PGW_DDS_create_controller_participant(const PGW_DDSRemoteControlOptions *,
+    PGW_DDSStaticEndpoint *, size_t, size_t *, DDS_DomainParticipant **);
+/** @brief Delete a participant created by PGW_DDS_create_participant_at_domain. */
+PGW_Status PGW_DDS_delete_dynamic_participant(DDS_DomainParticipant *);
+/** @brief Validate typed activation/domain/telemetry options before initialization. */
+PGW_Status PGW_DDS_remote_control_options_validate(
+    const PGW_DDSRemoteControlOptions *, bool, uint32_t);
+/** @brief Bind pre-created static control endpoints and pre-register state keys. */
+PGW_Status PGW_DDS_control_transport_initialize(
+    PGW_DDSControlTransport *, const PGW_DDSStaticEndpoint *, size_t, bool,
+    const PGW_DDSControlTypeI *, size_t, DDS_InstanceHandle_t *, size_t,
+    const PGW_ControlTelemetryMetric *, size_t, DDS_InstanceHandle_t *, size_t);
+/** @brief Obtain the optional core endpoint operations for an initialized transport. */
+PGW_ControlEndpoint PGW_DDS_control_endpoint(PGW_DDSControlTransport *);
+/** @brief Clear borrowed endpoint and handle references before participant deletion. */
+PGW_Status PGW_DDS_control_transport_finalize(PGW_DDSControlTransport *);
+#endif
 /** @brief Register the Connext Micro adapter in a gateway registry. */
 PGW_Status PGW_DDS_register_adapter(PGW_Registry *);
 /** @brief Create a DDS connection using registered model entities and an arena.
@@ -153,6 +240,12 @@ PGW_Status PGW_DDS_register_adapter(PGW_Registry *);
  *         creation failures.
  */
 PGW_Status PGW_DDS_create(const PGW_DDSConfig *, PGW_Arena *, PGW_Connection **);
+#if defined(PGW_ENABLE_REMOTE_CONTROL)
+/** @brief Resolve a configured DDS connection/endpoint to its control context. */
+PGW_Status PGW_DDS_control_target(PGW_Connection *, PGW_ControlResourceKind,
+                                  const char *, const PGW_ControlAdapterI **,
+                                  void **);
+#endif
 /** @brief Query effective participant/factory resource limits.
  * @return PGW_OK on success, PGW_INVALID for invalid input/participant query,
  *         or PGW_IO_ERROR if factory QoS cannot be read.

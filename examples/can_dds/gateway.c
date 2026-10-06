@@ -14,6 +14,7 @@
 #include "pgw/can_socketcan.h"
 #include "pgw/can_memory.h"
 #include "pgw_codec.h"
+#include "pgw/compiled_config.h"
 #include "ddsAppgen.h"
 #include "diagnostics_binding.h"
 #include "graph.h"
@@ -22,6 +23,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(PGW_ENABLE_REMOTE_CONTROL)
+#include "control_binding.h"
+#include "control_resources.h"
+#endif
 extern const PGW_DDSConfig pgw_config_gateway;
 extern const unsigned pgw_config_route_budget, pgw_config_sample_budget;
 extern const unsigned pgw_config_diagnostic_period_steps;
@@ -62,6 +67,34 @@ int main(int argc, char **argv)
     void *memory = NULL;
     PGW_Arena arena = {NULL, memory_capacity, 0};
     PGW_Connection *dds = NULL, *can = NULL;
+#if defined(PGW_ENABLE_REMOTE_CONTROL)
+    PGW_DDSRemoteControlOptions control_options = {
+        PGW_DDS_REMOTE_CONTROL_OPTIONS_VERSION,
+        sizeof(PGW_DDSRemoteControlOptions),
+        false,
+        0,
+        PGW_CONTROL_MAX_CONTROLLER_PEERS,
+        0,
+        PGW_CONTROL_TELEMETRY_MINIMUM_PERIOD_MS
+    };
+    DDS_DomainParticipant *control_participant = NULL;
+    PGW_DDSStaticEndpoint control_endpoints[
+        3 + (PGW_CONTROL_TELEMETRY_METRIC_COUNT ? 1 : 0)];
+    PGW_DDSControlTransport control_transport = {0};
+    PGW_ControlResource control_resources[PGW_CONTROL_RESOURCE_COUNT];
+    DDS_InstanceHandle_t control_state_handles[PGW_CONTROL_RESOURCE_COUNT];
+#if PGW_CONTROL_TELEMETRY_METRIC_COUNT > 0
+    PGW_ControlTelemetryMetric control_telemetry_metrics[
+        PGW_CONTROL_TELEMETRY_METRIC_COUNT];
+    DDS_InstanceHandle_t control_telemetry_handles[
+        PGW_CONTROL_TELEMETRY_METRIC_COUNT];
+#else
+    PGW_ControlTelemetryMetric *control_telemetry_metrics = NULL;
+    DDS_InstanceHandle_t *control_telemetry_handles = NULL;
+#endif
+    size_t attached_control_resources = 0;
+    size_t attached_telemetry_metrics = 0;
+#endif
     PGW_CANSocket socket;
     PGW_CANMemory memory_transport;
     PGW_CANFrame memory_rx[8], memory_tx[8];
@@ -94,15 +127,50 @@ int main(int argc, char **argv)
     int failed = 1;
     bool use_memory;
     bool closed = true;
-    if (argc != 2 && argc != 3) {
-        fprintf(stderr, "usage: %s (--memory | explicitly-selected-CAN-interface) [steps]\n", argv[0]);
+    if (argc < 2) {
+        fprintf(stderr, "usage: %s (--memory | explicitly-selected-CAN-interface)"
+                " [--control-domain id] [steps]\n", argv[0]);
         return 2;
     }
-    if (argc == 3) {
-        char *end;
-        steps = strtoul(argv[2], &end, 10);
-        if (!steps || *end || steps > 100000000) return 2;
+    bool steps_seen = false;
+    for (int i = 2; i < argc; ++i) {
+        if (!strcmp(argv[i], "--control-domain")) {
+#if defined(PGW_ENABLE_REMOTE_CONTROL)
+            if (control_options.enabled || i + 1 >= argc) return 2;
+            char *end;
+            long domain = strtol(argv[++i], &end, 10);
+            if (*end || domain < 0 || domain > 232) return 2;
+            control_options.enabled = true;
+            control_options.domain_id = (DDS_DomainId_t)domain;
+#else
+            fprintf(stderr, "remote control is not compiled into this gateway\n");
+            return 2;
+#endif
+        } else if (!strcmp(argv[i], "--telemetry-period-ms")) {
+#if defined(PGW_ENABLE_REMOTE_CONTROL)
+            if (i + 1 >= argc) return 2;
+            char *end;
+            unsigned long period = strtoul(argv[++i], &end, 10);
+            if (*end || period > UINT32_MAX) return 2;
+            control_options.telemetry_period_ms = (uint32_t)period;
+#else
+            fprintf(stderr, "remote control is not compiled into this gateway\n");
+            return 2;
+#endif
+        } else {
+            if (steps_seen) return 2;
+            char *end;
+            steps = strtoul(argv[i], &end, 10);
+            if (!steps || *end || steps > 100000000) return 2;
+            steps_seen = true;
+        }
     }
+#if defined(PGW_ENABLE_REMOTE_CONTROL)
+    if (PGW_DDS_remote_control_options_validate(&control_options,
+            PGW_CONTROL_TELEMETRY_METRIC_COUNT > 0,
+            PGW_CONTROL_TELEMETRY_MINIMUM_PERIOD_MS) != PGW_OK)
+        return 2;
+#endif
     socket_config.interface_name = argv[1];
     use_memory = !strcmp(argv[1], "--memory");
     if (!PGW_Runtime_initialize()) return 1;
@@ -135,6 +203,53 @@ int main(int argc, char **argv)
     if (PGW_DDS_register_model(APPGEN_get_library_seq()) != PGW_OK ||
         PGW_DDSConnextMicroAdapter.create(&pgw_config_gateway, &arena, &dds) != PGW_OK ||
         PGW_CANAdapter.create(&config, &arena, &can) != PGW_OK) goto done;
+#if defined(PGW_ENABLE_REMOTE_CONTROL)
+    if (control_options.enabled) {
+        if (PGW_CONTROL_TELEMETRY_METRIC_COUNT &&
+            (PGW_example_control_telemetry(can, dds, control_telemetry_metrics,
+                PGW_CONTROL_TELEMETRY_METRIC_COUNT, &attached_telemetry_metrics) != PGW_OK ||
+             attached_telemetry_metrics != pgw_control_telemetry_metric_count))
+            goto done;
+        size_t endpoint_count = 0;
+        if (PGW_DDS_create_control_participant(&control_options, control_endpoints,
+                sizeof(control_endpoints) / sizeof(control_endpoints[0]),
+                &endpoint_count, &control_participant) != PGW_OK ||
+            PGW_DDS_control_transport_initialize(&control_transport,
+                control_endpoints, endpoint_count,
+                PGW_CONTROL_TELEMETRY_METRIC_COUNT > 0,
+                &PGW_example_control_types,
+                pgw_control_resource_count, control_state_handles,
+                PGW_CONTROL_RESOURCE_COUNT, control_telemetry_metrics,
+                attached_telemetry_metrics, control_telemetry_handles,
+                PGW_CONTROL_TELEMETRY_METRIC_COUNT) != PGW_OK)
+            goto done;
+        struct DDS_DomainParticipantQos control_qos =
+            DDS_DomainParticipantQos_INITIALIZER;
+        if (DDS_DomainParticipant_get_qos(control_participant, &control_qos) !=
+            DDS_RETCODE_OK) goto done;
+        size_t control_application_storage_bytes = sizeof(control_resources) +
+            sizeof(control_state_handles) + sizeof(control_transport) +
+            sizeof(control_endpoints);
+#if PGW_CONTROL_TELEMETRY_METRIC_COUNT > 0
+        control_application_storage_bytes += sizeof(control_telemetry_metrics) +
+            sizeof(control_telemetry_handles);
+#endif
+        printf("remote control: domain=%d resources=%zu endpoints=%zu "
+               "local_readers=%d local_writers=%d local_topics=%d local_types=%d "
+               "remote_participants=%d remote_readers=%d remote_writers=%d "
+               "application_storage_bytes=%zu\n",
+               (int)control_options.domain_id, pgw_control_resource_count, endpoint_count,
+               control_qos.resource_limits.local_reader_allocation,
+               control_qos.resource_limits.local_writer_allocation,
+               control_qos.resource_limits.local_topic_allocation,
+               control_qos.resource_limits.local_type_allocation,
+               control_qos.resource_limits.remote_participant_allocation,
+               control_qos.resource_limits.remote_reader_allocation,
+               control_qos.resource_limits.remote_writer_allocation,
+               control_application_storage_bytes);
+        DDS_DomainParticipantQos_finalize(&control_qos);
+    }
+#endif
     {
         PGW_DDSResources resources;
         if (PGW_DDS_effective_resources(dds, &resources) != PGW_OK) goto done;
@@ -182,6 +297,23 @@ int main(int argc, char **argv)
     if (PGW_Service_set_routes(&service, &route_sequence) != PGW_OK) goto done;
     service.route_budget = pgw_config_route_budget;
     service.sample_budget = pgw_config_sample_budget;
+#if defined(PGW_ENABLE_REMOTE_CONTROL)
+    if (control_options.enabled &&
+        (PGW_example_control_resources(can, dds, routes, 4, control_resources,
+                PGW_CONTROL_RESOURCE_COUNT, &attached_control_resources) != PGW_OK ||
+         attached_control_resources != pgw_control_resource_count ||
+         PGW_Service_set_control(&service,
+             PGW_DDS_control_endpoint(&control_transport),
+             control_resources, attached_control_resources) != PGW_OK))
+        goto done;
+#if PGW_CONTROL_TELEMETRY_METRIC_COUNT > 0
+    if (control_options.enabled &&
+        PGW_Service_set_telemetry(&service, control_telemetry_metrics,
+                attached_telemetry_metrics, control_options.telemetry_period_ms,
+                PGW_CONTROL_TELEMETRY_MINIMUM_PERIOD_MS) != PGW_OK)
+        goto done;
+#endif
+#endif
     if (PGW_Service_initialize(&service) != PGW_OK) goto done;
     printf("gateway ready: interface=%s arena_bytes=%zu arena_reserved_bytes=%zu steps=%lu\n",
            argv[1], arena.used, memory_capacity, steps);
@@ -211,6 +343,24 @@ int main(int argc, char **argv)
     failed = 0;
 stopped:
     (void)PGW_Service_stop(&service);
+#if defined(PGW_ENABLE_REMOTE_CONTROL)
+    if (control_options.enabled) {
+        PGW_ControlCounters counters;
+        if (PGW_Service_control_counters(&service, &counters) == PGW_OK)
+            printf("remote-control counters: commands=%llu state_write_failures=%llu "
+                   "state_retries=%llu result_write_failures=%llu "
+                   "telemetry_samples=%llu telemetry_read_failures=%llu "
+                   "telemetry_write_failures=%llu telemetry_clock_failures=%llu\n",
+                   (unsigned long long)counters.commands_processed,
+                   (unsigned long long)counters.state_write_failures,
+                   (unsigned long long)counters.state_retries,
+                   (unsigned long long)counters.result_write_failures,
+                   (unsigned long long)counters.telemetry_samples,
+                   (unsigned long long)counters.telemetry_read_failures,
+                   (unsigned long long)counters.telemetry_write_failures,
+                   (unsigned long long)counters.telemetry_clock_failures);
+    }
+#endif
     for (size_t i = 0; i < 4; ++i) {
         PGW_CounterSnapshot snapshot;
         char text[1024];
@@ -223,6 +373,12 @@ stopped:
             fwrite(text, 1, length, stdout);
     }
     (void)PGW_Service_finalize(&service);
+#if defined(PGW_ENABLE_REMOTE_CONTROL)
+    if (control_transport.initialized &&
+        PGW_DDS_control_transport_finalize(&control_transport) != PGW_OK) closed = false;
+    if (control_participant &&
+        PGW_DDS_delete_dynamic_participant(control_participant) != PGW_OK) closed = false;
+#endif
     if (use_memory) {
         PGW_CANFrame frame;
         while (PGW_CANMemory_take_sent(&memory_transport, &frame) == PGW_OK) {

@@ -151,6 +151,13 @@ PGW_Status PGW_Registry_register_adapter(PGW_Registry *r, const PGW_AdapterI *a)
         a->connection->size != sizeof(PGW_ConnectionI) ||
         (!a->connection->reader && !a->connection->writer) ||
         !a->connection->close || !r->initialized) return PGW_INVALID;
+#if defined(PGW_ENABLE_REMOTE_CONTROL)
+    if (a->control && (a->control->version != PGW_CONTROL_ABI_VERSION ||
+        a->control->size != sizeof(PGW_ControlAdapterI) ||
+        a->control->manifest_version != 1 || !a->control->apply ||
+        (!!a->control->telemetry_metric_mask != !!a->control->read_telemetry)))
+        return PGW_INVALID;
+#endif
     if (PGW_Registry_find_adapter(r, a->name)) return PGW_INVALID;
     RTI_INT32 count = PGW_AdapterSeq_get_length(&r->adapters);
     if (count == PGW_AdapterSeq_get_maximum(&r->adapters)) return PGW_CAPACITY;
@@ -226,6 +233,30 @@ PGW_Status PGW_Route_initialize_storage(PGW_Route *r, const PGW_SampleSeq *sampl
     return PGW_OK;
 }
 
+PGW_Status PGW_Route_pause(PGW_Route *r)
+{
+    if (!r || !r->storage_initialized) return PGW_INVALID;
+    if (r->lifecycle == PGW_FAULTED) return PGW_FATAL;
+    if (r->lifecycle == PGW_PAUSED) return PGW_NO_CHANGE;
+    if (r->lifecycle != PGW_READY && r->lifecycle != PGW_RUNNING)
+        return PGW_INVALID;
+    r->lifecycle = PGW_PAUSED;
+    return PGW_OK;
+}
+
+PGW_Status PGW_Route_resume(PGW_Route *r)
+{
+    if (!r || !r->storage_initialized) return PGW_INVALID;
+    if (r->lifecycle == PGW_FAULTED) return PGW_FATAL;
+    if (r->lifecycle == PGW_PAUSED) {
+        r->lifecycle = PGW_READY;
+        return PGW_OK;
+    }
+    if (r->lifecycle == PGW_READY || r->lifecycle == PGW_RUNNING)
+        return PGW_NO_CHANGE;
+    return PGW_INVALID;
+}
+
 PGW_Status PGW_Service_set_routes(PGW_Service *s, const PGW_RouteSeq *routes)
 {
     if (!s || s->lifecycle != PGW_UNINITIALIZED || !routes ||
@@ -242,6 +273,344 @@ PGW_Status PGW_Service_set_routes(PGW_Service *s, const PGW_RouteSeq *routes)
     s->routes_initialized = true;
     return PGW_OK;
 }
+
+#if defined(PGW_ENABLE_REMOTE_CONTROL)
+static PGW_ControlResource *control_find_resource(PGW_Service *, uint32_t);
+
+static bool control_route_is_configured(const PGW_Service *service, const PGW_Route *route)
+{
+    for (RTI_INT32 i = 0; i < PGW_RouteSeq_get_length(&service->routes); ++i)
+        if (PGW_RouteSeq_get_reference(&service->routes, i) == route) return true;
+    return false;
+}
+
+PGW_Status PGW_Service_set_control(PGW_Service *service, PGW_ControlEndpoint endpoint,
+                                  PGW_ControlResource *resources, size_t count)
+{
+    const uint32_t action_bits = (UINT32_C(1) << 8) - 1;
+    if (!service || service->lifecycle != PGW_UNINITIALIZED ||
+        !service->routes_initialized || !resources || !count ||
+        service->control_resources) return PGW_INVALID;
+    if (!endpoint.iface || endpoint.iface->version != PGW_CONTROL_ABI_VERSION ||
+        endpoint.iface->size != sizeof(PGW_ControlEndpointI) ||
+        !endpoint.iface->take_command || !endpoint.iface->write_state ||
+        !endpoint.iface->write_result) return PGW_INVALID;
+    for (size_t i = 0; i < count; ++i) {
+        PGW_ControlResource *resource = &resources[i];
+        if ((unsigned)resource->kind > PGW_CONTROL_RESOURCE_ROUTE ||
+            (unsigned)resource->status > PGW_CONTROL_STATUS_FAULTED ||
+            (resource->command_capabilities & ~action_bits)) return PGW_INVALID;
+        for (size_t j = 0; j < i; ++j)
+            if (resources[j].id == resource->id) return PGW_INVALID;
+        if (resource->kind == PGW_CONTROL_RESOURCE_ROUTE) {
+            uint32_t route_actions =
+                PGW_CONTROL_ACTION_MASK(PGW_CONTROL_ROUTE_PAUSE) |
+                PGW_CONTROL_ACTION_MASK(PGW_CONTROL_ROUTE_RESUME);
+            if (!resource->route || resource->adapter ||
+                !control_route_is_configured(service, resource->route) ||
+                (resource->command_capabilities & ~route_actions))
+                return PGW_INVALID;
+        } else {
+            uint32_t resource_bit = UINT32_C(1) << resource->kind;
+            if (resource->route || !resource->adapter ||
+                resource->adapter->version != PGW_CONTROL_ABI_VERSION ||
+                resource->adapter->size != sizeof(PGW_ControlAdapterI) ||
+                resource->adapter->manifest_version != 1 ||
+                !resource->adapter->apply ||
+                !(resource->adapter->resource_kind_mask & resource_bit) ||
+                (resource->command_capabilities & ~resource->adapter->action_mask))
+                return PGW_INVALID;
+        }
+    }
+    service->control = endpoint;
+    service->control_resources = resources;
+    service->control_resource_count = count;
+    service->control_state_retry_cursor = 0;
+    service->control_counters = (PGW_ControlCounters){0};
+    return PGW_OK;
+}
+
+PGW_Status PGW_Service_control_counters(const PGW_Service *service,
+                                       PGW_ControlCounters *out)
+{
+    if (!service || !out || !service->control_resources) return PGW_INVALID;
+    *out = service->control_counters;
+    return PGW_OK;
+}
+
+PGW_Status PGW_Service_set_telemetry(PGW_Service *service,
+                                    PGW_ControlTelemetryMetric *metrics,
+                                    size_t count, uint32_t period_ms,
+                                    uint32_t minimum_period_ms)
+{
+    if (!service || service->lifecycle != PGW_UNINITIALIZED ||
+        !service->control_resources || service->control_telemetry_metrics ||
+        !metrics || !count || !minimum_period_ms ||
+        !service->control.iface->write_telemetry ||
+        (period_ms && period_ms < minimum_period_ms) ||
+        (period_ms && !service->clock_ns)) return PGW_INVALID;
+    for (size_t i = 0; i < count; ++i) {
+        PGW_ControlTelemetryMetric *metric = &metrics[i];
+        PGW_ControlResource *resource =
+            control_find_resource(service, metric->resource_id);
+        if (!resource || !metric->name || !*metric->name ||
+            !metric->unit || strlen(metric->unit) > 32 ||
+            (unsigned)metric->scalar_type > PGW_CONTROL_SCALAR_DOUBLE ||
+            metric->telemetry_kind >= 32 || metric->adapter_metric_bit >= 32 ||
+            !metric->adapter || metric->adapter != resource->adapter ||
+            !metric->adapter->read_telemetry ||
+            !(metric->adapter->telemetry_metric_mask &
+              (UINT32_C(1) << metric->adapter_metric_bit)) ||
+            !(resource->telemetry_capabilities &
+              (UINT32_C(1) << metric->telemetry_kind)))
+            return PGW_INVALID;
+        for (size_t j = 0; j < i; ++j)
+            if (metrics[j].id == metric->id ||
+                (metrics[j].resource_id == metric->resource_id &&
+                 metrics[j].telemetry_kind == metric->telemetry_kind))
+                return PGW_INVALID;
+    }
+    service->control_telemetry_metrics = metrics;
+    service->control_telemetry_metric_count = count;
+    service->control_telemetry_period_ns = (uint64_t)period_ms * UINT64_C(1000000);
+    service->control_telemetry_last_ns = 0;
+    service->control_telemetry_clock_initialized = false;
+    return PGW_OK;
+}
+
+static PGW_ControlResourceStatus control_route_status(const PGW_Route *route)
+{
+    if (route->lifecycle == PGW_FAULTED) return PGW_CONTROL_STATUS_FAULTED;
+    if (route->lifecycle == PGW_PAUSED) return PGW_CONTROL_STATUS_PAUSED;
+    if (route->lifecycle == PGW_READY || route->lifecycle == PGW_RUNNING)
+        return PGW_CONTROL_STATUS_UP;
+    return PGW_CONTROL_STATUS_UNKNOWN;
+}
+
+static PGW_ControlState control_state(const PGW_ControlResource *resource)
+{
+    PGW_ControlResourceStatus status = resource->kind == PGW_CONTROL_RESOURCE_ROUTE ?
+        control_route_status(resource->route) : resource->status;
+    return (PGW_ControlState){resource->id, status,
+        resource->command_capabilities, resource->telemetry_capabilities};
+}
+
+static bool control_write_state(PGW_Service *service, PGW_ControlResource *resource,
+                                bool retry)
+{
+    PGW_ControlState state = control_state(resource);
+    if (retry) ++service->control_counters.state_retries;
+    if (service->control.iface->write_state(service->control.state, &state) != PGW_OK) {
+        resource->state_dirty = true;
+        ++service->control_counters.state_write_failures;
+        return false;
+    }
+    resource->state_dirty = false;
+    return true;
+}
+
+static PGW_ControlResource *control_find_resource(PGW_Service *service, uint32_t id)
+{
+    for (size_t i = 0; i < service->control_resource_count; ++i)
+        if (service->control_resources[i].id == id)
+            return &service->control_resources[i];
+    return NULL;
+}
+
+static bool control_expected_status(PGW_ControlResourceKind kind,
+                                    PGW_ControlAction action,
+                                    PGW_ControlResourceStatus *status)
+{
+    switch (action) {
+        case PGW_CONTROL_CONNECTION_UP:
+            if (kind != PGW_CONTROL_RESOURCE_CONNECTION) return false;
+            *status = PGW_CONTROL_STATUS_UP;
+            return true;
+        case PGW_CONTROL_CONNECTION_DOWN:
+            if (kind != PGW_CONTROL_RESOURCE_CONNECTION) return false;
+            *status = PGW_CONTROL_STATUS_DOWN;
+            return true;
+        case PGW_CONTROL_INPUT_ENABLE:
+            if (kind != PGW_CONTROL_RESOURCE_INPUT) return false;
+            *status = PGW_CONTROL_STATUS_UP;
+            return true;
+        case PGW_CONTROL_INPUT_DISABLE:
+            if (kind != PGW_CONTROL_RESOURCE_INPUT) return false;
+            *status = PGW_CONTROL_STATUS_DOWN;
+            return true;
+        case PGW_CONTROL_OUTPUT_ENABLE:
+            if (kind != PGW_CONTROL_RESOURCE_OUTPUT) return false;
+            *status = PGW_CONTROL_STATUS_UP;
+            return true;
+        case PGW_CONTROL_OUTPUT_DISABLE:
+            if (kind != PGW_CONTROL_RESOURCE_OUTPUT) return false;
+            *status = PGW_CONTROL_STATUS_DOWN;
+            return true;
+        case PGW_CONTROL_ROUTE_PAUSE:
+            if (kind != PGW_CONTROL_RESOURCE_ROUTE) return false;
+            *status = PGW_CONTROL_STATUS_PAUSED;
+            return true;
+        case PGW_CONTROL_ROUTE_RESUME:
+            if (kind != PGW_CONTROL_RESOURCE_ROUTE) return false;
+            *status = PGW_CONTROL_STATUS_UP;
+            return true;
+    }
+    return false;
+}
+
+static PGW_ControlOutcome control_apply(PGW_ControlResource *resource,
+                                       const PGW_ControlCommand *command)
+{
+    PGW_ControlResourceStatus desired;
+    if ((unsigned)command->action > PGW_CONTROL_ROUTE_RESUME)
+        return PGW_CONTROL_OUTCOME_INVALID;
+    if (!(resource->command_capabilities &
+          PGW_CONTROL_ACTION_MASK(command->action)))
+        return PGW_CONTROL_OUTCOME_UNSUPPORTED;
+    if (!control_expected_status(resource->kind, command->action, &desired))
+        return PGW_CONTROL_OUTCOME_UNSUPPORTED;
+    if (resource->kind != PGW_CONTROL_RESOURCE_ROUTE &&
+        resource->status != PGW_CONTROL_STATUS_UNKNOWN &&
+        resource->status == desired)
+        return PGW_CONTROL_OUTCOME_NO_CHANGE;
+    PGW_Status status;
+    if (resource->kind == PGW_CONTROL_RESOURCE_ROUTE) {
+        status = command->action == PGW_CONTROL_ROUTE_PAUSE ?
+            PGW_Route_pause(resource->route) : PGW_Route_resume(resource->route);
+    } else {
+        status = resource->adapter->apply(resource->adapter_state, command->action);
+    }
+    if (status == PGW_OK) {
+        resource->status = desired;
+        return PGW_CONTROL_OUTCOME_APPLIED;
+    }
+    if (status == PGW_NO_CHANGE) {
+        if (resource->status == PGW_CONTROL_STATUS_UNKNOWN)
+            resource->status = desired;
+        return PGW_CONTROL_OUTCOME_NO_CHANGE;
+    }
+    if (status == PGW_UNSUPPORTED) return PGW_CONTROL_OUTCOME_UNSUPPORTED;
+    if (status == PGW_INVALID) return PGW_CONTROL_OUTCOME_INVALID;
+    return PGW_CONTROL_OUTCOME_FAILED;
+}
+
+static void control_process_commands(PGW_Service *service)
+{
+    for (size_t i = 0; i < PGW_CONTROL_MAX_COMMANDS_PER_STEP; ++i) {
+        PGW_ControlCommand command = {0};
+        PGW_ControlCorrelation correlation = {0};
+        PGW_Status status = service->control.iface->take_command(
+            service->control.state, &command, &correlation);
+        if (status == PGW_NO_DATA) break;
+        if (status != PGW_OK) {
+            ++service->control_counters.command_read_failures;
+            break;
+        }
+        ++service->control_counters.commands_processed;
+        PGW_ControlResource *resource = control_find_resource(service, command.resource_id);
+        PGW_ControlResourceStatus previous_status = resource ? resource->status :
+            PGW_CONTROL_STATUS_UNKNOWN;
+        PGW_ControlOutcome outcome = resource ?
+            control_apply(resource, &command) : PGW_CONTROL_OUTCOME_INVALID;
+        if (outcome == PGW_CONTROL_OUTCOME_INVALID)
+            ++service->control_counters.commands_invalid;
+        else if (outcome == PGW_CONTROL_OUTCOME_UNSUPPORTED)
+            ++service->control_counters.commands_unsupported;
+        else if (outcome == PGW_CONTROL_OUTCOME_FAILED)
+            ++service->control_counters.commands_failed;
+        else if (resource && resource->status != previous_status)
+            (void)control_write_state(service, resource, false);
+        PGW_ControlResult result = {
+            command.resource_id, command.action, outcome, correlation
+        };
+        if (service->control.iface->write_result(service->control.state, &result) != PGW_OK)
+            ++service->control_counters.result_write_failures;
+    }
+}
+
+static void control_retry_one_state(PGW_Service *service)
+{
+    if (!service->control_resource_count) return;
+    for (size_t i = 0; i < service->control_resource_count; ++i) {
+        size_t index = service->control_state_retry_cursor;
+        service->control_state_retry_cursor =
+            (service->control_state_retry_cursor + 1) % service->control_resource_count;
+        PGW_ControlResource *resource = &service->control_resources[index];
+        if (!resource->state_dirty) continue;
+        (void)control_write_state(service, resource, true);
+        return;
+    }
+}
+
+static void control_sync_route(PGW_Service *service, PGW_Route *route)
+{
+    PGW_ControlResourceStatus status = control_route_status(route);
+    for (size_t i = 0; i < service->control_resource_count; ++i) {
+        PGW_ControlResource *resource = &service->control_resources[i];
+        if (resource->kind == PGW_CONTROL_RESOURCE_ROUTE &&
+            resource->route == route && resource->status != status) {
+            resource->status = status;
+            (void)control_write_state(service, resource, false);
+        }
+    }
+}
+
+static void control_initialize(PGW_Service *service)
+{
+    if (!service->control_resources) return;
+    for (size_t i = 0; i < service->control_resource_count; ++i) {
+        PGW_ControlResource *resource = &service->control_resources[i];
+        if (resource->kind == PGW_CONTROL_RESOURCE_ROUTE)
+            resource->status = control_route_status(resource->route);
+        (void)control_write_state(service, resource, false);
+    }
+}
+
+static void control_publish_telemetry(PGW_Service *service)
+{
+    if (!service->control_telemetry_metric_count ||
+        !service->control_telemetry_period_ns) return;
+    uint64_t now;
+    if (!service->clock_ns(service->clock_state, &now)) {
+        ++service->control_counters.telemetry_clock_failures;
+        return;
+    }
+    if (!service->control_telemetry_clock_initialized ||
+        now < service->control_telemetry_last_ns) {
+        service->control_telemetry_last_ns = now;
+        service->control_telemetry_clock_initialized = true;
+        return;
+    }
+    if (now - service->control_telemetry_last_ns <
+        service->control_telemetry_period_ns) return;
+    service->control_telemetry_last_ns = now;
+    for (size_t i = 0; i < service->control_telemetry_metric_count; ++i) {
+        const PGW_ControlTelemetryMetric *metric =
+            &service->control_telemetry_metrics[i];
+        PGW_ControlScalar scalar = {.type = metric->scalar_type};
+        PGW_Status status = metric->adapter->read_telemetry(
+            metric->adapter_state, metric->name, &scalar);
+        if (status != PGW_OK || scalar.type != metric->scalar_type) {
+            ++service->control_counters.telemetry_read_failures;
+            continue;
+        }
+        PGW_ControlTelemetry sample = {
+            .metric_id = metric->id,
+            .resource_id = metric->resource_id,
+            .telemetry_kind = metric->telemetry_kind,
+            .scalar = scalar
+        };
+        size_t unit_length = strlen(metric->unit);
+        memcpy(sample.unit, metric->unit, unit_length + 1);
+        if (service->control.iface->write_telemetry(
+                service->control.state, &sample) != PGW_OK) {
+            ++service->control_counters.telemetry_write_failures;
+            continue;
+        }
+        ++service->control_counters.telemetry_samples;
+    }
+}
+#endif
 
 static bool route_storage_finalize(PGW_Route *r)
 {
@@ -337,6 +706,9 @@ PGW_Status PGW_Service_initialize(PGW_Service *s)
         return status;
     }
     s->lifecycle = PGW_READY;
+#if defined(PGW_ENABLE_REMOTE_CONTROL)
+    control_initialize(s);
+#endif
     return PGW_OK;
 }
 
@@ -411,13 +783,23 @@ PGW_Status PGW_Service_step(PGW_Service *s)
         return PGW_INVALID;
     s->lifecycle = PGW_RUNNING;
     PGW_Status result = PGW_OK;
+#if defined(PGW_ENABLE_REMOTE_CONTROL)
+    if (s->control_resources) {
+        control_retry_one_state(s);
+        control_process_commands(s);
+        control_publish_telemetry(s);
+    }
+#endif
     size_t count = PGW_RouteSeq_get_length(&s->routes);
     size_t work = s->route_budget < count ? s->route_budget : count;
     for (size_t i = 0; i < work; ++i) {
         PGW_Route *r = PGW_RouteSeq_get_reference(&s->routes, s->cursor);
         s->cursor = (s->cursor + 1) % count;
-        if (r->lifecycle == PGW_FAULTED) continue;
+        if (r->lifecycle == PGW_FAULTED || r->lifecycle == PGW_PAUSED) continue;
         PGW_Status status = route_step(s, r);
+#if defined(PGW_ENABLE_REMOTE_CONTROL)
+        if (s->control_resources) control_sync_route(s, r);
+#endif
         if (status != PGW_OK) result = status;
     }
     return result;
@@ -448,6 +830,17 @@ PGW_Status PGW_Service_finalize(PGW_Service *s)
     if (!PGW_RouteSeq_unloan(&s->routes) || !PGW_RouteSeq_finalize(&s->routes))
         status = PGW_LOAN_ERROR;
     else s->routes_initialized = false;
+#if defined(PGW_ENABLE_REMOTE_CONTROL)
+    s->control = (PGW_ControlEndpoint){0};
+    s->control_resources = NULL;
+    s->control_resource_count = 0;
+    s->control_state_retry_cursor = 0;
+    s->control_telemetry_metrics = NULL;
+    s->control_telemetry_metric_count = 0;
+    s->control_telemetry_period_ns = 0;
+    s->control_telemetry_last_ns = 0;
+    s->control_telemetry_clock_initialized = false;
+#endif
     s->lifecycle = status == PGW_OK ? PGW_UNINITIALIZED : PGW_FAULTED;
     return status;
 }
@@ -455,6 +848,6 @@ PGW_Status PGW_Service_finalize(PGW_Service *s)
 const char *PGW_status_name(PGW_Status status)
 {
     static const char *const names[] = {"OK", "NO_DATA", "BACKPRESSURE", "INVALID",
-        "UNSUPPORTED", "CAPACITY", "IO_ERROR", "LOAN_ERROR", "FATAL"};
+        "UNSUPPORTED", "CAPACITY", "IO_ERROR", "LOAN_ERROR", "FATAL", "NO_CHANGE"};
     return (unsigned)status < sizeof(names) / sizeof(names[0]) ? names[status] : "UNKNOWN";
 }

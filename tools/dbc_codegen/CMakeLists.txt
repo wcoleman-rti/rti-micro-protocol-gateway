@@ -41,7 +41,7 @@ function(pgw_generate_dbc target dbc mapping output_dir)
         DEPENDS "${dbc}" "${mapping}"
             "${generator_root}/tools/dbc_codegen/generate.py"
             "${generator_root}/tools/dbc_codegen/codec.c.in"
-            "${generator_root}/resources/signal.idl"
+            "${generator_root}/bindings/signal/idl/signal.idl"
         VERBATIM)
     add_library(${target} STATIC "${output_dir}/pgw_codec.c")
     target_include_directories(${target} PUBLIC "${output_dir}")

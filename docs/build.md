@@ -69,6 +69,8 @@ rescan linker, or mismatched Debug/Release selection is an error, not a fallback
 | --- | --- | --- |
 | `PGW_ENABLE_CAN` | ON | CAN adapter and memory/SocketCAN transports |
 | `PGW_ENABLE_DDS` | ON | Real Micro DDS adapter, Appgen and discovery |
+| `PGW_ENABLE_REMOTE_CONTROL` | OFF | Opt-in control IDL/core interface; requires DDS |
+| `PGW_REMOTE_CONTROL_MAX_CONTROLLERS` | 1 | Compile-time bound for control-domain peers (1..32) |
 | `PGW_BUILD_TESTS` | ON | Requirement verification, including core runtime lifecycle |
 | `PGW_BUILD_EXAMPLES` | ON | Runnable examples |
 | `PGW_BUILD_BENCHMARKS` | OFF | Benchmark workloads |
@@ -109,6 +111,13 @@ pgw_micro_codegen(
   DEPENDS "${imported_idl}")
 # Returns SIGNALS_C_SOURCES and SIGNALS_C_HEADERS; always C, Micro,
 # non-interpreted support (-interpreted 0).
+
+pgw_micro_convert(
+  FROM IDL TO XML INPUT "${schema}"
+  OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated"
+  VAR TYPE_MODEL
+  DEPENDS "${schema_target}")
+# TYPE_MODEL is the build-time rtiddsgen XML representation of the IDL types.
 
 pgw_micro_appgen(
   XML_FILE "${system_xml}"

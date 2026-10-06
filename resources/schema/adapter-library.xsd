@@ -1,0 +1,78 @@
+<?xml version="1.0"?>
+<!--
+  (c) 2026 Copyright, Real-Time Innovations, Inc. All rights reserved.
+
+  RTI grants Licensee a license to use, modify, compile, and create derivative
+  works of the Software. Licensee has the right to distribute object form only
+  for use with RTI products. The Software is provided "as is", with no warranty
+  of any type, including any warranty for fitness for any purpose. RTI is under no
+  obligation to maintain or support the Software. RTI shall not be liable for any
+  incidental or consequential damages arising out of the use or inability to use
+  the software.
+-->
+
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+  <xs:simpleType name="identifier">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="[A-Za-z_][A-Za-z0-9_]*"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="resourceKind">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="connection"/>
+      <xs:enumeration value="input"/>
+      <xs:enumeration value="output"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="actionList">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="[A-Za-z]+(\|[A-Za-z]+)*"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:element name="adapter">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element name="control" minOccurs="0">
+          <xs:complexType>
+            <xs:sequence>
+              <xs:element name="capability" minOccurs="0" maxOccurs="3">
+                <xs:complexType>
+                  <xs:attribute name="kind" type="resourceKind" use="required"/>
+                  <xs:attribute name="actions" type="actionList" use="required"/>
+                </xs:complexType>
+              </xs:element>
+            </xs:sequence>
+          </xs:complexType>
+        </xs:element>
+        <xs:element name="telemetry" minOccurs="0">
+          <xs:complexType>
+            <xs:sequence>
+              <xs:element name="metric" minOccurs="0" maxOccurs="unbounded">
+                <xs:complexType>
+                  <xs:attribute name="resource-kind" type="resourceKind" use="required"/>
+                  <xs:attribute name="name" type="identifier" use="required"/>
+                  <xs:attribute name="scalar" use="required">
+                    <xs:simpleType>
+                      <xs:restriction base="xs:string">
+                        <xs:enumeration value="boolean"/>
+                        <xs:enumeration value="int32"/>
+                        <xs:enumeration value="uint32"/>
+                        <xs:enumeration value="int64"/>
+                        <xs:enumeration value="uint64"/>
+                        <xs:enumeration value="double"/>
+                      </xs:restriction>
+                    </xs:simpleType>
+                  </xs:attribute>
+                  <xs:attribute name="unit" type="xs:string" use="required"/>
+                </xs:complexType>
+              </xs:element>
+            </xs:sequence>
+          </xs:complexType>
+        </xs:element>
+      </xs:sequence>
+      <xs:attribute name="name" type="identifier" use="required"/>
+      <xs:attribute name="version" type="xs:positiveInteger" use="required"/>
+      <xs:attribute name="control-api-version" type="xs:positiveInteger" use="required"/>
+    </xs:complexType>
+  </xs:element>
+</xs:schema>

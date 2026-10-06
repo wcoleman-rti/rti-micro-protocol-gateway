@@ -88,6 +88,8 @@ static void routing(void)
     writers[0].status = PGW_FATAL;
     assert(PGW_Service_step(&service) == PGW_FATAL);
     assert(routes[0].lifecycle == PGW_FAULTED);
+    assert(PGW_Route_pause(&routes[0]) == PGW_FATAL);
+    assert(PGW_Route_resume(&routes[0]) == PGW_FATAL);
     PGW_Counters_snapshot(&routes[0].counters, 1, 3, 0, &snapshot);
     assert(snapshot.values[PGW_COUNT_ROUTE_FAULTS] == 1);
     assert(readers[0].borrows == readers[0].returns);
@@ -102,6 +104,364 @@ static void routing(void)
     assert(PGW_EventSeq_finalize(&drained_seq));
     assert(PGW_Diagnostics_finalize(&diagnostics));
 }
+
+static void route_pause_resume(void)
+{
+    PGW_TestReader reader = {.values = {{10, 1}}, .available = 1};
+    PGW_TestWriter writer = {.outcome = PGW_WRITE_ACCEPTED};
+    PGW_SampleRef refs[1];
+    PGW_WriteResult results[1];
+    PGW_Route route;
+    PGW_test_route(&route, 17, &reader, &writer, refs, results, 1);
+    PGW_Service service = {.route_budget = 1, .sample_budget = 1};
+    assert(PGW_test_service_set_routes(&service, &route, 1) == PGW_OK);
+    assert(PGW_Route_pause(&route) == PGW_INVALID);
+    assert(PGW_Service_initialize(&service) == PGW_OK);
+    size_t allocation_calls = PGW_allocation_calls();
+    uint64_t osapi_allocation_calls = PGW_osapi_allocation_calls();
+    PGW_allocation_monitor(true);
+    assert(PGW_Route_resume(&route) == PGW_NO_CHANGE);
+    assert(PGW_Route_pause(&route) == PGW_OK);
+    assert(route.lifecycle == PGW_PAUSED);
+    assert(PGW_Route_pause(&route) == PGW_NO_CHANGE);
+    assert(PGW_Service_step(&service) == PGW_OK);
+    assert(reader.borrows == 0 && writer.writes == 0);
+    assert(PGW_Route_resume(&route) == PGW_OK);
+    assert(route.lifecycle == PGW_READY);
+    assert(PGW_Route_resume(&route) == PGW_NO_CHANGE);
+    assert(PGW_Service_step(&service) == PGW_OK);
+    assert(reader.borrows == 1 && reader.returns == 1 && writer.writes == 1);
+    assert(PGW_Route_pause(&route) == PGW_OK);
+    assert(PGW_Service_step(&service) == PGW_OK);
+    assert(reader.borrows == 1 && writer.writes == 1);
+    assert(PGW_allocation_calls() == allocation_calls);
+    assert(PGW_osapi_allocation_calls() == osapi_allocation_calls);
+    PGW_allocation_monitor(false);
+    assert(PGW_Service_stop(&service) == PGW_OK);
+    assert(PGW_Route_resume(&route) == PGW_INVALID);
+    assert(PGW_Service_finalize(&service) == PGW_OK);
+    assert(strcmp(PGW_status_name(PGW_NO_CHANGE), "NO_CHANGE") == 0);
+}
+
+#if defined(PGW_ENABLE_REMOTE_CONTROL)
+typedef struct {
+    PGW_ControlCommand commands[8];
+    PGW_ControlCorrelation correlations[8];
+    PGW_ControlState states[8];
+    PGW_ControlResult results[8];
+    size_t command_count;
+    size_t command_cursor;
+    size_t state_attempts;
+    size_t state_writes;
+    size_t result_attempts;
+    size_t result_writes;
+    size_t fail_state_writes;
+    size_t fail_result_writes;
+    size_t telemetry_reads;
+    size_t telemetry_attempts;
+    size_t telemetry_writes;
+    size_t fail_telemetry_writes;
+    uint64_t clock_ns;
+    size_t adapter_calls;
+    PGW_Status adapter_status;
+} ControlHarness;
+
+static PGW_Status control_take(void *state, PGW_ControlCommand *command,
+                               PGW_ControlCorrelation *correlation)
+{
+    ControlHarness *harness = state;
+    if (harness->command_cursor == harness->command_count) return PGW_NO_DATA;
+    size_t index = harness->command_cursor++;
+    *command = harness->commands[index];
+    *correlation = harness->correlations[index];
+    return PGW_OK;
+}
+
+static PGW_Status control_write_state(void *state, const PGW_ControlState *snapshot)
+{
+    ControlHarness *harness = state;
+    ++harness->state_attempts;
+    if (harness->fail_state_writes) {
+        --harness->fail_state_writes;
+        return PGW_IO_ERROR;
+    }
+    assert(harness->state_writes < 8);
+    harness->states[harness->state_writes++] = *snapshot;
+    return PGW_OK;
+}
+
+static PGW_Status control_write_result(void *state, const PGW_ControlResult *result)
+{
+    ControlHarness *harness = state;
+    ++harness->result_attempts;
+    assert(harness->result_writes < 8);
+    harness->results[harness->result_writes++] = *result;
+    if (harness->fail_result_writes) {
+        --harness->fail_result_writes;
+        return PGW_BACKPRESSURE;
+    }
+    return PGW_OK;
+}
+
+static PGW_Status control_write_telemetry(void *state,
+                                          const PGW_ControlTelemetry *sample)
+{
+    ControlHarness *harness = state;
+    ++harness->telemetry_attempts;
+    assert(sample->metric_id == 0 && sample->resource_id == 0 &&
+           sample->telemetry_kind == 0 && sample->scalar.type == PGW_CONTROL_SCALAR_UINT64 &&
+           !strcmp(sample->unit, "frames"));
+    if (harness->fail_telemetry_writes) {
+        --harness->fail_telemetry_writes;
+        return PGW_BACKPRESSURE;
+    }
+    ++harness->telemetry_writes;
+    return PGW_OK;
+}
+
+static PGW_Status control_adapter_apply(void *state, PGW_ControlAction action)
+{
+    ControlHarness *harness = state;
+    ++harness->adapter_calls;
+    assert(action == PGW_CONTROL_INPUT_ENABLE ||
+           action == PGW_CONTROL_INPUT_DISABLE);
+    return harness->adapter_status;
+}
+
+static PGW_Status control_read_telemetry(void *state, const char *name,
+                                         PGW_ControlScalar *out)
+{
+    ControlHarness *harness = state;
+    if (!out || strcmp(name, "received_frames")) return PGW_UNSUPPORTED;
+    ++harness->telemetry_reads;
+    out->type = PGW_CONTROL_SCALAR_UINT64;
+    out->value.uint64_value = harness->telemetry_reads * 11;
+    return PGW_OK;
+}
+
+static bool control_clock(void *state, uint64_t *out)
+{
+    ControlHarness *harness = state;
+    harness->clock_ns += UINT64_C(50000000);
+    *out = harness->clock_ns;
+    return true;
+}
+
+static const PGW_ControlEndpointI control_endpoint_iface = {
+    PGW_CONTROL_ABI_VERSION,
+    sizeof(PGW_ControlEndpointI),
+    control_take,
+    control_write_state,
+    control_write_result,
+    control_write_telemetry
+};
+
+static const PGW_ControlAdapterI control_input_adapter = {
+    PGW_CONTROL_ABI_VERSION,
+    sizeof(PGW_ControlAdapterI),
+    1,
+    UINT32_C(1) << PGW_CONTROL_RESOURCE_INPUT,
+    PGW_CONTROL_ACTION_MASK(PGW_CONTROL_INPUT_ENABLE) |
+        PGW_CONTROL_ACTION_MASK(PGW_CONTROL_INPUT_DISABLE),
+    control_adapter_apply,
+    0,
+    NULL
+};
+
+static const PGW_ControlAdapterI control_telemetry_adapter = {
+    PGW_CONTROL_ABI_VERSION,
+    sizeof(PGW_ControlAdapterI),
+    1,
+    UINT32_C(1) << PGW_CONTROL_RESOURCE_CONNECTION,
+    0,
+    control_adapter_apply,
+    UINT32_C(1),
+    control_read_telemetry
+};
+
+static void queue_control(ControlHarness *harness, size_t index,
+                          uint32_t resource_id, PGW_ControlAction action)
+{
+    harness->commands[index] = (PGW_ControlCommand){resource_id, action};
+    harness->correlations[index].publication_handle[0] = (uint8_t)(index + 1);
+    harness->correlations[index].publication_sequence_high = 2;
+    harness->correlations[index].publication_sequence_low = (uint32_t)(index + 10);
+}
+
+static void remote_control_routes_are_bounded_and_allocation_free(void)
+{
+    ControlHarness harness = {0};
+    PGW_TestReader reader = {.values = {{10, 1}}, .available = 1};
+    PGW_TestWriter writer = {.outcome = PGW_WRITE_ACCEPTED};
+    PGW_SampleRef refs[1];
+    PGW_WriteResult writes[1];
+    PGW_Route route;
+    PGW_test_route(&route, 17, &reader, &writer, refs, writes, 1);
+    PGW_Service service = {.route_budget = 1, .sample_budget = 1};
+    PGW_ControlResource resource = {
+        .id = 42,
+        .kind = PGW_CONTROL_RESOURCE_ROUTE,
+        .command_capabilities =
+            PGW_CONTROL_ACTION_MASK(PGW_CONTROL_ROUTE_PAUSE) |
+            PGW_CONTROL_ACTION_MASK(PGW_CONTROL_ROUTE_RESUME),
+        .route = &route
+    };
+    PGW_ControlEndpoint endpoint = {&harness, &control_endpoint_iface};
+    assert(PGW_test_service_set_routes(&service, &route, 1) == PGW_OK);
+    PGW_ControlAdapterI invalid_adapter = control_input_adapter;
+    invalid_adapter.action_mask = 0;
+    PGW_ControlResource invalid_resource = {
+        .id = 43,
+        .kind = PGW_CONTROL_RESOURCE_INPUT,
+        .command_capabilities = PGW_CONTROL_ACTION_MASK(PGW_CONTROL_INPUT_ENABLE),
+        .adapter = &invalid_adapter
+    };
+    assert(PGW_Service_set_control(&service, endpoint, &invalid_resource, 1) == PGW_INVALID);
+    assert(PGW_Service_set_control(&service, endpoint, &resource, 1) == PGW_OK);
+    queue_control(&harness, 0, 42, PGW_CONTROL_ROUTE_PAUSE);
+    queue_control(&harness, 1, 42, PGW_CONTROL_ROUTE_PAUSE);
+    queue_control(&harness, 2, 42, PGW_CONTROL_ROUTE_RESUME);
+    queue_control(&harness, 3, 42, PGW_CONTROL_ROUTE_RESUME);
+    queue_control(&harness, 4, 42, PGW_CONTROL_ROUTE_PAUSE);
+    queue_control(&harness, 5, 42, PGW_CONTROL_ROUTE_RESUME);
+    queue_control(&harness, 6, 999, PGW_CONTROL_ROUTE_PAUSE);
+    queue_control(&harness, 7, 42, PGW_CONTROL_CONNECTION_UP);
+    harness.command_count = 5;
+    harness.fail_result_writes = 1;
+    assert(PGW_Service_initialize(&service) == PGW_OK);
+    assert(harness.state_writes == 1);
+    assert(harness.states[0].resource_id == 42 &&
+           harness.states[0].status == PGW_CONTROL_STATUS_UP);
+    PGW_allocation_monitor(true);
+    assert(PGW_Service_step(&service) == PGW_OK);
+    assert(harness.command_cursor == PGW_CONTROL_MAX_COMMANDS_PER_STEP);
+    assert(harness.results[0].outcome == PGW_CONTROL_OUTCOME_APPLIED);
+    assert(harness.results[1].outcome == PGW_CONTROL_OUTCOME_NO_CHANGE);
+    assert(harness.results[2].outcome == PGW_CONTROL_OUTCOME_APPLIED);
+    assert(harness.results[3].outcome == PGW_CONTROL_OUTCOME_NO_CHANGE);
+    assert(harness.results[0].correlation.publication_handle[0] == 1);
+    assert(harness.results[0].correlation.publication_sequence_high == 2);
+    assert(harness.results[0].correlation.publication_sequence_low == 10);
+    assert(harness.state_writes == 3);
+    assert(reader.borrows == 1 && writer.writes == 1);
+
+    harness.fail_state_writes = 1;
+    assert(PGW_Service_step(&service) == PGW_OK);
+    assert(harness.command_cursor == 5 && route.lifecycle == PGW_PAUSED);
+    assert(harness.state_attempts == 4 && harness.state_writes == 3);
+    assert(reader.borrows == 1 && writer.writes == 1);
+    harness.command_count = 8;
+    assert(PGW_Service_step(&service) == PGW_OK);
+    assert(harness.command_cursor == 8 && route.lifecycle == PGW_RUNNING);
+    assert(harness.states[3].status == PGW_CONTROL_STATUS_PAUSED);
+    assert(harness.states[4].status == PGW_CONTROL_STATUS_UP);
+    assert(harness.results[6].outcome == PGW_CONTROL_OUTCOME_INVALID);
+    assert(harness.results[7].outcome == PGW_CONTROL_OUTCOME_UNSUPPORTED);
+    PGW_ControlCounters counters;
+    assert(PGW_Service_control_counters(&service, &counters) == PGW_OK);
+    assert(counters.commands_processed == 8);
+    assert(counters.commands_invalid == 1 && counters.commands_unsupported == 1);
+    assert(counters.state_write_failures == 1 && counters.state_retries == 1);
+    assert(counters.result_write_failures == 1);
+    assert(harness.result_attempts == 8 && harness.result_writes == 8);
+    assert(PGW_allocation_calls() == 0 && PGW_osapi_allocation_calls() == 0);
+    PGW_allocation_monitor(false);
+    assert(PGW_Service_stop(&service) == PGW_OK);
+    assert(PGW_Service_finalize(&service) == PGW_OK);
+}
+
+static void remote_control_adapter_actions_are_idempotent(void)
+{
+    ControlHarness harness = {0};
+    PGW_TestReader reader = {0};
+    PGW_TestWriter writer = {.outcome = PGW_WRITE_ACCEPTED};
+    PGW_SampleRef refs[1];
+    PGW_WriteResult writes[1];
+    PGW_Route route;
+    PGW_test_route(&route, 18, &reader, &writer, refs, writes, 1);
+    PGW_Service service = {.route_budget = 1, .sample_budget = 1};
+    PGW_ControlResource resource = {
+        .id = 3,
+        .kind = PGW_CONTROL_RESOURCE_INPUT,
+        .command_capabilities =
+            PGW_CONTROL_ACTION_MASK(PGW_CONTROL_INPUT_ENABLE) |
+            PGW_CONTROL_ACTION_MASK(PGW_CONTROL_INPUT_DISABLE),
+        .adapter = &control_input_adapter,
+        .adapter_state = &harness
+    };
+    PGW_ControlEndpoint endpoint = {&harness, &control_endpoint_iface};
+    assert(PGW_test_service_set_routes(&service, &route, 1) == PGW_OK);
+    assert(PGW_Service_set_control(&service, endpoint, &resource, 1) == PGW_OK);
+    queue_control(&harness, 0, 3, PGW_CONTROL_INPUT_ENABLE);
+    queue_control(&harness, 1, 3, PGW_CONTROL_INPUT_ENABLE);
+    queue_control(&harness, 2, 3, PGW_CONTROL_INPUT_DISABLE);
+    harness.command_count = 3;
+    assert(PGW_Service_initialize(&service) == PGW_OK);
+    assert(harness.states[0].status == PGW_CONTROL_STATUS_UNKNOWN);
+    assert(PGW_Service_step(&service) == PGW_OK);
+    assert(harness.adapter_calls == 2);
+    assert(harness.results[0].outcome == PGW_CONTROL_OUTCOME_APPLIED);
+    assert(harness.results[1].outcome == PGW_CONTROL_OUTCOME_NO_CHANGE);
+    assert(harness.results[2].outcome == PGW_CONTROL_OUTCOME_APPLIED);
+    assert(harness.states[1].status == PGW_CONTROL_STATUS_UP);
+    assert(harness.states[2].status == PGW_CONTROL_STATUS_DOWN);
+    assert(PGW_Service_stop(&service) == PGW_OK);
+    assert(PGW_Service_finalize(&service) == PGW_OK);
+}
+
+static void remote_control_telemetry_is_periodic_and_failure_bounded(void)
+{
+    ControlHarness harness = {.fail_telemetry_writes = 1};
+    PGW_TestReader reader = {0};
+    PGW_TestWriter writer = {.outcome = PGW_WRITE_ACCEPTED};
+    PGW_SampleRef refs[1];
+    PGW_WriteResult writes[1];
+    PGW_Route route;
+    PGW_test_route(&route, 19, &reader, &writer, refs, writes, 1);
+    PGW_Service service = {
+        .route_budget = 1,
+        .sample_budget = 1,
+        .clock_ns = control_clock,
+        .clock_state = &harness
+    };
+    PGW_ControlResource resource = {
+        .id = 0,
+        .kind = PGW_CONTROL_RESOURCE_CONNECTION,
+        .telemetry_capabilities = 1,
+        .adapter = &control_telemetry_adapter,
+        .adapter_state = &harness
+    };
+    PGW_ControlTelemetryMetric metric = {
+        .id = 0,
+        .resource_id = 0,
+        .telemetry_kind = 0,
+        .adapter_metric_bit = 0,
+        .name = "received_frames",
+        .unit = "frames",
+        .scalar_type = PGW_CONTROL_SCALAR_UINT64,
+        .adapter = &control_telemetry_adapter,
+        .adapter_state = &harness
+    };
+    PGW_ControlEndpoint endpoint = {&harness, &control_endpoint_iface};
+    assert(PGW_test_service_set_routes(&service, &route, 1) == PGW_OK);
+    assert(PGW_Service_set_control(&service, endpoint, &resource, 1) == PGW_OK);
+    assert(PGW_Service_set_telemetry(&service, &metric, 1, 50, 100) == PGW_INVALID);
+    assert(PGW_Service_set_telemetry(&service, &metric, 1, 100, 100) == PGW_OK);
+    assert(PGW_Service_initialize(&service) == PGW_OK);
+    PGW_allocation_monitor(true);
+    for (unsigned i = 0; i < 5; ++i) assert(PGW_Service_step(&service) == PGW_OK);
+    PGW_ControlCounters counters;
+    assert(PGW_Service_control_counters(&service, &counters) == PGW_OK);
+    assert(harness.telemetry_attempts == 2 && harness.telemetry_reads == 2);
+    assert(harness.telemetry_writes == 1);
+    assert(counters.telemetry_write_failures == 1 &&
+           counters.telemetry_samples == 1 && counters.telemetry_read_failures == 0);
+    assert(PGW_allocation_calls() == 0 && PGW_osapi_allocation_calls() == 0);
+    PGW_allocation_monitor(false);
+    assert(PGW_Service_stop(&service) == PGW_OK);
+    assert(PGW_Service_finalize(&service) == PGW_OK);
+}
+#endif
 
 typedef struct { double temperature; uint32_t sensor; } Temperature;
 typedef struct { Temperature value; bool loaned; size_t returns; } TemperatureReader;
@@ -291,7 +651,14 @@ static void bounds_and_schema(void)
         PGW_ABI_VERSION, sizeof(connection), registry_reader, NULL, registry_close
     };
     const PGW_AdapterI adapter = {
-        PGW_ABI_VERSION, sizeof(adapter), "fixture", registry_create, &connection
+        .version = PGW_ABI_VERSION,
+        .size = sizeof(adapter),
+        .name = "fixture",
+        .create = registry_create,
+        .connection = &connection,
+#if defined(PGW_ENABLE_REMOTE_CONTROL)
+        .control = NULL,
+#endif
     };
     PGW_AdapterI other_adapter = adapter;
     other_adapter.name = "other";
@@ -473,6 +840,12 @@ int main(void)
     PGW_allocation_monitor(false);
     bounds_and_schema();
     routing();
+    route_pause_resume();
+#if defined(PGW_ENABLE_REMOTE_CONTROL)
+    remote_control_routes_are_bounded_and_allocation_free();
+    remote_control_adapter_actions_are_idempotent();
+    remote_control_telemetry_is_periodic_and_failure_bounded();
+#endif
     second_schema_and_loan_errors();
     clock_failure_is_not_zero_timestamp();
     concurrent_capture();

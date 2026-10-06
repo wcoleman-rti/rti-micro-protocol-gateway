@@ -12,10 +12,16 @@
 
 #include "pgw/dds/connext_micro.h"
 #include "pgw/can_memory.h"
+#include "pgw/runtime.h"
 #include "pgw_codec.h"
 #include "probe_binding.h"
 #include "ddsAppgen.h"
 #include "diagnostics_binding.h"
+#if defined(PGW_ENABLE_REMOTE_CONTROL)
+#include "control_binding.h"
+#include "control_resources.h"
+#include "pgw/compiled_config.h"
+#endif
 #include "graph.h"
 #include "allocation.h"
 #include "signalsSupport.h"
@@ -26,6 +32,9 @@
 #include <stdatomic.h>
 
 extern const PGW_DDSConfig pgw_config_gateway, pgw_config_companion;
+#if defined(PGW_ENABLE_REMOTE_CONTROL)
+extern const size_t pgw_control_resource_count;
+#endif
 static atomic_bool frozen;
 static atomic_uint_fast64_t runtime_arena_calls;
 PGW_Status __real_PGW_Arena_allocate(PGW_Arena *, size_t, size_t, void **);
@@ -207,6 +216,289 @@ int main(void)
         CHECK(PGW_DDSEndpointConfigSeq_finalize(&invalid.endpoints));
     }
     CHECK(PGW_DDS_create(&pgw_config_gateway, &arena, &gateway) == PGW_OK);
+#if defined(PGW_ENABLE_REMOTE_CONTROL)
+    {
+        DDS_DomainParticipant *dynamic_participant = NULL;
+        PGW_DDSStaticEndpoint dynamic_endpoints[
+            3 + (PGW_CONTROL_TELEMETRY_METRIC_COUNT ? 1 : 0)];
+#if PGW_CONTROL_TELEMETRY_METRIC_COUNT > 0
+        PGW_DDSStaticEndpoint controller_endpoints[4];
+        DDS_DomainParticipant *controller_participant = NULL;
+        size_t controller_endpoint_count = 0;
+#endif
+        DDS_InstanceHandle_t state_handles[PGW_CONTROL_RESOURCE_COUNT];
+#if PGW_CONTROL_TELEMETRY_METRIC_COUNT > 0
+        DDS_InstanceHandle_t telemetry_handles[PGW_CONTROL_TELEMETRY_METRIC_COUNT];
+        PGW_ControlTelemetryMetric telemetry_metrics[PGW_CONTROL_TELEMETRY_METRIC_COUNT];
+#else
+        DDS_InstanceHandle_t *telemetry_handles = NULL;
+        PGW_ControlTelemetryMetric *telemetry_metrics = NULL;
+#endif
+        PGW_DDSControlTransport control_transport = {0};
+        size_t telemetry_definition_count = 0;
+#if PGW_CONTROL_TELEMETRY_METRIC_COUNT > 0
+        telemetry_definition_count = pgw_control_telemetry_metric_count;
+        for (size_t i = 0; i < telemetry_definition_count; ++i) {
+            const PGW_CompiledControlTelemetry *compiled =
+                &pgw_control_telemetry_metrics[i];
+            telemetry_metrics[i] = (PGW_ControlTelemetryMetric){
+                .id = compiled->id,
+                .resource_id = compiled->resource_id,
+                .telemetry_kind = compiled->telemetry_kind,
+                .adapter_metric_bit = compiled->adapter_metric_bit,
+                .name = compiled->name,
+                .unit = compiled->unit,
+                .scalar_type = (PGW_ControlScalarType)compiled->scalar_type
+            };
+        }
+#endif
+        size_t dynamic_endpoint_count = 0;
+        PGW_DDSRemoteControlOptions control_options = {
+            PGW_DDS_REMOTE_CONTROL_OPTIONS_VERSION,
+            sizeof(PGW_DDSRemoteControlOptions), true,
+            (DDS_DomainId_t)PGW_EXAMPLE_DYNAMIC_DOMAIN,
+            PGW_CONTROL_MAX_CONTROLLER_PEERS, 0,
+            PGW_CONTROL_TELEMETRY_MINIMUM_PERIOD_MS
+        };
+        CHECK(PGW_DDS_remote_control_options_validate(&control_options,
+              PGW_CONTROL_TELEMETRY_METRIC_COUNT > 0,
+              PGW_CONTROL_TELEMETRY_MINIMUM_PERIOD_MS) == PGW_OK);
+        if (PGW_CONTROL_TELEMETRY_METRIC_COUNT > 0) {
+            control_options.telemetry_period_ms = 10;
+            CHECK(PGW_DDS_remote_control_options_validate(&control_options, true,
+                  PGW_CONTROL_TELEMETRY_MINIMUM_PERIOD_MS) == PGW_INVALID);
+            control_options.telemetry_period_ms = PGW_CONTROL_TELEMETRY_MINIMUM_PERIOD_MS;
+            CHECK(PGW_DDS_remote_control_options_validate(&control_options, true,
+                  PGW_CONTROL_TELEMETRY_MINIMUM_PERIOD_MS) == PGW_OK);
+            control_options.telemetry_period_ms = 0;
+        } else {
+            control_options.telemetry_period_ms = 10;
+            CHECK(PGW_DDS_remote_control_options_validate(&control_options, false, 0) ==
+                  PGW_INVALID);
+            control_options.telemetry_period_ms = 0;
+        }
+        CHECK(PGW_DDS_create_control_participant(&control_options,
+              dynamic_endpoints,
+              sizeof(dynamic_endpoints) / sizeof(dynamic_endpoints[0]),
+              &dynamic_endpoint_count,
+              &dynamic_participant) == PGW_OK);
+        struct DDS_DomainParticipantQos control_participant_qos =
+            DDS_DomainParticipantQos_INITIALIZER;
+        CHECK(DDS_DomainParticipant_get_qos(dynamic_participant,
+              &control_participant_qos) == DDS_RETCODE_OK);
+        printf("Micro target dedicated participant limits: local_readers=%d "
+               "local_writers=%d local_publishers=%d local_subscribers=%d "
+               "local_topics=%d local_types=%d remote_participants=%d "
+               "remote_readers=%d remote_writers=%d\n",
+               control_participant_qos.resource_limits.local_reader_allocation,
+               control_participant_qos.resource_limits.local_writer_allocation,
+               control_participant_qos.resource_limits.local_publisher_allocation,
+               control_participant_qos.resource_limits.local_subscriber_allocation,
+               control_participant_qos.resource_limits.local_topic_allocation,
+               control_participant_qos.resource_limits.local_type_allocation,
+               control_participant_qos.resource_limits.remote_participant_allocation,
+               control_participant_qos.resource_limits.remote_reader_allocation,
+               control_participant_qos.resource_limits.remote_writer_allocation);
+        CHECK(control_participant_qos.resource_limits.local_reader_allocation >= 1 &&
+              control_participant_qos.resource_limits.local_writer_allocation >=
+                  2 + (DDS_Long)PGW_CONTROL_TELEMETRY_METRIC_COUNT &&
+              control_participant_qos.resource_limits.local_topic_allocation >=
+                  3 + (DDS_Long)PGW_CONTROL_TELEMETRY_METRIC_COUNT &&
+              control_participant_qos.resource_limits.local_type_allocation >=
+                  3 + (DDS_Long)PGW_CONTROL_TELEMETRY_METRIC_COUNT &&
+              control_participant_qos.resource_limits.remote_participant_allocation ==
+                  (DDS_Long)PGW_CONTROL_MAX_CONTROLLER_PEERS &&
+              control_participant_qos.resource_limits.remote_reader_allocation ==
+                  (2 + (DDS_Long)PGW_CONTROL_TELEMETRY_METRIC_COUNT) *
+                      (DDS_Long)PGW_CONTROL_MAX_CONTROLLER_PEERS &&
+              control_participant_qos.resource_limits.remote_writer_allocation ==
+                  (DDS_Long)PGW_CONTROL_MAX_CONTROLLER_PEERS);
+        DDS_DomainParticipantQos_finalize(&control_participant_qos);
+        CHECK(DDS_DomainParticipant_get_domain_id(dynamic_participant) ==
+              (DDS_DomainId_t)PGW_EXAMPLE_DYNAMIC_DOMAIN);
+        CHECK(DDS_DomainParticipant_lookup_topicdescription(
+                  dynamic_participant, "ControlState") != NULL);
+        CHECK(DDS_DomainParticipant_lookup_topicdescription(
+                  dynamic_participant, "ControlCommand") != NULL);
+        CHECK(DDS_DomainParticipant_lookup_topicdescription(
+                  dynamic_participant, "ControlResult") != NULL);
+        CHECK(dynamic_endpoint_count ==
+              3 + PGW_CONTROL_TELEMETRY_METRIC_COUNT);
+        DDS_DataWriter *state_writer = NULL, *result_writer = NULL,
+                       *telemetry_writer = NULL;
+        DDS_DataReader *command_reader = NULL;
+        for (size_t i = 0; i < dynamic_endpoint_count; ++i) {
+            if (!strcmp(dynamic_endpoints[i].name, "ControlState"))
+                state_writer = dynamic_endpoints[i].datawriter;
+            if (!strcmp(dynamic_endpoints[i].name, "ControlResult"))
+                result_writer = dynamic_endpoints[i].datawriter;
+            if (!strcmp(dynamic_endpoints[i].name, "ControlTelemetry"))
+                telemetry_writer = dynamic_endpoints[i].datawriter;
+            if (!strcmp(dynamic_endpoints[i].name, "ControlCommand"))
+                command_reader = dynamic_endpoints[i].datareader;
+        }
+        CHECK(state_writer && result_writer && command_reader);
+        CHECK((PGW_CONTROL_TELEMETRY_METRIC_COUNT != 0) == (telemetry_writer != NULL));
+        struct DDS_DataWriterQos state_qos = DDS_DataWriterQos_INITIALIZER;
+        CHECK(DDS_DataWriter_get_qos(state_writer, &state_qos) == DDS_RETCODE_OK);
+        CHECK(state_qos.history.kind == DDS_KEEP_LAST_HISTORY_QOS &&
+              state_qos.history.depth == 1 &&
+              state_qos.durability.kind == DDS_TRANSIENT_LOCAL_DURABILITY_QOS &&
+              state_qos.reliability.kind == DDS_RELIABLE_RELIABILITY_QOS &&
+              state_qos.resource_limits.max_instances == (DDS_Long)pgw_control_resource_count &&
+              state_qos.reliability.max_blocking_time.sec == 0 &&
+              state_qos.reliability.max_blocking_time.nanosec == 0);
+        DDS_Long control_state_depth = state_qos.history.depth;
+        DDS_Long control_state_instances = state_qos.resource_limits.max_instances;
+        DDS_Long control_state_samples = state_qos.resource_limits.max_samples;
+        DDS_Long control_state_blocking_seconds =
+            state_qos.reliability.max_blocking_time.sec;
+        DDS_UnsignedLong control_state_blocking_nanoseconds =
+            state_qos.reliability.max_blocking_time.nanosec;
+        DDS_DataWriterQos_finalize(&state_qos);
+        struct DDS_DataWriterQos result_qos = DDS_DataWriterQos_INITIALIZER;
+        CHECK(DDS_DataWriter_get_qos(result_writer, &result_qos) == DDS_RETCODE_OK);
+        CHECK(result_qos.history.depth == 4 &&
+              result_qos.reliability.kind == DDS_RELIABLE_RELIABILITY_QOS &&
+              result_qos.reliability.max_blocking_time.sec == 0 &&
+              result_qos.reliability.max_blocking_time.nanosec == 0);
+        DDS_Long control_result_depth = result_qos.history.depth;
+        DDS_Long control_result_samples = result_qos.resource_limits.max_samples;
+        DDS_Long control_result_blocking_seconds =
+            result_qos.reliability.max_blocking_time.sec;
+        DDS_UnsignedLong control_result_blocking_nanoseconds =
+            result_qos.reliability.max_blocking_time.nanosec;
+        DDS_DataWriterQos_finalize(&result_qos);
+        struct DDS_DataReaderQos command_qos = DDS_DataReaderQos_INITIALIZER;
+        CHECK(DDS_DataReader_get_qos(command_reader, &command_qos) == DDS_RETCODE_OK);
+        CHECK(command_qos.history.depth == 4 &&
+              command_qos.reliability.kind == DDS_RELIABLE_RELIABILITY_QOS &&
+              command_qos.resource_limits.max_samples_per_instance == 4);
+        DDS_Long control_command_depth = command_qos.history.depth;
+        DDS_Long control_command_samples = command_qos.resource_limits.max_samples;
+        printf("Micro target control profile: domain=%d resources=%u endpoints=%zu "
+               "command_reader(depth=%d,samples=%d) "
+               "state_writer(depth=%d,instances=%d,samples=%d,block=%d.%09u) "
+               "result_writer(depth=%d,samples=%d,block=%d.%09u)\n",
+               (int)PGW_EXAMPLE_DYNAMIC_DOMAIN, PGW_CONTROL_RESOURCE_COUNT,
+               dynamic_endpoint_count,
+               control_command_depth, control_command_samples,
+               control_state_depth, control_state_instances, control_state_samples,
+               control_state_blocking_seconds, control_state_blocking_nanoseconds,
+               control_result_depth, control_result_samples,
+               control_result_blocking_seconds, control_result_blocking_nanoseconds);
+        DDS_DataReaderQos_finalize(&command_qos);
+        if (telemetry_writer) {
+            struct DDS_DataWriterQos telemetry_qos = DDS_DataWriterQos_INITIALIZER;
+            CHECK(DDS_DataWriter_get_qos(telemetry_writer, &telemetry_qos) == DDS_RETCODE_OK);
+            CHECK(telemetry_qos.history.depth == 1 &&
+                  telemetry_qos.resource_limits.max_instances ==
+                      (DDS_Long)PGW_CONTROL_TELEMETRY_METRIC_COUNT &&
+                  telemetry_qos.reliability.kind == DDS_BEST_EFFORT_RELIABILITY_QOS &&
+                  telemetry_qos.durability.kind == DDS_VOLATILE_DURABILITY_QOS);
+            printf("Micro target telemetry profile: metrics=%u depth=%d instances=%d\n",
+                   PGW_CONTROL_TELEMETRY_METRIC_COUNT, telemetry_qos.history.depth,
+                   telemetry_qos.resource_limits.max_instances);
+            DDS_DataWriterQos_finalize(&telemetry_qos);
+        }
+        CHECK(PGW_DDS_control_transport_initialize(&control_transport,
+            dynamic_endpoints, dynamic_endpoint_count,
+            PGW_CONTROL_TELEMETRY_METRIC_COUNT > 0,
+            &PGW_example_control_types, pgw_control_resource_count, state_handles,
+            PGW_CONTROL_RESOURCE_COUNT, telemetry_metrics,
+            telemetry_definition_count, telemetry_handles,
+            PGW_CONTROL_TELEMETRY_METRIC_COUNT) == PGW_OK);
+        PGW_ControlEndpoint control_endpoint =
+            PGW_DDS_control_endpoint(&control_transport);
+        PGW_ControlState initial_state = {
+            0, PGW_CONTROL_STATUS_UNKNOWN, 3u, 0u
+        };
+        CHECK(control_endpoint.iface->write_state(
+                  control_endpoint.state, &initial_state) == PGW_OK);
+        PGW_ControlResult result_event = {
+            .resource_id = 0,
+            .action = PGW_CONTROL_CONNECTION_UP,
+            .outcome = PGW_CONTROL_OUTCOME_APPLIED,
+            .correlation = {{1}, 4, 5}
+        };
+        CHECK(control_endpoint.iface->write_result(
+                  control_endpoint.state, &result_event) == PGW_OK);
+        if (PGW_CONTROL_TELEMETRY_METRIC_COUNT) {
+            PGW_ControlTelemetry telemetry = {
+                0, 0, 0,
+                {PGW_CONTROL_SCALAR_UINT64, {.uint64_value = 17}},
+                "frames"
+            };
+            CHECK(control_endpoint.iface->write_telemetry(
+                      control_endpoint.state, &telemetry) == PGW_OK);
+        }
+#if PGW_CONTROL_TELEMETRY_METRIC_COUNT > 0
+        CHECK(PGW_DDS_create_controller_participant(&control_options,
+            controller_endpoints, 4, &controller_endpoint_count,
+            &controller_participant) == PGW_OK);
+        CHECK(controller_endpoint_count == 4);
+        DDS_DataReader *telemetry_reader = NULL;
+        for (size_t i = 0; i < controller_endpoint_count; ++i)
+            if (!strcmp(controller_endpoints[i].name, "ControlTelemetry") &&
+                controller_endpoints[i].reader)
+                telemetry_reader = controller_endpoints[i].datareader;
+        CHECK(telemetry_reader);
+        struct DDS_PublicationMatchedStatus telemetry_matches;
+        telemetry_matches.current_count = 0;
+        for (unsigned attempt = 0; attempt < 200 &&
+             telemetry_matches.current_count == 0; ++attempt) {
+            CHECK(DDS_DataWriter_get_publication_matched_status(
+                telemetry_writer, &telemetry_matches) == DDS_RETCODE_OK);
+            if (!telemetry_matches.current_count) OSAPI_Thread_sleep(25);
+        }
+        CHECK(telemetry_matches.current_count == 1);
+        const uint64_t write_count = 10000;
+        PGW_ControlTelemetry measured_telemetry = {
+            0, 0, 0,
+            {PGW_CONTROL_SCALAR_UINT64, {0}},
+            "frames"
+        };
+        uint64_t start_ns, finish_ns;
+        CHECK(PGW_Runtime_monotonic_time_ns(&start_ns));
+        PGW_allocation_monitor(true);
+        for (uint64_t i = 0; i < write_count; ++i) {
+            measured_telemetry.scalar.value.uint64_value = i;
+            CHECK(control_endpoint.iface->write_telemetry(
+                control_endpoint.state, &measured_telemetry) == PGW_OK);
+        }
+        PGW_allocation_monitor(false);
+        CHECK(PGW_Runtime_monotonic_time_ns(&finish_ns));
+        CHECK(finish_ns > start_ns);
+        CHECK(PGW_allocation_calls() == 0 && PGW_osapi_allocation_calls() == 0);
+        PGW_ControlTelemetry observed_telemetry = {0};
+        PGW_Status telemetry_status = PGW_NO_DATA;
+        for (unsigned attempt = 0; attempt < 200 && telemetry_status == PGW_NO_DATA; ++attempt) {
+            telemetry_status = PGW_example_control_types.take_telemetry(
+                telemetry_reader, &observed_telemetry);
+            if (telemetry_status == PGW_NO_DATA) OSAPI_Thread_sleep(5);
+        }
+        CHECK(telemetry_status == PGW_OK);
+        CHECK(observed_telemetry.resource_id == 0 &&
+              observed_telemetry.telemetry_kind == 0 &&
+              observed_telemetry.scalar.type == PGW_CONTROL_SCALAR_UINT64 &&
+              observed_telemetry.scalar.value.uint64_value < write_count);
+        printf("Micro target telemetry benchmark: writes=%llu elapsed_ns=%llu "
+               "average_ns_per_write=%llu ceiling_hz=%llu allocation_calls=0\n",
+               (unsigned long long)write_count,
+               (unsigned long long)(finish_ns - start_ns),
+               (unsigned long long)((finish_ns - start_ns) / write_count),
+               (unsigned long long)(write_count * UINT64_C(1000000000) /
+                                    (finish_ns - start_ns)));
+        CHECK(PGW_DDS_delete_dynamic_participant(controller_participant) == PGW_OK);
+#endif
+        PGW_ControlCommand no_command;
+        PGW_ControlCorrelation no_correlation;
+        CHECK(control_endpoint.iface->take_command(control_endpoint.state,
+            &no_command, &no_correlation) == PGW_NO_DATA);
+        CHECK(PGW_DDS_control_transport_finalize(&control_transport) == PGW_OK);
+        CHECK(PGW_DDS_delete_dynamic_participant(dynamic_participant) == PGW_OK);
+    }
+#endif
     CHECK(PGW_DDSConnextMicroAdapter.create(&pgw_config_companion, &arena, &companion) == PGW_OK);
     CHECK(PGW_DDS_effective_resources(gateway, &resources) == PGW_OK);
     CHECK(resources.local_readers > 0 && resources.local_writers > 0 &&

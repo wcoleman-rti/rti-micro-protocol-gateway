@@ -10,9 +10,11 @@
  * the software.
  */
 
-#ifndef PGW_PROBE_BINDING_H
-#define PGW_PROBE_BINDING_H
+#ifndef PGW_EXAMPLE_CONTROL_BINDING_H
+#define PGW_EXAMPLE_CONTROL_BINDING_H
+
 #include "pgw/dds/connext_micro.h"
-#include "dds_type_bindings.h"
-extern const PGW_DDSBinding PGW_probe_binding;
+
+extern const PGW_DDSControlTypeI PGW_example_control_types;
+
 #endif

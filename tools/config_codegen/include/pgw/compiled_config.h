@@ -30,6 +30,26 @@ typedef const PGW_CompiledNativeStream PGW_CompiledNativeStreamElement;
 #undef TSeq
 typedef struct PGW_CompiledNativeStreamSeq PGW_CompiledNativeStreamSeq;
 
+typedef struct PGW_CompiledControlResource {
+    uint32_t id;
+    const char *kind;
+    const char *name;
+    const char *adapter;
+    uint32_t command_capabilities;
+    uint32_t telemetry_capabilities;
+} PGW_CompiledControlResource;
+
+extern const PGW_CompiledControlResource pgw_control_resources[];
+extern const size_t pgw_control_resource_count;
+typedef struct PGW_CompiledControlTelemetry {
+    uint32_t id, resource_id, telemetry_kind, adapter_metric_bit;
+    const char *resource_kind, *resource, *name, *unit, *adapter;
+    uint32_t scalar_type;
+} PGW_CompiledControlTelemetry;
+extern const PGW_CompiledControlTelemetry pgw_control_telemetry_metrics[];
+extern const size_t pgw_control_telemetry_metric_count;
+extern const unsigned pgw_control_telemetry_minimum_period_ms;
+
 typedef struct PGW_CompiledRoute {
     uint32_t id;
     const char *name, *input_connection, *input_stream;

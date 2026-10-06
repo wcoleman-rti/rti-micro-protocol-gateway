@@ -36,6 +36,25 @@ the affected samples; fatal read/write/return failures fault that route with
 must not assume service-wide shutdown or retry.
 Route faults have their own counter, distinct from per-sample fatal write
 outcomes; faulting a route does not double-count a rejected sample.
+`PGW_Route_pause` excludes a ready/running route from routing without changing
+the service's round-robin schedule; `PGW_Route_resume` makes it eligible for
+the next step. Both are synchronous and allocation-free. Repeating either
+action returns `PGW_NO_CHANGE`, allowing a control layer to avoid publishing
+duplicate state changes. A faulted route cannot be resumed.
+
+With `PGW_ENABLE_REMOTE_CONTROL`, a service may freeze a borrowed control
+resource catalog and nonblocking endpoint before initialization. A step takes at
+most `PGW_CONTROL_MAX_COMMANDS_PER_STEP` commands, applies explicit actions,
+publishes results with source correlation metadata, then visits routes. Route
+actions use the same pause/resume operations above; adapter actions use optional
+versioned operation tables and are checked against their declared capability
+mask. Initialization seeds one state snapshot per selected resource. Failed
+state writes leave only the latest snapshot dirty; a step retries at most one
+dirty resource. Failed result writes are counted and are not retried, so they do
+not imply controller delivery. `PGW_Service_control_counters` copies the
+bounded local counters without adding another DDS endpoint. When the feature is
+compiled but no control catalog is configured, service stepping performs no
+control reads or writes.
 
 Storage comes from caller arrays or a checked, initialization-only arena.
 There is no runtime resizing or fallback allocator. Interface ABI versions,

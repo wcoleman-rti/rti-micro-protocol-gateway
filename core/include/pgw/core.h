@@ -36,7 +36,8 @@ typedef enum {
     PGW_CAPACITY,       /**< Capacity is insufficient or a required size overflows. */
     PGW_IO_ERROR,       /**< Transport or other I/O operation failed. */
     PGW_LOAN_ERROR,     /**< A sequence loan could not be returned or finalized. */
-    PGW_FATAL           /**< Unrecoverable operation or initialization failure. */
+    PGW_FATAL,          /**< Unrecoverable operation or initialization failure. */
+    PGW_NO_CHANGE       /**< Requested state already holds; no action was taken. */
 } PGW_Status;
 
 /** @brief Error information retained when a route enters the faulted state.
@@ -52,8 +53,9 @@ typedef struct {
 /** @brief Lifecycle states used by services and routes.
  *
  * Initialization progresses through INITIALIZING to READY; stepping moves a
- * service to RUNNING. A route that encounters a fatal operation enters
- * FAULTED. A stopped service must be finalized before reinitialization;
+ * service to RUNNING. Routes may be paused and resumed while the service is
+ * ready or running. A route that encounters a fatal operation enters FAULTED.
+ * A stopped service must be finalized before reinitialization;
  * finalization releases sequence loans but does not free caller storage, which
  * must be explicitly adopted again. A service whose lifecycle is FAULTED
  * cannot be recovered through this lifecycle API.
@@ -64,7 +66,8 @@ typedef enum {
     PGW_READY,          /**< Initialized and ready to step. */
     PGW_RUNNING,        /**< Service has performed or is performing steps. */
     PGW_STOPPED,        /**< Service has been stopped. */
-    PGW_FAULTED         /**< Route or service encountered an unrecoverable failure. */
+    PGW_FAULTED,        /**< Route or service encountered an unrecoverable failure. */
+    PGW_PAUSED          /**< Route is temporarily excluded from service stepping. */
 } PGW_Lifecycle;
 
 /** @brief Schema identity used to match data representations.
@@ -223,6 +226,9 @@ typedef struct {
  * corresponding PGW_ConnectionI interface before releasing its arena.
  */
 typedef struct PGW_Connection PGW_Connection;
+#if defined(PGW_ENABLE_REMOTE_CONTROL)
+struct PGW_ControlAdapterI;
+#endif
 /** @brief Operations on an adapter connection.
  * Reader/writer lookup returns handles whose lifetime is bounded by the
  * connection. Closing a connection releases adapter resources; do not use its
@@ -265,6 +271,9 @@ typedef struct {
      */
     PGW_Status (*create)(const void *, PGW_Arena *, PGW_Connection **);
     const PGW_ConnectionI *connection; /**< Versioned connection operation table. */
+#if defined(PGW_ENABLE_REMOTE_CONTROL)
+    const struct PGW_ControlAdapterI *control; /**< Optional versioned action manifest. */
+#endif
 } PGW_AdapterI;
 
 /** @brief Non-owning reference to an adapter descriptor. */
@@ -370,6 +379,176 @@ typedef struct {
 /** @brief Sequence of caller-owned route objects borrowed by a service. */
 typedef struct PGW_RouteSeq PGW_RouteSeq;
 
+#if defined(PGW_ENABLE_REMOTE_CONTROL)
+#define PGW_CONTROL_ABI_VERSION 1u
+#define PGW_CONTROL_MAX_COMMANDS_PER_STEP 4u
+
+typedef enum {
+    PGW_CONTROL_CONNECTION_UP,
+    PGW_CONTROL_CONNECTION_DOWN,
+    PGW_CONTROL_INPUT_ENABLE,
+    PGW_CONTROL_INPUT_DISABLE,
+    PGW_CONTROL_OUTPUT_ENABLE,
+    PGW_CONTROL_OUTPUT_DISABLE,
+    PGW_CONTROL_ROUTE_PAUSE,
+    PGW_CONTROL_ROUTE_RESUME
+} PGW_ControlAction;
+
+typedef enum {
+    PGW_CONTROL_RESOURCE_CONNECTION,
+    PGW_CONTROL_RESOURCE_INPUT,
+    PGW_CONTROL_RESOURCE_OUTPUT,
+    PGW_CONTROL_RESOURCE_ROUTE
+} PGW_ControlResourceKind;
+
+typedef enum {
+    PGW_CONTROL_STATUS_UNKNOWN,
+    PGW_CONTROL_STATUS_UP,
+    PGW_CONTROL_STATUS_DOWN,
+    PGW_CONTROL_STATUS_PAUSED,
+    PGW_CONTROL_STATUS_FAULTED
+} PGW_ControlResourceStatus;
+
+typedef enum {
+    PGW_CONTROL_OUTCOME_APPLIED,
+    PGW_CONTROL_OUTCOME_NO_CHANGE,
+    PGW_CONTROL_OUTCOME_UNSUPPORTED,
+    PGW_CONTROL_OUTCOME_INVALID,
+    PGW_CONTROL_OUTCOME_FAILED
+} PGW_ControlOutcome;
+
+typedef enum {
+    PGW_CONTROL_SCALAR_BOOLEAN,
+    PGW_CONTROL_SCALAR_INT32,
+    PGW_CONTROL_SCALAR_UINT32,
+    PGW_CONTROL_SCALAR_INT64,
+    PGW_CONTROL_SCALAR_UINT64,
+    PGW_CONTROL_SCALAR_DOUBLE
+} PGW_ControlScalarType;
+
+typedef struct {
+    PGW_ControlScalarType type;
+    union {
+        bool boolean_value;
+        int32_t int32_value;
+        uint32_t uint32_value;
+        int64_t int64_value;
+        uint64_t uint64_value;
+        double double_value;
+    } value;
+} PGW_ControlScalar;
+
+typedef struct {
+    uint32_t metric_id;
+    uint32_t resource_id;
+    uint32_t telemetry_kind;
+    PGW_ControlScalar scalar;
+    char unit[33];
+} PGW_ControlTelemetry;
+
+#define PGW_CONTROL_ACTION_MASK(action) (UINT32_C(1) << (action))
+
+typedef struct {
+    uint32_t resource_id;
+    PGW_ControlAction action;
+} PGW_ControlCommand;
+
+typedef struct {
+    uint8_t publication_handle[16];
+    int32_t publication_sequence_high;
+    uint32_t publication_sequence_low;
+} PGW_ControlCorrelation;
+
+typedef struct {
+    uint32_t resource_id;
+    PGW_ControlResourceStatus status;
+    uint32_t command_capabilities;
+    uint32_t telemetry_capabilities;
+} PGW_ControlState;
+
+typedef struct {
+    uint32_t resource_id;
+    PGW_ControlAction action;
+    PGW_ControlOutcome outcome;
+    PGW_ControlCorrelation correlation;
+} PGW_ControlResult;
+
+/** Optional, versioned adapter operations described by a linked capability
+ * manifest. The manifest is portable across all instances of the adapter;
+ * the service selects a supported subset for each configured resource.
+ */
+typedef struct PGW_ControlAdapterI {
+    uint32_t version;
+    size_t size;
+    uint32_t manifest_version;
+    uint32_t resource_kind_mask;
+    uint32_t action_mask;
+    PGW_Status (*apply)(void *, PGW_ControlAction);
+    uint32_t telemetry_metric_mask;
+    PGW_Status (*read_telemetry)(void *, const char *, PGW_ControlScalar *);
+} PGW_ControlAdapterI;
+
+/** Nonblocking command/state/result transport operations. Implementations
+ * return one command per take call and must not retain callback arguments.
+ */
+typedef struct {
+    uint32_t version;
+    size_t size;
+    PGW_Status (*take_command)(void *, PGW_ControlCommand *,
+                               PGW_ControlCorrelation *);
+    PGW_Status (*write_state)(void *, const PGW_ControlState *);
+    PGW_Status (*write_result)(void *, const PGW_ControlResult *);
+    PGW_Status (*write_telemetry)(void *, const PGW_ControlTelemetry *);
+} PGW_ControlEndpointI;
+
+typedef struct {
+    void *state;
+    const PGW_ControlEndpointI *iface;
+} PGW_ControlEndpoint;
+
+/** Caller-owned selected resource and its latest logical state. Routes use
+ * core actions directly; other resource kinds require versioned adapter ops.
+ */
+typedef struct {
+    uint32_t id;
+    PGW_ControlResourceKind kind;
+    uint32_t command_capabilities;
+    uint32_t telemetry_capabilities;
+    PGW_ControlResourceStatus status;
+    PGW_Route *route;
+    const PGW_ControlAdapterI *adapter;
+    void *adapter_state;
+    bool state_dirty;
+} PGW_ControlResource;
+
+typedef struct {
+    uint32_t id;
+    uint32_t resource_id;
+    uint32_t telemetry_kind;
+    uint32_t adapter_metric_bit;
+    const char *name;
+    const char *unit;
+    PGW_ControlScalarType scalar_type;
+    const PGW_ControlAdapterI *adapter;
+    void *adapter_state;
+} PGW_ControlTelemetryMetric;
+
+typedef struct {
+    uint64_t commands_processed;
+    uint64_t command_read_failures;
+    uint64_t commands_invalid;
+    uint64_t commands_unsupported;
+    uint64_t commands_failed;
+    uint64_t state_write_failures;
+    uint64_t state_retries;
+    uint64_t result_write_failures;
+    uint64_t telemetry_read_failures;
+    uint64_t telemetry_write_failures;
+    uint64_t telemetry_clock_failures;
+    uint64_t telemetry_samples;
+} PGW_ControlCounters;
+#endif
+
 /** @brief Bounded round-robin service over caller-configured routes.
  * Configure routes before initialization. Service and route storage are
  * caller-owned; all buffers borrowed through the routes must outlive service
@@ -387,6 +566,18 @@ typedef struct {
     bool (*clock_ns)(void *, uint64_t *);
     void *clock_state;               /**< Context passed to @c clock_ns. */
     bool routes_initialized;         /**< Internal route-sequence state. */
+#if defined(PGW_ENABLE_REMOTE_CONTROL)
+    PGW_ControlEndpoint control;         /**< Optional preconfigured control transport. */
+    PGW_ControlResource *control_resources; /**< Borrowed selected resources. */
+    size_t control_resource_count;       /**< Number of selected resources. */
+    size_t control_state_retry_cursor;   /**< Internal dirty-state retry position. */
+    PGW_ControlCounters control_counters; /**< Bounded control failure counters. */
+    PGW_ControlTelemetryMetric *control_telemetry_metrics; /**< Borrowed static metric catalog. */
+    size_t control_telemetry_metric_count;
+    uint64_t control_telemetry_period_ns;
+    uint64_t control_telemetry_last_ns;
+    bool control_telemetry_clock_initialized;
+#endif
 } PGW_Service;
 
 /** @brief Byte-level core storage estimate for configured route capacities. */
@@ -488,6 +679,16 @@ const PGW_Representation *PGW_Registry_find_binding(const PGW_Registry *, const 
  */
 PGW_Status PGW_Route_initialize_storage(PGW_Route *, const PGW_SampleSeq *,
                                        const PGW_WriteResultSeq *);
+/** @brief Pause a ready/running route without changing service scheduling.
+ * The operation is synchronous and allocation-free. Repeating pause returns
+ * PGW_NO_CHANGE; a faulted route returns PGW_FATAL.
+ */
+PGW_Status PGW_Route_pause(PGW_Route *);
+/** @brief Resume a paused route; it becomes eligible on the next service step.
+ * The operation is synchronous and allocation-free. Repeating resume returns
+ * PGW_NO_CHANGE; a faulted route returns PGW_FATAL.
+ */
+PGW_Status PGW_Route_resume(PGW_Route *);
 /** @brief Configure a service to borrow a non-empty contiguous route array.
  * Call only while the service is UNINITIALIZED. The route array and all nested
  * route storage remain caller-owned through service finalization.
@@ -495,6 +696,23 @@ PGW_Status PGW_Route_initialize_storage(PGW_Route *, const PGW_SampleSeq *,
  *         sequence initialization fails, or PGW_CAPACITY if the loan fails.
  */
 PGW_Status PGW_Service_set_routes(PGW_Service *, const PGW_RouteSeq *);
+#if defined(PGW_ENABLE_REMOTE_CONTROL)
+/** @brief Freeze a non-empty control resource set and its optional endpoint.
+ * Configure only before initialization. The resource array and adapter
+ * contexts remain caller-owned; all callbacks are synchronous and nonblocking.
+ */
+PGW_Status PGW_Service_set_control(PGW_Service *, PGW_ControlEndpoint,
+                                  PGW_ControlResource *, size_t);
+/** @brief Copy bounded control write/processing counters. */
+PGW_Status PGW_Service_control_counters(const PGW_Service *,
+                                       PGW_ControlCounters *);
+/** @brief Select static telemetry metrics and freeze the runtime period.
+ * A zero period disables publication. Nonzero periods must meet the service
+ * XML minimum and require the service's monotonic clock callback.
+ */
+PGW_Status PGW_Service_set_telemetry(PGW_Service *, PGW_ControlTelemetryMetric *,
+    size_t, uint32_t, uint32_t);
+#endif
 /** @brief Initialize a configured service and its routes.
  * Requires configured route storage and nonzero route/sample budgets. Validates
  * route interfaces, schema compatibility, and storage, and binds each writer

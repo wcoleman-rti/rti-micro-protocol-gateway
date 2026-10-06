@@ -15,7 +15,14 @@ import os
 from pathlib import Path
 import shutil
 import unittest
-from config_codegen import compile_config, ConfigError, emit
+from config_codegen import compile_config, ConfigError, emit, parse_adapter_manifest
+from adapter_codegen import generate as generate_adapter_idl
+from control_codegen import generate as generate_control_idl
+from dds_binding_codegen import (
+    BindingGenerationError,
+    generate as generate_dds_bindings,
+)
+from combine_idl import FlattenError, flatten
 
 FINGERPRINT = "a" * 64
 DDS = """<dds><qos_library name="Q"><qos_profile name="Bounded">
@@ -34,7 +41,7 @@ DDS = """<dds><qos_library name="Q"><qos_profile name="Bounded">
 </domain_participant></domain_participant_library></dds>"""
 GATEWAY = f"""<gateway dds="dds.xml" route-budget="2" sample-budget="4">
 <binding id="b" symbol="binding" type="Test" schema="test" fingerprint="{FINGERPRINT}"/>
-<connection id="c" participant="P::p">
+<connection id="c" participant="P::p" adapter="connext_micro">
 <stream name="r" endpoint="sub::r" binding="b" role="reader" capacity="4"/>
 <stream name="w" endpoint="pub::w" binding="b" role="writer" capacity="4"/>
 </connection><route id="route" input="c::r" output="c::w"/></gateway>"""
@@ -75,6 +82,30 @@ class ConfigurationRequirements(unittest.TestCase):
                     GATEWAY.replace("</gateway>", "<unknown/></gateway>"),
                     GATEWAY.replace("<connection ", "<bogus ").replace("</connection>", "</bogus>")):
             self.reject(xml)
+
+    def test_binding_conversion_declarations_are_strict(self):
+        attributes = (
+            'schema-version="1" representation-name="test.native" '
+            'native-type="TestValue" native-header="test.h" '
+            'support-header="testSupport.h" conversion="callbacks" '
+            'dds-to-native="test_from_dds" native-to-dds="test_to_dds" '
+            'supports-timestamp="false"')
+        valid = GATEWAY.replace(
+            f'fingerprint="{FINGERPRINT}"/>',
+            f'fingerprint="{FINGERPRINT}" {attributes}/>')
+        self.gateway.write_text(valid)
+        compile_config(self.gateway)
+
+        invalid = (
+            valid.replace(' native-to-dds="test_to_dds"', ''),
+            valid.replace('conversion="callbacks"', 'conversion="unknown"'),
+            valid.replace('supports-timestamp="false"', 'supports-timestamp="maybe"'),
+            valid.replace('conversion="callbacks"', 'conversion="fieldwise"'),
+        )
+        for xml in invalid:
+            with self.subTest(xml=xml), self.assertRaises(ConfigError):
+                self.gateway.write_text(xml)
+                compile_config(self.gateway)
 
     def test_duplicate_missing_wrong_role(self):
         for xml in (GATEWAY.replace('name="w"', 'name="r"'),
@@ -137,6 +168,321 @@ class ConfigurationRequirements(unittest.TestCase):
             (self.directory / "dds.xml").write_text(dds)
             with self.assertRaises(ConfigError):
                 compile_config(self.gateway)
+
+    def test_control_requires_compile_time_opt_in_and_selects_routes(self):
+        xml = GATEWAY.replace(
+            "</gateway>",
+            '<control><resource kind="route" ref="route" actions="pause resume"/></control></gateway>')
+        self.gateway.write_text(xml)
+        with self.assertRaises(ConfigError):
+            compile_config(self.gateway)
+        compiled = compile_config(self.gateway, remote_control=True)
+        self.assertEqual(compiled[5], [{
+            "kind": "route",
+            "ref": "route",
+            "adapter": "core",
+            "enum": "RESOURCE_ROUTE_ROUTE",
+            "command_capabilities": (1 << 6) | (1 << 7),
+            "telemetry_capabilities": 0,
+        }])
+        output = self.directory / "control.c"
+        emit(compiled, output)
+        self.assertIn("pgw_control_resource_count", output.read_text())
+
+    def test_control_rejects_unsupported_or_unresolved_resources(self):
+        for control in (
+            '<control><resource kind="connection" ref="c" actions="up down"/></control>',
+            '<control><resource kind="route" ref="missing" actions="pause resume"/></control>',
+            '<control><resource kind="route" ref="route" actions="pause resume"/></control>'
+            '<control><resource kind="route" ref="route" actions="pause resume"/></control>',
+        ):
+            self.gateway.write_text(GATEWAY.replace("</gateway>", control + "</gateway>"))
+            with self.assertRaises(ConfigError):
+                compile_config(self.gateway, remote_control=True)
+
+    def test_control_idl_is_deterministic_and_correlated(self):
+        gateway = self.directory / "controlled.xml"
+        gateway.write_text(GATEWAY.replace(
+            "</gateway>",
+            '<control><resource kind="route" ref="route" actions="pause resume"/></control></gateway>'))
+        common = (Path(__file__).resolve().parents[2] / "core" / "control" / "idl" /
+                  "control_common.idl")
+        output = self.directory / "controller.idl"
+        generate_control_idl(gateway, common, output)
+        first = output.read_text()
+        generate_control_idl(gateway, common, output)
+        self.assertEqual(output.read_text(), first)
+        self.assertIn("RESOURCE_ROUTE_ROUTE", first)
+        self.assertIn("octet publication_handle[16]", first)
+        self.assertIn("long publication_sequence_high", first)
+        self.assertIn("unsigned long publication_sequence_low", first)
+        self.assertNotIn("command_id", first)
+
+    def test_linked_adapter_manifests_gate_selected_actions(self):
+        manifest = self.directory / "connext_micro.xml"
+        manifest.write_text(
+            '<adapter name="connext_micro" version="1" control-api-version="1">'
+            '<control>'
+            '<capability kind="connection" actions="up|down"/>'
+            '<capability kind="input" actions="enable|disable"/>'
+            '<capability kind="output" actions="enable|disable"/>'
+            '</control>'
+            '</adapter>')
+        controlled = GATEWAY.replace(
+            "</gateway>",
+            '<control>'
+            '<resource kind="connection" ref="c" actions="up"/>'
+            '<resource kind="input" ref="c::r" actions="enable disable"/>'
+            '<resource kind="output" ref="c::w" actions="disable"/>'
+            '</control></gateway>')
+        self.gateway.write_text(controlled)
+        with self.assertRaises(ConfigError):
+            compile_config(self.gateway, remote_control=True)
+        compiled = compile_config(
+            self.gateway, remote_control=True, adapter_manifests=(manifest,))
+        resources = compiled[5]
+        self.assertEqual([resource["kind"] for resource in resources],
+                         ["connection", "input", "output"])
+        self.assertEqual(resources[0]["command_capabilities"], 1)
+        self.assertEqual(resources[0]["adapter"], "connext_micro")
+        output = self.directory / "adapter.idl"
+        header = self.directory / "control_manifest.h"
+        common = (Path(__file__).resolve().parents[2] / "core" / "control" / "idl" /
+                  "control_common.idl")
+        generate_adapter_idl(manifest, common, output, header)
+        self.assertIn("module PGW_Adapter_connext_micro", output.read_text())
+        self.assertIn("ACTION_MASK = 63", output.read_text())
+        self.assertIn("PGW_CONNEXT_MICRO_CONTROL_ACTION_MASK UINT32_C(63)",
+                      header.read_text())
+
+    def test_adapter_manifest_sections_and_pipe_delimited_actions(self):
+        manifest = self.directory / "manifest.xml"
+        valid = (
+            '<adapter name="adapter" version="1" control-api-version="1">'
+            '<control><capability kind="connection" actions="up|down"/></control>'
+            '<telemetry><metric resource-kind="connection" name="frames" '
+            'scalar="uint64" unit="frames"/></telemetry></adapter>')
+        manifest.write_text(valid)
+        name, metadata = parse_adapter_manifest(manifest)
+        self.assertEqual(name, "adapter")
+        self.assertEqual(metadata["capabilities"]["connection"]["actions"], ["up", "down"])
+        self.assertIn(("connection", "frames"), metadata["metrics"])
+
+        invalid = (
+            valid.replace('<control>', '').replace('</control>', ''),
+            valid.replace('<telemetry>', '').replace('</telemetry>', ''),
+            valid.replace('actions="up|down"', 'actions="up down"'),
+            valid.replace('<control>', '<control><unknown/>'),
+            valid.replace('actions="up|down"', 'actions="up|unsupported"'),
+            valid.replace(
+                '</control>',
+                '<capability kind="connection" actions="up"/></control>'),
+        )
+        for xml in invalid:
+            manifest.write_text(xml)
+            with self.subTest(xml=xml), self.assertRaises(ConfigError):
+                parse_adapter_manifest(manifest)
+
+    def test_dds_bindings_are_generated_from_rti_type_xml(self):
+        types_xml = self.directory / "types.xml"
+        types_xml.write_text(
+            '<dds><types><module name="Example"><struct name="Sample">'
+            '<member name="key" type="uint32" key="true"/>'
+            '<member name="value" type="int32"/>'
+            '</struct></module></types></dds>')
+        gateway_xml = self.directory / "bindings.xml"
+        common = (
+            'schema="example.sample" schema-version="1" fingerprint="'
+            + FINGERPRINT + '" representation-name="example.sample.native" '
+            'native-type="ExampleSample" native-header="example_sample.h" '
+            'support-header="exampleSupport.h" conversion="callbacks" '
+            'dds-to-native="from_example_sample" native-to-dds="to_example_sample" '
+            'sample-copy="copy_example_sample"')
+        gateway_xml.write_text(
+            '<gateway><binding id="reader" symbol="reader_binding" '
+            'type="Example::Sample" ' + common +
+            ' supports-timestamp="true" register-keys="register_reader_keys"/>'
+            '<binding id="writer" symbol="writer_binding" '
+            'type="Example::Sample" ' + common +
+            ' register-keys="register_writer_keys"/></gateway>')
+        output = self.directory / "generated_bindings.c"
+        generate_dds_bindings(types_xml, gateway_xml, output)
+        first = output.read_text()
+        generate_dds_bindings(types_xml, gateway_xml, output)
+        self.assertEqual(output.read_text(), first)
+        self.assertIn("Example_SampleDataReader_take", first)
+        self.assertIn("Example_SampleDataReader_return_loan", first)
+        self.assertIn("Example_SampleDataWriter_write_w_timestamp", first)
+        self.assertIn("static const PGW_Representation pgw_representation_0", first)
+        self.assertIn("copy_example_sample(sample, out, size)", first)
+        self.assertIn("&pgw_access_0", first)
+        self.assertEqual(first.count("static const PGW_Representation "), 1)
+        self.assertIn("const PGW_DDSBinding reader_binding", first)
+        self.assertIn("const PGW_DDSBinding writer_binding", first)
+
+        gateway_xml.write_text(
+            '<gateway><binding id="unknown" symbol="unknown_binding" '
+            'type="Example::Missing" ' + common + '/></gateway>')
+        with self.assertRaises(BindingGenerationError):
+            generate_dds_bindings(types_xml, gateway_xml, output)
+
+    def test_fieldwise_dds_binding_conversion_is_generated_from_xml(self):
+        types_xml = self.directory / "fieldwise-types.xml"
+        types_xml.write_text(
+            '<dds><types><module name="Example"><struct name="Probe">'
+            '<member name="id" type="uint32" key="true"/>'
+            '<member name="reading" type="int32"/>'
+            '</struct></module></types></dds>')
+        gateway_xml = self.directory / "fieldwise-bindings.xml"
+        gateway_xml.write_text(
+            '<gateway><binding id="probe" symbol="probe_binding" '
+            'type="Example::Probe" schema="example.probe" schema-version="1" '
+            f'fingerprint="{FINGERPRINT}" representation-name="example.probe.native" '
+            'native-type="ExampleProbe" native-header="example_probe.h" '
+            'support-header="probeSupport.h" conversion="fieldwise" '
+            'register-key-value="1" supports-timestamp="true"/></gateway>')
+        output = self.directory / "fieldwise_bindings.c"
+        generate_dds_bindings(types_xml, gateway_xml, output)
+        text = output.read_text()
+        header = (self.directory / "dds_type_bindings.h").read_text()
+        self.assertIn("ExampleProbe *value = out", text)
+        self.assertIn("value->id = wire->id", text)
+        self.assertIn("value->reading = wire->reading", text)
+        self.assertIn("wire->id = value->id", text)
+        self.assertIn("wire->reading = value->reading", text)
+        self.assertIn("fieldwise native member type mismatch", text)
+        self.assertIn("typedef struct ExampleProbe", header)
+        self.assertIn("uint32_t id;", header)
+        self.assertIn("int32_t reading;", header)
+        self.assertIn("scratch.id = 1u", text)
+        self.assertIn("Example_ProbeDataWriter_register_instance_w_timestamp", text)
+        types_xml.write_text(
+            '<dds><types><module name="Example"><struct name="Probe">'
+            '<member name="id" type="uint32" key="true"/>'
+            '<member name="reading" type="int32" arrayDimensions="2"/>'
+            '</struct></module></types></dds>')
+        with self.assertRaises(BindingGenerationError):
+            generate_dds_bindings(types_xml, gateway_xml, output)
+
+    def test_control_name_normalization_collision_is_rejected(self):
+        xml = GATEWAY.replace(
+            "</gateway>",
+            '<route id="Route" input="c::r" output="c::w"/>'
+            '<control>'
+            '<resource kind="route" ref="route" actions="pause resume"/>'
+            '<resource kind="route" ref="Route" actions="pause resume"/>'
+            '</control></gateway>')
+        self.gateway.write_text(xml)
+        with self.assertRaises(ConfigError):
+            compile_config(self.gateway, remote_control=True)
+
+    def test_selected_metric_is_bounded_and_typed_from_adapter_manifest(self):
+        manifest = self.directory / "can.xml"
+        manifest.write_text(
+            '<adapter name="can" version="1" control-api-version="1">'
+            '<control><capability kind="connection" actions="up|down"/></control>'
+            '<telemetry><metric resource-kind="connection" name="received_frames" '
+            'scalar="uint64" unit="frames"/></telemetry>'
+            '</adapter>')
+        xml = GATEWAY.replace('adapter="connext_micro"', 'adapter="can"')
+        xml = xml.replace(
+            "</gateway>",
+            '<control minimum-telemetry-period-ms="100">'
+            '<resource kind="connection" ref="c" actions="up down"/>'
+            '<metric resource-kind="connection" resource="c" name="received_frames"/>'
+            '</control></gateway>')
+        self.gateway.write_text(xml)
+        with self.assertRaises(ConfigError):
+            compile_config(self.gateway, remote_control=True)
+        compiled = compile_config(
+            self.gateway, remote_control=True, adapter_manifests=(manifest,))
+        resource = compiled[5][0]
+        metric = compiled[6][0]
+        self.assertEqual(resource["telemetry_capabilities"], 1)
+        self.assertEqual(metric["id"], 0)
+        self.assertEqual(metric["scalar"], "uint64")
+        self.assertEqual(metric["unit"], "frames")
+        self.assertEqual(compiled[7], 100)
+        output = self.directory / "controller.idl"
+        common = (Path(__file__).resolve().parents[2] / "core" / "control" / "idl" /
+                  "control_common.idl")
+        generate_control_idl(
+            self.gateway, common, output, adapter_manifests=(manifest,))
+        idl = output.read_text()
+        self.assertIn("enum TelemetryKind", idl)
+        self.assertIn("unsigned long long uint64_value", idl)
+        self.assertIn("TelemetryKind kind; //@key", idl)
+
+    def test_metric_rejects_missing_ceiling_or_resource_selection(self):
+        manifest = self.directory / "can.xml"
+        manifest.write_text(
+            '<adapter name="can" version="1" control-api-version="1">'
+            '<telemetry><metric resource-kind="connection" name="received_frames" '
+            'scalar="uint64" unit="frames"/></telemetry>'
+            '</adapter>')
+        cases = (
+            '<control><resource kind="connection" ref="c" actions="up"/>'
+            '<metric resource-kind="connection" resource="c" name="received_frames"/>'
+            '</control>',
+            '<control minimum-telemetry-period-ms="100">'
+            '<metric resource-kind="connection" resource="c" name="received_frames"/>'
+            '</control>',
+        )
+        for control in cases:
+            xml = GATEWAY.replace('adapter="connext_micro"', 'adapter="can"')
+            self.gateway.write_text(xml.replace("</gateway>", control + "</gateway>"))
+            with self.assertRaises(ConfigError):
+                compile_config(
+                    self.gateway, remote_control=True, adapter_manifests=(manifest,))
+
+    def test_selected_telemetry_metadata_generates_kind_and_writer_data(self):
+        manifest = self.directory / "can.xml"
+        manifest.write_text(
+            '<adapter name="can" version="1" control-api-version="1">'
+            '<control><capability kind="connection" actions="up|down"/></control>'
+            '<telemetry><metric resource-kind="connection" name="received_frames" '
+            'scalar="uint64" unit="frames"/></telemetry>'
+            '</adapter>')
+        controlled = GATEWAY.replace('adapter="connext_micro"', 'adapter="can"')
+        controlled = controlled.replace(
+            "</gateway>",
+            '<control minimum-telemetry-period-ms="100">'
+            '<resource kind="connection" ref="c" actions="up down"/>'
+            '<metric resource-kind="connection" resource="c" name="received_frames"/>'
+            '</control></gateway>')
+        self.gateway.write_text(controlled)
+        config = compile_config(
+            self.gateway, remote_control=True, adapter_manifests=(manifest,))
+        self.assertEqual(config[5][0]["telemetry_capabilities"], 1)
+        self.assertEqual(config[6][0]["scalar"], "uint64")
+        self.assertEqual(config[7], 100)
+        output = self.directory / "controller-telemetry.idl"
+        common = (Path(__file__).resolve().parents[2] / "core" / "control" / "idl" /
+                  "control_common.idl")
+        generate_control_idl(
+            self.gateway, common, output, adapter_manifests=(manifest,))
+        idl = output.read_text()
+        self.assertIn("TELEMETRY_RECEIVED_FRAMES", idl)
+        self.assertIn("union TelemetryValue switch", idl)
+        self.assertIn("unsigned long long uint64_value", idl)
+
+    def test_dependency_aware_idl_flattening(self):
+        (self.directory / "common.idl").write_text("module Common { struct Value { long x; }; };\n")
+        (self.directory / "adapter.idl").write_text(
+            '#include "common.idl"\nmodule Adapter { struct Sample { Common::Value value; }; };\n')
+        (self.directory / "service.idl").write_text(
+            '#include "adapter.idl"\n#include "common.idl"\nmodule Service {};\n')
+        flattened = flatten([self.directory / "service.idl"])
+        self.assertLess(flattened.index("module Common"), flattened.index("module Adapter"))
+        self.assertLess(flattened.index("module Adapter"), flattened.index("module Service"))
+        self.assertEqual(flattened.count("module Common"), 1)
+        (self.directory / "cycle-a.idl").write_text('#include "cycle-b.idl"\n')
+        (self.directory / "cycle-b.idl").write_text('#include "cycle-a.idl"\n')
+        with self.assertRaises(FlattenError):
+            flatten([self.directory / "cycle-a.idl"])
+        (self.directory / "missing.idl").write_text('#include "absent.idl"\n')
+        with self.assertRaises(FlattenError):
+            flatten([self.directory / "missing.idl"])
 
 
 if __name__ == "__main__":

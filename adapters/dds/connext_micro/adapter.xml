@@ -1,0 +1,8 @@
+<?xml version="1.0"?>
+<adapter name="connext_micro" version="1" control-api-version="1">
+  <control>
+    <capability kind="connection" actions="up|down"/>
+    <capability kind="input" actions="enable|disable"/>
+    <capability kind="output" actions="enable|disable"/>
+  </control>
+</adapter>

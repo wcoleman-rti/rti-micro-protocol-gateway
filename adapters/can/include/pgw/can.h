@@ -204,6 +204,12 @@ typedef struct {
 
 /** @brief CAN adapter descriptor for registration in a PGW_Registry. */
 extern const PGW_AdapterI PGW_CANAdapter;
+#if defined(PGW_ENABLE_REMOTE_CONTROL)
+/** @brief Resolve a configured CAN connection/category to its control context. */
+PGW_Status PGW_CAN_control_target(PGW_Connection *, PGW_ControlResourceKind,
+                                  const char *, const PGW_ControlAdapterI **,
+                                  void **);
+#endif
 /** @brief Initialize a mapping by loaning immutable definition arrays.
  * @param mapping Mapping storage, not already initialized.
  * @param messages Non-empty message definitions.

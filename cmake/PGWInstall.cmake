@@ -49,10 +49,29 @@ endforeach()
 if(TARGET pgw_adapter_can)
     install(DIRECTORY "${PROJECT_SOURCE_DIR}/adapters/can/include/"
         DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}" FILES_MATCHING PATTERN "*.h")
+    install(FILES "${PROJECT_SOURCE_DIR}/adapters/can/adapter.xml"
+        DESTINATION "${CMAKE_INSTALL_DATADIR}/pgw/adapters/can")
+    if(PGW_ENABLE_REMOTE_CONTROL)
+        get_target_property(_can_control_idl pgw_adapter_can PGW_ADAPTER_CONTROL_IDL)
+        install(FILES "${_can_control_idl}"
+            DESTINATION "${CMAKE_INSTALL_DATADIR}/pgw/adapters/can")
+    endif()
 endif()
 if(TARGET pgw_adapter_dds_connext_micro)
     install(DIRECTORY "${PROJECT_SOURCE_DIR}/adapters/dds/connext_micro/include/"
         DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}" FILES_MATCHING PATTERN "*.h")
+    install(FILES "${PROJECT_SOURCE_DIR}/adapters/dds/connext_micro/adapter.xml"
+        DESTINATION "${CMAKE_INSTALL_DATADIR}/pgw/adapters/connext_micro")
+    if(PGW_ENABLE_REMOTE_CONTROL)
+        get_target_property(_dds_control_idl
+            pgw_adapter_dds_connext_micro PGW_ADAPTER_CONTROL_IDL)
+        install(FILES "${_dds_control_idl}"
+            DESTINATION "${CMAKE_INSTALL_DATADIR}/pgw/adapters/connext_micro")
+    endif()
+    if(PGW_ENABLE_REMOTE_CONTROL)
+        install(FILES "${PROJECT_SOURCE_DIR}/core/control/idl/control_common.idl"
+            DESTINATION "${CMAKE_INSTALL_DATADIR}/pgw/idl")
+    endif()
 endif()
 install(FILES "${PROJECT_SOURCE_DIR}/LICENSE"
     DESTINATION "${CMAKE_INSTALL_DATADIR}/pgw")
