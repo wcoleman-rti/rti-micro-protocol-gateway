@@ -10,6 +10,7 @@
  * the software.
  */
 
+#define _POSIX_C_SOURCE 200809L
 #include "pgw/dds/connext_micro.h"
 #include "pgw/can_memory.h"
 #include "pgw/runtime.h"
@@ -26,10 +27,14 @@
 #include "allocation.h"
 #include "signalsSupport.h"
 #include "osapi/osapi_thread.h"
+#if defined(PGW_ENABLE_ROUTE_LATENCY_METRICS)
+#include "route_latency_benchmark.h"
+#endif
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdatomic.h>
+#include <time.h>
 
 extern const PGW_DDSConfig pgw_config_gateway, pgw_config_companion;
 #if defined(PGW_ENABLE_REMOTE_CONTROL)
@@ -67,14 +72,24 @@ static PGW_Status probe_timestamp(const PGW_Sample *opaque, PGW_Timestamp *out)
     return PGW_OK;
 }
 static const PGW_SampleAccessI signal_access = {
-    PGW_ABI_VERSION, sizeof(PGW_SampleAccessI), signal_copy, NULL
+    PGW_ABI_VERSION, sizeof(PGW_SampleAccessI), signal_copy, NULL, NULL
 };
 static const PGW_SampleAccessI probe_access = {
-    PGW_ABI_VERSION, sizeof(PGW_SampleAccessI), probe_copy, probe_timestamp
+    PGW_ABI_VERSION, sizeof(PGW_SampleAccessI), probe_copy, probe_timestamp, NULL
 };
+static PGW_Representation benchmark_signal_representation;
 static const PGW_SampleAccessI probe_payload_only = {
-    PGW_ABI_VERSION, sizeof(PGW_SampleAccessI), probe_copy, NULL
+    PGW_ABI_VERSION, sizeof(PGW_SampleAccessI), probe_copy, NULL, NULL
 };
+static bool benchmark_clock_ns(uint64_t *out)
+{
+    struct timespec time;
+    if (!out || clock_gettime(CLOCK_MONOTONIC, &time) != 0) return false;
+    *out = (uint64_t)time.tv_sec * UINT64_C(1000000000) +
+        (uint64_t)time.tv_nsec;
+    return true;
+}
+
 static PGW_CodecStatus decode(void *context, size_t index, const uint8_t *bytes,
                              size_t length, PGW_Signal *values, size_t capacity, size_t *count)
 {
@@ -121,6 +136,162 @@ static int wait_matches(PGW_Connection *gateway, PGW_Connection *companion)
     }
     return 1;
 }
+
+static int benchmark_write_batch(PGW_StreamWriter *writer,
+                                 const PGW_SampleSeq *samples,
+                                 PGW_WriteResultSeq *results,
+                                 PGW_WriteResult *result, uint64_t count)
+{
+    for (uint64_t i = 0; i < count; ++i) {
+        if (writer->iface->write(writer->state, samples, results) != PGW_OK ||
+            *result != PGW_WRITE_ACCEPTED)
+            return 1;
+    }
+    return 0;
+}
+
+static int compare_u64(const void *left, const void *right)
+{
+    uint64_t a = *(const uint64_t *)left;
+    uint64_t b = *(const uint64_t *)right;
+    return (a > b) - (a < b);
+}
+
+static int benchmark_dds_write_paths(PGW_Connection *gateway,
+                                     PGW_Connection *companion)
+{
+    const uint64_t writes_per_round = 10000;
+    const unsigned rounds = 5;
+    PGW_StreamReader source_reader;
+    PGW_StreamWriter ingress, output;
+    PGW_SampleSeq input_samples, ingress_samples;
+    PGW_SampleRef input_refs[1], ingress_ref;
+    PGW_WriteResult output_result, ingress_result;
+    PGW_WriteResultSeq output_results, ingress_results;
+    PGW_SampleAccessI fallback_access;
+    PGW_Representation fallback_representation, direct_alias;
+    PGW_Schema direct_alias_schema = {
+        "generated.type.alias", 99,
+        "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    };
+    PGW_DDSStatistics before, after;
+    SignalSample input = {
+        .value = {1001, {.kind = PGW_VALUE_DOUBLE, .data.real = 123.4}}
+    };
+    uint64_t direct_times[5], converted_times[5];
+    if (PGW_DDSConnextMicroAdapter.connection->reader(
+            gateway, "command_powertrain", &source_reader) != PGW_OK ||
+        PGW_DDSConnextMicroAdapter.connection->writer(
+            gateway, "state_powertrain", &output) != PGW_OK ||
+        PGW_DDSConnextMicroAdapter.connection->writer(
+            companion, "command_powertrain", &ingress) != PGW_OK)
+        return 1;
+
+    benchmark_signal_representation = *ingress.representation;
+    benchmark_signal_representation.access = &signal_access;
+    if (ingress.iface->bind(ingress.state, &benchmark_signal_representation) != PGW_OK ||
+        !PGW_SampleSeq_initialize(&input_samples) ||
+        !PGW_SampleSeq_loan_contiguous(&input_samples, input_refs, 0, 1) ||
+        !PGW_SampleSeq_initialize(&ingress_samples) ||
+        !PGW_SampleSeq_loan_contiguous(&ingress_samples, &ingress_ref, 0, 1) ||
+        !PGW_WriteResultSeq_initialize(&output_results) ||
+        !PGW_WriteResultSeq_loan_contiguous(&output_results, &output_result, 0, 1) ||
+        !PGW_WriteResultSeq_initialize(&ingress_results) ||
+        !PGW_WriteResultSeq_loan_contiguous(&ingress_results, &ingress_result, 0, 1))
+        return 1;
+
+    ingress_ref = (const PGW_Sample *)&input;
+    if (!PGW_SampleSeq_set_length(&ingress_samples, 1) ||
+        ingress.iface->write(ingress.state, &ingress_samples, &ingress_results) != PGW_OK ||
+        ingress_result != PGW_WRITE_ACCEPTED)
+        return 1;
+
+    PGW_Status read_status = PGW_NO_DATA;
+    for (unsigned attempt = 0; attempt < 200 && read_status == PGW_NO_DATA; ++attempt) {
+        read_status = source_reader.iface->read(source_reader.state, &input_samples, 1);
+        if (read_status == PGW_NO_DATA) OSAPI_Thread_sleep(5);
+    }
+    if (read_status != PGW_OK || PGW_SampleSeq_get_length(&input_samples) != 1)
+        return 1;
+    fallback_access = *source_reader.representation->access;
+    fallback_access.view = NULL;
+    fallback_representation = *source_reader.representation;
+    fallback_representation.access = &fallback_access;
+    fallback_representation.view_contract = NULL;
+    direct_alias = *source_reader.representation;
+    direct_alias.schema = &direct_alias_schema;
+    if (output.iface->bind(output.state, &direct_alias) != PGW_OK ||
+        output.iface->bind(output.state, source_reader.representation) != PGW_OK ||
+        benchmark_write_batch(&output, &input_samples, &output_results,
+                              &output_result, 250) ||
+        output.iface->bind(output.state, &fallback_representation) != PGW_OK ||
+        benchmark_write_batch(&output, &input_samples, &output_results,
+                              &output_result, 250) ||
+        output.iface->bind(output.state, source_reader.representation) != PGW_OK ||
+        PGW_DDS_statistics(gateway, "state_powertrain", &before) != PGW_OK)
+        return 1;
+    for (unsigned round = 0; round < rounds; ++round) {
+        uint64_t direct_start, direct_end, converted_start, converted_end;
+        bool direct_first = (round & 1u) == 0;
+        if (direct_first) {
+            if (output.iface->bind(output.state, source_reader.representation) != PGW_OK ||
+                !benchmark_clock_ns(&direct_start) ||
+                benchmark_write_batch(&output, &input_samples, &output_results,
+                                      &output_result, writes_per_round) ||
+                !benchmark_clock_ns(&direct_end) ||
+                output.iface->bind(output.state, &fallback_representation) != PGW_OK ||
+                !benchmark_clock_ns(&converted_start) ||
+                benchmark_write_batch(&output, &input_samples, &output_results,
+                                      &output_result, writes_per_round) ||
+                !benchmark_clock_ns(&converted_end))
+                return 1;
+        } else {
+            if (output.iface->bind(output.state, &fallback_representation) != PGW_OK ||
+                !benchmark_clock_ns(&converted_start) ||
+                benchmark_write_batch(&output, &input_samples, &output_results,
+                                      &output_result, writes_per_round) ||
+                !benchmark_clock_ns(&converted_end) ||
+                output.iface->bind(output.state, source_reader.representation) != PGW_OK ||
+                !benchmark_clock_ns(&direct_start) ||
+                benchmark_write_batch(&output, &input_samples, &output_results,
+                                      &output_result, writes_per_round) ||
+                !benchmark_clock_ns(&direct_end))
+                return 1;
+        }
+        direct_times[round] = direct_end - direct_start;
+        converted_times[round] = converted_end - converted_start;
+    }
+    if (PGW_DDS_statistics(gateway, "state_powertrain", &after) != PGW_OK ||
+        after.direct_write_attempts - before.direct_write_attempts !=
+            rounds * writes_per_round ||
+        after.converted_write_attempts - before.converted_write_attempts !=
+            rounds * writes_per_round)
+        return 1;
+    qsort(direct_times, rounds, sizeof(direct_times[0]), compare_u64);
+    qsort(converted_times, rounds, sizeof(converted_times[0]), compare_u64);
+    uint64_t measured_per_path = rounds * writes_per_round;
+    printf("Micro target DDS write-path benchmark: samples_per_path=%llu rounds=%u "
+           "direct_median_ns_per_sample=%llu canonical_median_ns_per_sample=%llu\n",
+           (unsigned long long)measured_per_path, rounds,
+           (unsigned long long)(direct_times[rounds / 2] / writes_per_round),
+           (unsigned long long)(converted_times[rounds / 2] / writes_per_round));
+
+    if (source_reader.iface->return_loan(source_reader.state, &input_samples) != PGW_OK)
+        return 1;
+    if (output.iface->bind(output.state, source_reader.representation) != PGW_OK)
+        return 1;
+    if (!PGW_SampleSeq_unloan(&input_samples) ||
+        !PGW_SampleSeq_finalize(&input_samples) ||
+        !PGW_SampleSeq_unloan(&ingress_samples) ||
+        !PGW_SampleSeq_finalize(&ingress_samples) ||
+        !PGW_WriteResultSeq_unloan(&output_results) ||
+        !PGW_WriteResultSeq_finalize(&output_results) ||
+        !PGW_WriteResultSeq_unloan(&ingress_results) ||
+        !PGW_WriteResultSeq_finalize(&ingress_results))
+        return 1;
+    return 0;
+}
+
 int main(void)
 {
     const size_t memory_capacity = 262144;
@@ -136,6 +307,11 @@ int main(void)
         .data = {0x10, 0x27, 0x00, 0x00, 0x01, 0x01, 0xab, 0xcd}};
     PGW_Schema signal_schema = {PGW_codec_schema.name, PGW_codec_schema.version,
                                PGW_codec_schema.fingerprint};
+    PGW_Schema alternate_route_schema = {
+        "can.signal.alternate", 2,
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    };
+    PGW_Representation canonical_route_source, cross_schema_route_source;
     PGW_CANCategory categories[2];
     PGW_CANCategorySeq category_sequence;
     PGW_CANConfig can_config = {
@@ -156,7 +332,7 @@ int main(void)
     PGW_WriteResult result;
     PGW_WriteResultSeq result_sequence;
     PGW_Representation signal_rep = {&signal_schema, "test.signal", sizeof(SignalSample),
-                                     _Alignof(SignalSample), &signal_access};
+                                     _Alignof(SignalSample), &signal_access, NULL};
     PGW_Representation probe_rep = *PGW_probe_binding.representation;
     SignalSample update = {.value = {1001, {.kind = PGW_VALUE_DOUBLE,
                                             .data.real = 123.4}}};
@@ -535,6 +711,10 @@ int main(void)
                                            &route_result_storage[i]) == PGW_OK);
     }
     CHECK(PGW_example_attach_routes(can, gateway, &route_sequence) == PGW_OK);
+    canonical_route_source = *routes[0].reader.representation;
+    cross_schema_route_source = canonical_route_source;
+    cross_schema_route_source.schema = &alternate_route_schema;
+    routes[0].reader.representation = &cross_schema_route_source;
     CHECK(PGW_Service_set_routes(&service, &route_sequence) == PGW_OK);
     CHECK(PGW_Service_initialize(&service) == PGW_OK);
     {
@@ -767,6 +947,7 @@ int main(void)
     CHECK(PGW_SampleSeq_finalize(&loan));
     CHECK(PGW_WriteResultSeq_unloan(&result_sequence));
     CHECK(PGW_WriteResultSeq_finalize(&result_sequence));
+    CHECK(benchmark_dds_write_paths(gateway, companion) == 0);
     CHECK(PGW_CANAdapter.connection->close(can) == PGW_OK);
     CHECK(PGW_CANConfig_finalize(&can_config) == PGW_OK);
     CHECK(PGW_CANCategorySeq_unloan(&category_sequence));

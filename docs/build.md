@@ -43,7 +43,12 @@ ctest --test-dir build --output-on-failure
 Supply the SDK's exact `RTIME_PIL_ARCH`, `RTIME_PSL_ARCH`, and
 `RTIME_TARGET_NAME`; the finder verifies those values against installed
 archives. SDK and Java locations are explicit inputs, not embedded defaults. The
-persisted launcher in
+`RTIME_TARGET_NAME` selects the installed Micro OSAPI/NETIO library profile; it
+does not require downstream gateway code to be compiled with a compiler of the
+same version encoded in that target name. GCC 13 or newer may compile the
+gateway and examples for the selected profile. The verified developer build
+uses GNU 15.2 with the Micro Linux6 library profile.
+The persisted launcher in
 `build/pgw-tools` embeds the configured JRE, so subsequent builds work even with
 `JREHOME` unset in the shell. Generator outputs stay in the build tree.
 `PGW_PYTHON_EXECUTABLE` explicitly selects one interpreter for every host

@@ -89,8 +89,16 @@ sequence, loan-return, and `PGW_DDSBinding` glue. `conversion="fieldwise"`
 generates a canonical scalar struct and matching-name conversion with compile-
 time type checks; `conversion="callbacks"` connects explicit semantic mapping
 functions. Key-registration values for a single scalar key can be generated;
-composite or application-policy keys use a callback. The generic generated
-path does not serialize an intermediate gateway envelope.
+composite or application-policy keys use a callback. An identical generated
+DDS type can opt into `direct-native-write="true"`; callback-based conversion
+also requires `validate-native`. The DDS adapter compares generated plugin
+identity in the borrowed sample view and calls the typed writer directly,
+regardless of schema labels. For cross-schema translation, pair `bind-view`
+and `write-view`: bind-view must validate the source representation's static
+view contract before READY; write-view translates that borrowed payload/context
+to the generated DDS type. Canonical conversion fallback is available only
+when the schemas match. Neither path bypasses Micro's own history/serialization
+work.
 
 Tests: `config.strict_xml` covers grammar/references/policies/bounds;
 `config.actual_mag` runs the actual installed MAG, demonstrates topology-resource

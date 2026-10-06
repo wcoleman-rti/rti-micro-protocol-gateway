@@ -85,6 +85,18 @@ union validation and application-specific mappings remain explicit callbacks.
 See [developing adapters and DDS bindings](../../../docs/developing-adapters.md)
 for the extension workflow.
 
+For a validated identical generated DDS type, a binding can mark
+`direct-native-write="true"`. The adapter compares the static type-plugin
+identity carried by the borrowed sample view with the destination binding and
+uses the generated typed writer without constructing canonical or output
+scratch samples, regardless of schema labels. For cross-schema sources,
+`bind-view` explicitly accepts the source representation's static view
+contract, and the paired `write-view` translates the borrowed sample/context
+directly to the generated DDS sample. An unsupported sample view is reported
+invalid; schema-compatible routes may use `copy_value` fallback. This is per
+binding/route, not a global mode. Callback bindings need a native-sample
+validator before enabling direct writes.
+
 The current example bindings use pointer-free fixed scalars, arrays, and the
 signal tagged union. A binding with heap-owned strings/collections would need
 an explicit destruction contract; that extension is not currently supported.

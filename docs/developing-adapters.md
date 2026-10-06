@@ -41,6 +41,24 @@ Connext Micro and the gateway:
   - The binding also declares the gateway representation and connects conversion
     between the DDS sample and that representation. RTI type support does not
     define the gateway representation or conversion policy.
+- `PGW_SampleView` lets a destination binding inspect the borrowed source sample
+  together with its adapter-specific metadata while the input loan is active.
+  Its `PGW_SampleViewDescriptor` declares the exact view shape and identities.
+  A `bind-view` callback negotiates that contract against the destination
+  binding before READY; a paired `write-view` callback translates the borrowed
+  pair directly into the statically typed DDS sample without first copying the
+  source into scratch storage. Neither callback may retain borrowed pointers.
+  The DDS service XML requires both callbacks for cross-schema translation.
+  `PGW_UNSUPPORTED` from `bind-view` rejects the route before READY.
+  `PGW_UNSUPPORTED` from `write-view` falls back to canonical copy/write only
+  when schemas match; on a negotiated cross-schema route it becomes
+  `PGW_WRITE_INVALID` for that sample and routing continues.
+  For example:
+
+  ```xml
+  <binding ... bind-view="PGW_signal_bind_view"
+           write-view="PGW_signal_write_view"/>
+  ```
 - Key registration, timestamp-aware writes, native sequence access, and DDS
   loan return are connected to the gateway's lifecycle through the binding.
 

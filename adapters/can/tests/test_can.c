@@ -210,9 +210,9 @@ int main(void)
     PGW_Signal values[16];
     PGW_CANStats stats;
     static const PGW_SampleAccessI source_access = {
-        PGW_ABI_VERSION, sizeof(PGW_SampleAccessI), source_copy, NULL};
+        PGW_ABI_VERSION, sizeof(PGW_SampleAccessI), source_copy, NULL, NULL};
     PGW_Representation source = {&schema, "test.signal", sizeof(PGW_Signal),
-                                  _Alignof(PGW_Signal), &source_access};
+                                  _Alignof(PGW_Signal), &source_access, NULL};
     PGW_CANFrame engine = {0}, aux = {0}, bad = {0};
     const uint8_t baseline[] = {0xe8, 0x03, 0xff, 0x0a, 0xa5, 0x02, 0xcc, 0xdd};
     const uint8_t patched[] = {0xd2, 0x04, 0xff, 0xea, 0xa4, 0x02, 0xcc, 0xdd};

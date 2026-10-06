@@ -103,9 +103,9 @@ static PGW_Status probe_time(const PGW_Sample *sample, PGW_Timestamp *out)
     return PGW_OK;
 }
 static const PGW_SampleAccessI signal_access = {
-    PGW_ABI_VERSION, sizeof(PGW_SampleAccessI), signal_copy, NULL};
+    PGW_ABI_VERSION, sizeof(PGW_SampleAccessI), signal_copy, NULL, NULL};
 static const PGW_SampleAccessI probe_access = {
-    PGW_ABI_VERSION, sizeof(PGW_SampleAccessI), probe_copy, probe_time};
+    PGW_ABI_VERSION, sizeof(PGW_SampleAccessI), probe_copy, probe_time, NULL};
 static PGW_CodecStatus decode(void *context, size_t index, const uint8_t *bytes,
                              size_t length, PGW_Signal *values, size_t capacity, size_t *count)
 {
@@ -329,7 +329,7 @@ int main(int argc, char **argv)
     assert(PGW_DDSConnextMicroConnection.reader(companion, "probe", &probe_reader) == PGW_OK);
     assert(PGW_DDSConnextMicroConnection.writer(gateway, "probe", &probe_writer) == PGW_OK);
     PGW_Representation signal_rep = {&schema, "benchmark.signal", sizeof(SignalSample),
-                                     _Alignof(SignalSample), &signal_access};
+                                     _Alignof(SignalSample), &signal_access, NULL};
     PGW_Representation probe_rep = *PGW_probe_binding.representation;
     probe_rep.access = &probe_access;
     assert(command_writer.iface->bind(command_writer.state, &signal_rep) == PGW_OK);

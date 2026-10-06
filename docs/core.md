@@ -13,9 +13,18 @@
 # Core contracts
 
 `PGW_Sample` is incomplete. Only a negotiated representation accessor may
-interpret a sample. Schema name, version and fingerprint must all match.
-No payload/metadata tuple, per-sample operations table, forwarding queue or
-runtime discovery is part of the routing core.
+interpret a sample. The core validates each representation but delegates
+source/destination compatibility to the destination writer's `bind` operation.
+An adapter without an explicit translator should continue to require exact
+schema name, version, and fingerprint equality.
+An adapter may expose a borrowed `PGW_SampleView` containing its native sample
+and associated context; a static view contract declares the kind, payload
+identity/size, and context identity before the writer binds. The runtime view
+must match that contract and remains valid only until the source loan is
+returned. The routing core does not serialize, copy, retain, or interpret the
+view. Sample-access ABI version 2 adds this contract; adapters must be rebuilt
+against the matching interface. No per-sample operations table, forwarding
+queue or runtime discovery is part of the routing core.
 
 Readers fill the route's fixed `PGW_SampleSeq` pointer array. `OK` creates an
 adapter loan, including an empty sequence; `NO_DATA` does not. Every successful
@@ -58,9 +67,9 @@ control reads or writes.
 
 Storage comes from caller arrays or a checked, initialization-only arena.
 There is no runtime resizing or fallback allocator. Interface ABI versions,
-required callbacks, capacities, duplicate registrations and exact schemas are
-validated before READY. Registries are frozen by the embedding application
-after static registration.
+required callbacks, capacities, duplicate registrations, and writer-negotiated
+source compatibility are validated before READY. Registries are frozen by the
+embedding application after static registration.
 Adapter/binding registries and route catalogs are `PGW_AdapterSeq`,
 `PGW_RepresentationSeq` and `PGW_RouteSeq`. Their initialization functions
 accept native typed sequence views over caller-provisioned storage.

@@ -32,6 +32,7 @@ typedef struct {
 
 typedef struct {
     const PGW_Representation *source;
+    const PGW_Schema *target_schema;
     uint64_t sum;
     size_t writes;
     PGW_WriteResult outcome;

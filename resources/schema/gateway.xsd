@@ -51,6 +51,10 @@
             <xs:attribute name="register-key-value" type="xs:string"/>
             <xs:attribute name="sample-copy" type="identifier"/>
             <xs:attribute name="supports-timestamp" type="xs:boolean" default="false"/>
+            <xs:attribute name="direct-native-write" type="xs:boolean" default="false"/>
+            <xs:attribute name="validate-native" type="identifier"/>
+            <xs:attribute name="bind-view" type="identifier"/>
+            <xs:attribute name="write-view" type="identifier"/>
           </xs:complexType>
         </xs:element>
         <xs:element name="connection" minOccurs="1" maxOccurs="unbounded">

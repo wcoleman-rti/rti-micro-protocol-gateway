@@ -95,12 +95,20 @@ class ConfigurationRequirements(unittest.TestCase):
             f'fingerprint="{FINGERPRINT}" {attributes}/>')
         self.gateway.write_text(valid)
         compile_config(self.gateway)
+        views = valid.replace(
+            'supports-timestamp="false"',
+            'supports-timestamp="false" bind-view="test_bind_view" '
+            'write-view="test_write_view"')
+        self.gateway.write_text(views)
+        compile_config(self.gateway)
 
         invalid = (
             valid.replace(' native-to-dds="test_to_dds"', ''),
             valid.replace('conversion="callbacks"', 'conversion="unknown"'),
             valid.replace('supports-timestamp="false"', 'supports-timestamp="maybe"'),
             valid.replace('conversion="callbacks"', 'conversion="fieldwise"'),
+            views.replace('bind-view="test_bind_view" ', ''),
+            views.replace('write-view="test_write_view"', ''),
         )
         for xml in invalid:
             with self.subTest(xml=xml), self.assertRaises(ConfigError):
@@ -297,7 +305,10 @@ class ConfigurationRequirements(unittest.TestCase):
             'native-type="ExampleSample" native-header="example_sample.h" '
             'support-header="exampleSupport.h" conversion="callbacks" '
             'dds-to-native="from_example_sample" native-to-dds="to_example_sample" '
-            'sample-copy="copy_example_sample"')
+            'sample-copy="copy_example_sample" direct-native-write="true" '
+            'validate-native="validate_example_sample" '
+            'bind-view="bind_example_sample_view" '
+            'write-view="write_example_sample_view"')
         gateway_xml.write_text(
             '<gateway><binding id="reader" symbol="reader_binding" '
             'type="Example::Sample" ' + common +
@@ -316,6 +327,14 @@ class ConfigurationRequirements(unittest.TestCase):
         self.assertIn("static const PGW_Representation pgw_representation_0", first)
         self.assertIn("copy_example_sample(sample, out, size)", first)
         self.assertIn("&pgw_access_0", first)
+        self.assertIn("Example_SampleTypePlugin_get", first)
+        self.assertIn("direct_write_safe = true", first)
+        self.assertIn("validate_native = validate_example_sample", first)
+        self.assertIn("Example_SampleDataWriter_write", first)
+        self.assertIn("Example_SampleDataWriter_write_w_timestamp", first)
+        self.assertIn("write_native = pgw_binding_reader_write_native", first)
+        self.assertIn("bind_view = bind_example_sample_view", first)
+        self.assertIn("write_view = write_example_sample_view", first)
         self.assertEqual(first.count("static const PGW_Representation "), 1)
         self.assertIn("const PGW_DDSBinding reader_binding", first)
         self.assertIn("const PGW_DDSBinding writer_binding", first)
@@ -323,6 +342,13 @@ class ConfigurationRequirements(unittest.TestCase):
         gateway_xml.write_text(
             '<gateway><binding id="unknown" symbol="unknown_binding" '
             'type="Example::Missing" ' + common + '/></gateway>')
+        with self.assertRaises(BindingGenerationError):
+            generate_dds_bindings(types_xml, gateway_xml, output)
+        gateway_xml.write_text(
+            '<gateway><binding id="unpaired" symbol="unpaired_binding" '
+            'type="Example::Sample" ' +
+            common.replace('bind-view="bind_example_sample_view" ', '') +
+            '/></gateway>')
         with self.assertRaises(BindingGenerationError):
             generate_dds_bindings(types_xml, gateway_xml, output)
 
@@ -340,7 +366,10 @@ class ConfigurationRequirements(unittest.TestCase):
             f'fingerprint="{FINGERPRINT}" representation-name="example.probe.native" '
             'native-type="ExampleProbe" native-header="example_probe.h" '
             'support-header="probeSupport.h" conversion="fieldwise" '
-            'register-key-value="1" supports-timestamp="true"/></gateway>')
+            'register-key-value="1" supports-timestamp="true" '
+            'direct-native-write="true" '
+            'bind-view="PGW_probe_bind_view" '
+            'write-view="PGW_probe_write_view"/></gateway>')
         output = self.directory / "fieldwise_bindings.c"
         generate_dds_bindings(types_xml, gateway_xml, output)
         text = output.read_text()
@@ -356,6 +385,9 @@ class ConfigurationRequirements(unittest.TestCase):
         self.assertIn("int32_t reading;", header)
         self.assertIn("scratch.id = 1u", text)
         self.assertIn("Example_ProbeDataWriter_register_instance_w_timestamp", text)
+        self.assertIn("direct_write_safe = true", text)
+        self.assertIn("write_view = PGW_probe_write_view", text)
+        self.assertIn("bind_view = PGW_probe_bind_view", text)
         types_xml.write_text(
             '<dds><types><module name="Example"><struct name="Probe">'
             '<member name="id" type="uint32" key="true"/>'

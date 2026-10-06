@@ -11,11 +11,34 @@
  */
 
 #include <pgw/dds/connext_micro.h>
+#include <pgw/can.h>
 #include <pgw/signal.h>
+#include <pgw/signal_dds.h>
 #include <pgw_codec.h>
 #include "signalsSupport.h"
 #include <math.h>
 #include <string.h>
+
+bool PGW_signal_validate_dds(const void *opaque)
+{
+    if (!opaque) return false;
+    const PGW_DDS_Signal *wire = opaque;
+    const PGW_SignalDescriptor *descriptor = PGW_codec_signal_find(wire->id);
+    if (!descriptor) return false;
+    switch (wire->value._d) {
+    case VALUE_BOOLEAN:
+        return descriptor->kind == PGW_VALUE_BOOLEAN &&
+            (wire->value._u.boolean_value == DDS_BOOLEAN_FALSE ||
+             wire->value._u.boolean_value == DDS_BOOLEAN_TRUE);
+    case VALUE_INT64:
+        return descriptor->kind == PGW_VALUE_INT64;
+    case VALUE_DOUBLE:
+        return descriptor->kind == PGW_VALUE_DOUBLE &&
+            isfinite(wire->value._u.real_value);
+    default:
+        return false;
+    }
+}
 
 PGW_Status PGW_signal_from_dds(const void *opaque, void *out, size_t size)
 {
@@ -45,6 +68,88 @@ PGW_Status PGW_signal_from_dds(const void *opaque, void *out, size_t size)
     }
     if (value.value.kind != descriptor->kind) return PGW_INVALID;
     *(PGW_Signal *)out = value;
+    return PGW_OK;
+}
+
+PGW_Status PGW_signal_bind_view(void *state, const PGW_Representation *source)
+{
+    (void)state;
+    if (!source || !source->access ||
+        source->access->version != PGW_ABI_VERSION ||
+        source->access->size != sizeof(PGW_SampleAccessI) ||
+        !source->access->view || !source->view_contract)
+        return PGW_UNSUPPORTED;
+    const PGW_SampleViewDescriptor *view = source->view_contract;
+    if (view->kind == PGW_SAMPLE_VIEW_CANONICAL &&
+        view->value_size == sizeof(PGW_Signal) &&
+        view->type_identity == &PGW_CAN_SIGNAL_VALUE_IDENTITY &&
+        view->context_identity == &PGW_CAN_METADATA_IDENTITY)
+        return PGW_OK;
+    if (view->kind == PGW_SAMPLE_VIEW_NATIVE && !view->value_size &&
+        view->type_identity == PGW_signal_dds_binding_powertrain.type_identity() &&
+        view->context_identity == &PGW_DDS_METADATA_IDENTITY)
+        return PGW_OK;
+    return PGW_UNSUPPORTED;
+}
+
+PGW_Status PGW_signal_from_view(const PGW_SampleView *view, void *out, size_t size)
+{
+    if (!view || !view->value || !out || size != sizeof(PGW_Signal))
+        return PGW_INVALID;
+    if ((view->context == NULL) != (view->context_identity == NULL))
+        return PGW_INVALID;
+    if (view->kind == PGW_SAMPLE_VIEW_CANONICAL) {
+        if (view->value_size != sizeof(PGW_Signal) ||
+            view->type_identity != &PGW_CAN_SIGNAL_VALUE_IDENTITY ||
+            view->context_identity != &PGW_CAN_METADATA_IDENTITY)
+            return PGW_UNSUPPORTED;
+        memcpy(out, view->value, sizeof(PGW_Signal));
+        return PGW_OK;
+    }
+    if (view->kind == PGW_SAMPLE_VIEW_NATIVE) {
+        if (view->type_identity !=
+                PGW_signal_dds_binding_powertrain.type_identity() ||
+            view->context_identity != &PGW_DDS_METADATA_IDENTITY)
+            return PGW_UNSUPPORTED;
+        const PGW_DDSMetadata *metadata = view->context;
+        if (!metadata || !metadata->valid_data) return PGW_INVALID;
+        return PGW_signal_from_dds(view->value, out, size);
+    }
+    return PGW_UNSUPPORTED;
+}
+
+PGW_Status PGW_signal_write_view(void *state, DDS_DataWriter *writer,
+                                const PGW_SampleView *view,
+                                const struct DDS_Time_t *time,
+                                DDS_ReturnCode_t *write_result)
+{
+    (void)state;
+    if (!writer || !view || !write_result) return PGW_INVALID;
+    if ((view->context == NULL) != (view->context_identity == NULL))
+        return PGW_INVALID;
+    PGW_Signal converted;
+    const PGW_Signal *native;
+    if (view->kind == PGW_SAMPLE_VIEW_CANONICAL && view->value &&
+        view->value_size == sizeof(PGW_Signal) &&
+        view->type_identity == &PGW_CAN_SIGNAL_VALUE_IDENTITY &&
+        view->context_identity == &PGW_CAN_METADATA_IDENTITY) {
+        native = view->value;
+    } else {
+        PGW_Status status = PGW_signal_from_view(view, &converted, sizeof(converted));
+        if (status != PGW_OK) return status;
+        native = &converted;
+    }
+    PGW_DDS_Signal wire;
+    if (!PGW_DDS_Signal_initialize(&wire)) return PGW_FATAL;
+    *write_result = PGW_signal_to_dds(native, &wire);
+    if (*write_result != DDS_RETCODE_OK) return PGW_INVALID;
+    if (time) {
+        *write_result = PGW_DDS_SignalDataWriter_write_w_timestamp(
+            PGW_DDS_SignalDataWriter_narrow(writer), &wire, &DDS_HANDLE_NIL, time);
+    } else {
+        *write_result = PGW_DDS_SignalDataWriter_write(
+            PGW_DDS_SignalDataWriter_narrow(writer), &wire, &DDS_HANDLE_NIL);
+    }
     return PGW_OK;
 }
 

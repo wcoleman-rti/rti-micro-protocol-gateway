@@ -19,7 +19,7 @@
 #include "pgw/sequence.h"
 #include "pgw/diagnostics.h"
 
-#define PGW_ABI_VERSION 1u
+#define PGW_ABI_VERSION 2u
 
 /** @brief Result codes shared by the gateway core and adapters.
  *
@@ -92,10 +92,49 @@ typedef struct {
     uint32_t nanoseconds;  /**< Fractional seconds; expected to be below 1e9. */
 } PGW_Timestamp;
 
+/** @brief Borrowed view of a sample and its adapter-specific context.
+ *
+ * The pointers remain valid only for the lifetime of the source sample loan.
+ * Canonical views expose the representation's copy_value type. Native views
+ * expose an adapter-native type identified by type_identity. A view's kind,
+ * value_size, type_identity, and context_identity must match its representation
+ * contract. context and context_identity must either both be null or both be
+ * non-null.
+ */
+typedef enum {
+    PGW_SAMPLE_VIEW_CANONICAL,
+    PGW_SAMPLE_VIEW_NATIVE
+} PGW_SampleViewKind;
+
+typedef struct {
+    PGW_SampleViewKind kind;      /**< Canonical representation or adapter-native data. */
+    const void *value;            /**< Borrowed payload pointer. */
+    size_t value_size;            /**< Payload size when known, otherwise zero. */
+    const void *type_identity;    /**< Opaque exact identity for the payload type. */
+    const void *context;          /**< Borrowed adapter-specific sample metadata. */
+    const void *context_identity; /**< Opaque identity describing context's C type. */
+} PGW_SampleView;
+
+/** @brief Static contract for the borrowed sample views a representation emits.
+ *
+ * The descriptor is borrowed and immutable for the representation's lifetime.
+ * `type_identity` is a stable opaque identity for the view payload contract;
+ * for native DDS samples it is the generated type identity. Canonical views
+ * must provide a nonzero value_size. Native views may use zero value_size
+ * when type_identity fully identifies their layout.
+ */
+typedef struct {
+    PGW_SampleViewKind kind;
+    size_t value_size;
+    const void *type_identity;
+    const void *context_identity;
+} PGW_SampleViewDescriptor;
+
 /** @brief Optional operations for accessing a sample without knowing its type.
  *
  * Implementations are versioned with PGW_ABI_VERSION. They must copy into
- * caller-provided storage and must not retain the destination pointer.
+ * caller-provided storage and must not retain the destination pointer or the
+ * borrowed pointers returned by view.
  */
 typedef struct {
     uint32_t version;  /**< Must equal @ref PGW_ABI_VERSION. */
@@ -113,11 +152,18 @@ typedef struct {
      * @return PGW_OK on success, otherwise an applicable PGW_Status.
      */
     PGW_Status (*source_timestamp)(const PGW_Sample *, PGW_Timestamp *);
+    /** Return borrowed sample data and context without copying.
+     * @return PGW_OK when the view is available, PGW_UNSUPPORTED when this
+     *         sample cannot provide one, or another applicable status.
+     */
+    PGW_Status (*view)(const PGW_Sample *, PGW_SampleView *);
 } PGW_SampleAccessI;
 
 /** @brief Describes a sample's schema and native in-memory representation.
  * The schema, name, and access table are borrowed and must outlive every use of
- * this representation. Alignment must be a nonzero power of two.
+ * this representation. Alignment must be a nonzero power of two. If access
+ * provides view, view_contract must declare that view's immutable payload and
+ * context shape before a destination writer binds.
  */
 typedef struct {
     const PGW_Schema *schema;          /**< Schema identity. */
@@ -125,6 +171,7 @@ typedef struct {
     size_t sample_size;                /**< Native sample size in bytes. */
     size_t sample_alignment;           /**< Required native sample alignment. */
     const PGW_SampleAccessI *access;   /**< Optional type-erased access methods. */
+    const PGW_SampleViewDescriptor *view_contract; /**< Static contract for optional borrowed views. */
 } PGW_Representation;
 
 /** @brief Per-sample result returned by a stream writer.
@@ -191,9 +238,10 @@ typedef struct {
 typedef struct {
     uint32_t version;  /**< Must equal @ref PGW_ABI_VERSION. */
     size_t size;       /**< Must equal sizeof(PGW_StreamWriterI). */
-    /** Bind the writer to a representation.
+    /** Negotiate whether the writer accepts a source representation.
      * The state argument identifies adapter-owned writer state; representation
-     * is the borrowed sample representation.
+     * is borrowed through the connection lifetime. The writer is responsible
+     * for rejecting incompatible schemas or unsupported view contracts.
      * @return PGW_OK on success, otherwise an applicable PGW_Status.
      */
     PGW_Status (*bind)(void *, const PGW_Representation *);

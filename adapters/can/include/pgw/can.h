@@ -47,6 +47,17 @@ typedef struct {
     uint32_t interface_index;            /**< Platform interface index, if available. */
 } PGW_CANFrame;
 
+/** @brief CAN metadata retained with a decoded gateway sample. */
+typedef struct {
+    PGW_Timestamp timestamp;
+    uint32_t frame_id;
+    uint32_t flags;
+    uint32_t interface_index;
+} PGW_CANMetadata;
+
+extern const unsigned char PGW_CAN_SIGNAL_VALUE_IDENTITY;
+extern const unsigned char PGW_CAN_METADATA_IDENTITY;
+
 #define REDA_SEQUENCE_USER_API
 #define T PGW_CANFrame
 #define TSeq PGW_CANFrameSeq

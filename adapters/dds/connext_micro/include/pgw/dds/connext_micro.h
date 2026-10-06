@@ -51,11 +51,39 @@ typedef struct {
     DDS_ReturnCode_t (*return_loan)(void *, DDS_DataReader *);
     /** Copy one native sample into caller storage of the advertised representation. */
     PGW_Status (*copy_native)(const void *, void *, size_t);
+    /** Negotiate a borrowed source view before READY.
+     * Cross-schema routes require this operation together with write_view.
+     * The source representation and its view_contract remain borrowed for the
+     * connection lifetime.
+     */
+    PGW_Status (*bind_view)(void *, const PGW_Representation *);
+    /** Translate and write a borrowed source sample view.
+     * The callback may inspect payload and metadata but must not retain either
+     * borrowed pointer. On PGW_OK it stores the DDS write result in write_result;
+     * PGW_UNSUPPORTED permits canonical fallback only for schema-compatible
+     * representations; otherwise the individual sample is reported INVALID.
+     */
+    PGW_Status (*write_view)(void *, DDS_DataWriter *, const PGW_SampleView *,
+                             const struct DDS_Time_t *, DDS_ReturnCode_t *);
     /** Write one native sample, optionally with a source timestamp. */
     DDS_ReturnCode_t (*write)(void *, DDS_DataWriter *, const void *,
                              const struct DDS_Time_t *);
     /** Register instance keys with a writer when the type requires it. */
     PGW_Status (*register_keys)(void *, DDS_DataWriter *);
+    /** Return the generated type-plugin interface as an opaque identity token.
+     * The adapter compares tokens; it does not invoke plugin operations through
+     * this callback.
+     */
+    const void *(*type_identity)(void);
+    /** Whether same-type borrowed samples may bypass canonical conversion.
+     * Callback-mode bindings require validate_native to be non-null.
+     */
+    bool direct_write_safe;
+    /** Validate a borrowed native DDS sample before direct forwarding, if needed. */
+    bool (*validate_native)(const void *);
+    /** Write a borrowed native DDS sample without canonical conversion. */
+    DDS_ReturnCode_t (*write_native)(void *, DDS_DataWriter *, const void *,
+                                    const struct DDS_Time_t *);
 } PGW_DDSBinding;
 
 /** @brief Select one named DDS reader or writer endpoint for a connection.
@@ -117,6 +145,8 @@ typedef struct {
     uint64_t accepted, backpressure, invalid, fatal; /**< Gateway stream-write outcomes. */
     DDS_Long lost, rejected, matched, incompatible_qos;
     /**< DDS lost/rejected totals, current matches, and incompatible-QoS total. */
+    uint64_t direct_write_attempts, converted_write_attempts;
+    /**< Samples written by native-type fast path or canonical conversion path. */
 } PGW_DDSStatistics;
 /** @brief Metadata copied from Connext Micro sample information.
  * The sample state, view state, and instance state values are native DDS enums.
@@ -132,6 +162,7 @@ typedef struct {
     DDS_ViewStateKind view_state;                           /**< DDS view state. */
     DDS_InstanceHandle_t instance_handle;                   /**< DDS instance handle. */
 } PGW_DDSMetadata;
+extern const unsigned char PGW_DDS_METADATA_IDENTITY;
 
 /** @brief Register a generated AppGen library model with the process-global DDS factory.
  * The factory retains the model pointer; the model storage must remain valid

@@ -68,6 +68,11 @@ int main(void)
     PGW_CANFrame rx[1], tx[1];
     PGW_CANSocket socket = {.fd = -1};
     PGW_Route uninitialized_route = {0};
+    PGW_SampleView sample_view = {
+        .kind = PGW_SAMPLE_VIEW_CANONICAL,
+        .value = &records[0],
+        .value_size = sizeof(records[0])
+    };
 #if defined(PGW_ENABLE_REMOTE_CONTROL)
     PGW_DDSRemoteControlOptions control_options = {
         PGW_DDS_REMOTE_CONTROL_OPTIONS_VERSION,

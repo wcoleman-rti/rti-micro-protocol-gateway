@@ -19,8 +19,7 @@
 
 typedef struct PGW_CANSample {
     PGW_Signal signal;
-    PGW_Timestamp timestamp;
-    uint32_t frame_id, flags, interface_index;
+    PGW_CANMetadata metadata;
 } PGW_CANSample;
 #define REDA_SEQUENCE_USER_API
 #define T PGW_CANSample
@@ -55,6 +54,7 @@ typedef struct PGW_CANCategoryState {
     PGW_CANConnection *connection;
     const char *name;
     PGW_Representation representation;
+    PGW_SampleViewDescriptor view_contract;
     PGW_CANSampleSeq queue;
     PGW_CANLoanSeq loan;
     size_t head, count;
@@ -294,12 +294,30 @@ static PGW_Status copy_value(const PGW_Sample *s, void *v, size_t size)
 static PGW_Status timestamp(const PGW_Sample *s, PGW_Timestamp *t)
 {
     if (!s || !t) return PGW_INVALID;
-    *t = ((const PGW_CANSample *)s)->timestamp;
+    *t = ((const PGW_CANSample *)s)->metadata.timestamp;
     return t->valid ? PGW_OK : PGW_NO_DATA;
 }
 
+const unsigned char PGW_CAN_METADATA_IDENTITY = 0;
+const unsigned char PGW_CAN_SIGNAL_VALUE_IDENTITY = 0;
+
+static PGW_Status sample_view(const PGW_Sample *opaque, PGW_SampleView *view)
+{
+    const PGW_CANSample *sample = (const PGW_CANSample *)opaque;
+    if (!sample || !view) return PGW_INVALID;
+    *view = (PGW_SampleView){
+        .kind = PGW_SAMPLE_VIEW_CANONICAL,
+        .value = &sample->signal,
+        .value_size = sizeof(sample->signal),
+        .type_identity = &PGW_CAN_SIGNAL_VALUE_IDENTITY,
+        .context = &sample->metadata,
+        .context_identity = &PGW_CAN_METADATA_IDENTITY
+    };
+    return PGW_OK;
+}
+
 static const PGW_SampleAccessI sample_access = {
-    PGW_ABI_VERSION, sizeof(PGW_SampleAccessI), copy_value, timestamp
+    PGW_ABI_VERSION, sizeof(PGW_SampleAccessI), copy_value, timestamp, sample_view
 };
 
 static const PGW_SignalDescriptor *signal_by_id(PGW_CANConnection *c, uint32_t id)
@@ -409,10 +427,9 @@ PGW_Status PGW_CAN_poll(PGW_Connection *connection, size_t budget)
                     &cat->queue, (RTI_INT32)((cat->head + cat->count) % capacity));
                 sample->signal = *decoded;
                 if (!c->config.disable_metadata_capture) {
-                    sample->timestamp = frame.timestamp;
-                    sample->frame_id = frame.id;
-                    sample->flags = frame.flags;
-                    sample->interface_index = frame.interface_index;
+                    sample->metadata = (PGW_CANMetadata){
+                        frame.timestamp, frame.id, frame.flags, frame.interface_index
+                    };
                 }
                 ++cat->count;
                 if (cat->count > c->stats.queue_high_water) {
@@ -492,11 +509,47 @@ static PGW_Status bind_source(void *state, const PGW_Representation *source)
     PGW_CANCategoryState *cat = state;
     if (!source || !PGW_schema_equal(source->schema, cat->representation.schema) ||
         !source->access || source->access->version != PGW_ABI_VERSION ||
-        source->access->size < sizeof(PGW_SampleAccessI) ||
-        !source->access->copy_value) return PGW_UNSUPPORTED;
+        source->access->size != sizeof(PGW_SampleAccessI) ||
+        (!source->access->copy_value && !source->access->view))
+        return PGW_UNSUPPORTED;
     if (cat->source && cat->source != source) return PGW_UNSUPPORTED;
     cat->source = source;
     return PGW_OK;
+}
+
+static PGW_Status sample_signal(const PGW_Representation *source,
+                               const PGW_Sample *sample,
+                               const PGW_Signal **value,
+                               PGW_Signal *copy)
+{
+    const PGW_SampleAccessI *access = source->access;
+    if (access->view) {
+        PGW_SampleView view;
+        PGW_Status status = access->view(sample, &view);
+        if (status == PGW_OK) {
+            if (!view.value || ((view.context == NULL) !=
+                                (view.context_identity == NULL)) ||
+                !source->view_contract ||
+                view.kind != source->view_contract->kind ||
+                view.value_size != source->view_contract->value_size ||
+                view.type_identity != source->view_contract->type_identity ||
+                view.context_identity != source->view_contract->context_identity)
+                return PGW_INVALID;
+            if (view.kind == PGW_SAMPLE_VIEW_CANONICAL &&
+                view.value_size == sizeof(PGW_Signal)) {
+                *value = view.value;
+                return PGW_OK;
+            }
+            if (view.kind != PGW_SAMPLE_VIEW_NATIVE)
+                return PGW_INVALID;
+        } else if (status != PGW_UNSUPPORTED) {
+            return status;
+        }
+    }
+    if (!access->copy_value) return PGW_UNSUPPORTED;
+    PGW_Status status = access->copy_value(sample, copy, sizeof(*copy));
+    if (status == PGW_OK) *value = copy;
+    return status;
 }
 
 static PGW_Status write_samples(void *state, const PGW_SampleSeq *seq,
@@ -527,19 +580,20 @@ static PGW_Status write_samples(void *state, const PGW_SampleSeq *seq,
     for (m = 0; m < PGW_CANMessageSeq_get_length(&c->messages); ++m)
         PGW_CANMessageSeq_get_reference(&c->messages, m)->staged = false;
     for (i = 0; i < (RTI_INT32)n; ++i) {
-        PGW_Signal value;
+        PGW_Signal copied_value;
+        const PGW_Signal *value;
         const PGW_SignalDescriptor *d;
         PGW_CANMessage *msg;
         PGW_CANFrame candidate;
         *PGW_CANIndexSeq_get_reference(&c->write_messages, i) = SIZE_MAX;
         *PGW_WriteResultSeq_get_reference(results, i) = PGW_WRITE_INVALID;
-        if (cat->source->access->copy_value(
+        if (sample_signal(cat->source,
                 *PGW_SampleSeq_get_reference(seq, i), &value,
-                                           sizeof(value)) != PGW_OK)
+                &copied_value) != PGW_OK)
             goto invalid;
-        d = signal_by_id(c, value.id);
-        if (!d || strcmp(d->category, cat->name) || d->kind != value.value.kind ||
-            (value.value.kind == PGW_VALUE_DOUBLE && !isfinite(value.value.data.real)))
+        d = signal_by_id(c, value->id);
+        if (!d || strcmp(d->category, cat->name) || d->kind != value->value.kind ||
+            (value->value.kind == PGW_VALUE_DOUBLE && !isfinite(value->value.data.real)))
             goto invalid;
         msg = PGW_CANMessageSeq_get_reference(&c->messages, d->message_index);
         if (!msg->baseline) {
@@ -547,8 +601,8 @@ static PGW_Status write_samples(void *state, const PGW_SampleSeq *seq,
             goto invalid;
         }
         candidate = msg->staged ? msg->stage : msg->shadow;
-        if (c->config.mapping.patch(c->config.mapping.context, value.id,
-                &value.value, candidate.data, candidate.length) != PGW_CODEC_OK)
+        if (c->config.mapping.patch(c->config.mapping.context, value->id,
+                &value->value, candidate.data, candidate.length) != PGW_CODEC_OK)
             goto invalid;
         msg->stage = candidate;
         msg->staged = true;
@@ -928,9 +982,13 @@ static PGW_Status create(const void *configuration, PGW_Arena *arena,
         cat->connection = c; cat->name = category->name;
         cat->input_enabled = true;
         cat->output_enabled = true;
+        cat->view_contract = (PGW_SampleViewDescriptor){
+            PGW_SAMPLE_VIEW_CANONICAL, sizeof(PGW_Signal),
+            &PGW_CAN_SIGNAL_VALUE_IDENTITY, &PGW_CAN_METADATA_IDENTITY
+        };
         cat->representation = (PGW_Representation){
             category->schema, "can.signal", sizeof(PGW_CANSample),
-            _Alignof(PGW_CANSample), &sample_access};
+            _Alignof(PGW_CANSample), &sample_access, &cat->view_contract};
         PGW_CANSample *queue_buffer;
         if (!PGW_CANSampleSeq_initialize(&cat->queue)) { status = PGW_FATAL; goto fail; }
         cat->queue_initialized = true;

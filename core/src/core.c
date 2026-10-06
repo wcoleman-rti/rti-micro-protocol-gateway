@@ -85,11 +85,20 @@ bool PGW_schema_equal(const PGW_Schema *a, const PGW_Schema *b)
 
 static bool representation_valid(const PGW_Representation *b)
 {
+    bool access_valid = !b || !b->access ||
+        (b->access->version == PGW_ABI_VERSION &&
+         b->access->size == sizeof(PGW_SampleAccessI) &&
+         (!b->access->view || b->view_contract));
+    bool view_valid = !b || !b->view_contract ||
+        (b->access && b->access->view && b->view_contract->type_identity &&
+         (b->view_contract->kind == PGW_SAMPLE_VIEW_CANONICAL ||
+          b->view_contract->kind == PGW_SAMPLE_VIEW_NATIVE) &&
+         (b->view_contract->kind != PGW_SAMPLE_VIEW_CANONICAL ||
+          b->view_contract->value_size));
     return b && b->name && b->name[0] && b->sample_size && b->sample_alignment &&
         !(b->sample_alignment & (b->sample_alignment - 1)) &&
         PGW_schema_equal(b->schema, b->schema) &&
-        (!b->access || (b->access->version == PGW_ABI_VERSION &&
-                       b->access->size == sizeof(PGW_SampleAccessI)));
+        access_valid && view_valid;
 }
 
 PGW_Status PGW_Registry_initialize(PGW_Registry *r, const PGW_AdapterSeq *adapters,
@@ -681,9 +690,7 @@ PGW_Status PGW_Service_initialize(PGW_Service *s)
             !r->reader.iface->read || !r->reader.iface->return_loan ||
             !r->writer.iface->bind || !r->writer.iface->write ||
             !representation_valid(r->reader.representation) ||
-            !representation_valid(r->writer.representation) ||
-            !PGW_schema_equal(r->reader.representation->schema,
-                              r->writer.representation->schema)) {
+            !representation_valid(r->writer.representation)) {
             status = fail(r, PGW_INVALID, "validate"); break;
         }
         for (size_t j = 0; j < i; ++j)

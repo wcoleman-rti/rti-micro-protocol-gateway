@@ -515,8 +515,12 @@ static PGW_Status temperature_write(void *state, const PGW_SampleSeq *seq,
 static void second_schema_and_loan_errors(void)
 {
     const PGW_Schema schema = {"test.temperature", 1, "f64-key-v1"};
-    const PGW_SampleAccessI ops = {PGW_ABI_VERSION, sizeof(ops), temperature_copy, NULL};
-    const PGW_Representation rep = {&schema, "temperature", sizeof(Temperature), _Alignof(Temperature), &ops};
+    const PGW_SampleAccessI ops = {
+        PGW_ABI_VERSION, sizeof(ops), temperature_copy, NULL, NULL
+    };
+    const PGW_Representation rep = {
+        &schema, "temperature", sizeof(Temperature), _Alignof(Temperature), &ops, NULL
+    };
     const PGW_StreamReaderI reader_ops = {PGW_ABI_VERSION, sizeof(reader_ops), temperature_read, temperature_return};
     const PGW_StreamWriterI writer_ops = {PGW_ABI_VERSION, sizeof(writer_ops), temperature_bind, temperature_write};
     TemperatureReader reader = {.value = {23.75, 42}};
@@ -692,17 +696,19 @@ static void bounds_and_schema(void)
     PGW_WriteResult results[4];
     PGW_test_route(&route, 1, &r, &w, refs, results, 4);
     route.writer.representation = &second;
+    w.target_schema = second.schema;
     PGW_Service s = {.route_budget = 1, .sample_budget = 4};
     assert(PGW_test_service_set_routes(&s, &route, 1) == PGW_OK);
-    assert(PGW_Service_initialize(&s) == PGW_INVALID);
+    assert(PGW_Service_initialize(&s) == PGW_UNSUPPORTED);
     assert(s.lifecycle == PGW_FAULTED);
     other = (PGW_Schema){"test.counter", 1, "different-layout-same-name"};
     PGW_test_route(&route, 1, &r, &w, refs, results, 4);
     route.writer.representation = &second;
+    w.target_schema = second.schema;
     s.lifecycle = PGW_UNINITIALIZED;
     assert(PGW_test_service_set_routes(&s, &route, 1) == PGW_OK);
-    assert(PGW_Service_initialize(&s) == PGW_INVALID);
-    assert(!strcmp(route.error.operation, "validate"));
+    assert(PGW_Service_initialize(&s) == PGW_UNSUPPORTED);
+    assert(!strcmp(route.error.operation, "bind"));
     PGW_SampleSeq seq;
     assert(PGW_SampleSeq_initialize(&seq));
     assert(PGW_SampleSeq_loan_contiguous(&seq, refs, 0, 4));

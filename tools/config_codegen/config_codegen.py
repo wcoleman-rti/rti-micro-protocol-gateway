@@ -421,6 +421,7 @@ def compile_config(gateway, dds=None, inventory=None, remote_control=False,
                 "native-header", "support-header", "conversion",
                 "dds-to-native", "native-to-dds", "register-keys",
                 "register-key-value", "sample-copy", "supports-timestamp",
+                "direct-native-write", "validate-native", "bind-view", "write-view",
             )
             shape(node, ("id", "symbol", "type", "schema", "fingerprint"),
                   binding_generation_attributes)
@@ -431,7 +432,8 @@ def compile_config(gateway, dds=None, inventory=None, remote_control=False,
                 raise ConfigError("fingerprint must be SHA256")
             generation_attributes = set(binding_generation_attributes) - {
                 "dds-to-native", "native-to-dds", "register-keys",
-                "register-key-value", "sample-copy", "supports-timestamp"}
+                "register-key-value", "sample-copy", "supports-timestamp",
+                "direct-native-write", "validate-native", "bind-view", "write-view"}
             if generation_attributes.intersection(node.attrib) and \
                     not generation_attributes.issubset(node.attrib):
                 raise ConfigError(
@@ -461,6 +463,19 @@ def compile_config(gateway, dds=None, inventory=None, remote_control=False,
                 raise ConfigError(f"binding {name} has conflicting key registration policies")
             if node.get("sample-copy"):
                 identifier(node.get("sample-copy"))
+            if node.get("validate-native"):
+                identifier(node.get("validate-native"))
+            if node.get("bind-view"):
+                identifier(node.get("bind-view"))
+            if node.get("write-view"):
+                identifier(node.get("write-view"))
+            if bool(node.get("bind-view")) != bool(node.get("write-view")):
+                raise ConfigError(
+                    f"binding {name} must specify bind-view and write-view together")
+            if node.get("direct-native-write") in ("true", "1") and \
+                    node.get("conversion") == "callbacks" and not node.get("validate-native"):
+                raise ConfigError(
+                    f"binding {name} callback direct-write needs a validation callback")
             if node.get("supports-timestamp", "false") not in ("true", "false", "1", "0"):
                 raise ConfigError(f"binding {name} has invalid supports-timestamp value")
             bindings[name] = dict(node.attrib)

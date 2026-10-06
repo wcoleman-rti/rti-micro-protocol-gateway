@@ -150,6 +150,26 @@ def load_bindings(path, struct_types):
                 f"binding {item['id']!r} fieldwise conversion cannot specify callbacks")
         if item.get("sample-copy"):
             item["sample-copy"] = _identifier(item["sample-copy"], "native sample copy callback")
+        if item.get("validate-native"):
+            item["validate-native"] = _identifier(
+                item["validate-native"], "direct native sample validator")
+        if item.get("bind-view"):
+            item["bind-view"] = _identifier(
+                item["bind-view"], "sample-view binding callback")
+        if item.get("write-view"):
+            item["write-view"] = _identifier(
+                item["write-view"], "sample-view writer callback")
+        if bool(item.get("bind-view")) != bool(item.get("write-view")):
+            raise BindingGenerationError(
+                f"binding {item['id']!r} must specify bind-view and write-view together")
+        if item.get("direct-native-write", "false") not in ("true", "false", "1", "0"):
+            raise BindingGenerationError(
+                f"invalid direct-native-write value for binding {item['id']!r}")
+        item["direct-write-safe"] = item.get("direct-native-write") in ("true", "1")
+        if item["direct-write-safe"] and item["conversion"] == "callbacks" and \
+                not item.get("validate-native"):
+            raise BindingGenerationError(
+                f"binding {item['id']!r} needs validate-native for callback direct writes")
         item["type"] = item["type"].strip()
         if not TYPE_NAME.fullmatch(item["type"]):
             raise BindingGenerationError(f"invalid DDS type name {item['type']!r}")
@@ -270,6 +290,18 @@ def _callback_declarations(bindings):
         if item.get("sample-copy"):
             declarations.add(
                 f"extern PGW_Status {item['sample-copy']}(const PGW_Sample *, void *, size_t);")
+        if item.get("validate-native"):
+            declarations.add(
+                f"extern bool {item['validate-native']}(const void *);")
+        if item.get("write-view"):
+            declarations.add(
+                f"extern PGW_Status {item['write-view']}("
+                "void *, DDS_DataWriter *, const PGW_SampleView *, "
+                "const struct DDS_Time_t *, DDS_ReturnCode_t *);")
+        if item.get("bind-view"):
+            declarations.add(
+                f"extern PGW_Status {item['bind-view']}("
+                "void *, const PGW_Representation *);")
     return "\n".join(sorted(declarations))
 
 
@@ -355,6 +387,11 @@ def generate(types_xml, gateway_xml, output, header=None):
         c_type = item["c-type"]
         state = f"PGW_DDSBindingState_{c_type}"
         lines.extend([
+            f"static const void *pgw_{c_type}_type_identity(void)",
+            "{",
+            f"    return (const void *){c_type}TypePlugin_get();",
+            "}",
+            "",
             f"typedef struct {state} {{",
             f"    struct {c_type}Seq data;",
             "    struct DDS_SampleInfoSeq info;",
@@ -440,7 +477,7 @@ def generate(types_xml, gateway_xml, output, header=None):
                 f"    return {sample_copy}(sample, out, size);",
                 "}",
                 f"static const PGW_SampleAccessI {access_var} = {{",
-                f"    PGW_ABI_VERSION, sizeof(PGW_SampleAccessI), {copy_wrapper}, NULL",
+                f"    PGW_ABI_VERSION, sizeof(PGW_SampleAccessI), {copy_wrapper}, NULL, NULL",
                 "};",
                 "",
             ])
@@ -451,7 +488,7 @@ def generate(types_xml, gateway_xml, output, header=None):
             "};",
             f"static const PGW_Representation {rep_name} = {{",
             f"    &{schema_var}, {json.dumps(representation_name)},",
-            f"    sizeof({native_type}), _Alignof({native_type}), {access_reference}",
+            f"    sizeof({native_type}), _Alignof({native_type}), {access_reference}, NULL",
             "};",
             "",
         ])
@@ -497,6 +534,31 @@ def generate(types_xml, gateway_xml, output, header=None):
             "        &DDS_HANDLE_NIL);",
             "}",
         ])
+        direct_safe = "true" if item["direct-write-safe"] else "false"
+        validator = item.get("validate-native", "NULL")
+        lines.extend([
+            f"static DDS_ReturnCode_t pgw_binding_{suffix}_write_native(",
+            "    void *opaque, DDS_DataWriter *writer, const void *sample,",
+            "    const struct DDS_Time_t *time)",
+            "{",
+            "    if (!opaque || !writer || !sample)",
+            "        return DDS_RETCODE_BAD_PARAMETER;",
+        ])
+        if item.get("supports-timestamp") in ("true", "1"):
+            lines.extend([
+                "    if (time)",
+                f"        return {c_type}DataWriter_write_w_timestamp(",
+                f"            {c_type}DataWriter_narrow(writer), (const {c_type} *)sample,",
+                "            &DDS_HANDLE_NIL, time);",
+            ])
+        else:
+            lines.append("    if (time) return DDS_RETCODE_UNSUPPORTED;")
+        lines.extend([
+            f"    return {c_type}DataWriter_write(",
+            f"        {c_type}DataWriter_narrow(writer), (const {c_type} *)sample,",
+            "        &DDS_HANDLE_NIL);",
+            "}",
+        ])
         if item.get("register-keys") or item.get("register-key-value") is not None:
             lines.extend([
                 f"static PGW_Status pgw_binding_{suffix}_register_keys(",
@@ -535,12 +597,25 @@ def generate(types_xml, gateway_xml, output, header=None):
                 ])
         lines.extend([
             f"const PGW_DDSBinding {item['symbol']} = {{",
-            f"    &{item['representation-var']},",
-            f"    {json.dumps(item['type'].split('::')[-1])},",
-            f"    sizeof({item['native-type']}), pgw_{c_type}_initialize,",
-            f"    pgw_{c_type}_take, pgw_{c_type}_length, pgw_{c_type}_data,",
-            f"    pgw_{c_type}_info, pgw_{c_type}_return_loan, {copy_fn}, {write_fn},",
-            f"    {'pgw_binding_' + suffix + '_register_keys' if item.get('register-keys') or item.get('register-key-value') is not None else 'NULL'}",
+            f"    .representation = &{item['representation-var']},",
+            f"    .dds_type_name = {json.dumps(item['type'].split('::')[-1])},",
+            f"    .native_size = sizeof({item['native-type']}),",
+            f"    .initialize = pgw_{c_type}_initialize,",
+            f"    .take = pgw_{c_type}_take,",
+            f"    .length = pgw_{c_type}_length,",
+            f"    .data = pgw_{c_type}_data,",
+            f"    .info = pgw_{c_type}_info,",
+            f"    .return_loan = pgw_{c_type}_return_loan,",
+            f"    .copy_native = {copy_fn},",
+            f"    .write = {write_fn},",
+            f"    .bind_view = {item.get('bind-view', 'NULL')},",
+            f"    .register_keys = "
+            f"{'pgw_binding_' + suffix + '_register_keys' if item.get('register-keys') or item.get('register-key-value') is not None else 'NULL'},",
+            f"    .type_identity = pgw_{c_type}_type_identity,",
+            f"    .direct_write_safe = {direct_safe},",
+            f"    .validate_native = {validator},",
+            f"    .write_native = pgw_binding_{suffix}_write_native,",
+            f"    .write_view = {item.get('write-view', 'NULL')}",
             "};",
             "",
         ])
