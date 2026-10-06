@@ -82,6 +82,13 @@ int main(void)
     PGW_Status (*volatile sink_initialize)(PGW_LocalSink *, int, char *, size_t)
         = PGW_LocalSink_initialize;
     (void)sink_initialize;
+    if (!sample_view.value || sample_view.kind != PGW_SAMPLE_VIEW_CANONICAL)
+        return 7;
+#if defined(PGW_ENABLE_ROUTE_LATENCY_METRICS)
+    PGW_RouteLatencySnapshot latency_snapshot;
+    if (PGW_Route_latency_snapshot(&uninitialized_route, &latency_snapshot) != PGW_INVALID)
+        return 8;
+#endif
     if (PGW_Route_pause(&uninitialized_route) != PGW_INVALID ||
         PGW_Route_resume(&uninitialized_route) != PGW_INVALID ||
         PGW_status_name(PGW_NO_CHANGE) == NULL) {

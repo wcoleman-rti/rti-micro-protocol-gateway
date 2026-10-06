@@ -324,7 +324,12 @@ int main(void)
     PGW_WriteResultSeq route_result_storage[4];
     PGW_SampleRef route_refs[4][8];
     PGW_WriteResult route_results[4][8];
-    PGW_Service service = {.route_budget = 4, .sample_budget = 8};
+    PGW_Service service = {
+        .route_budget = 4, .sample_budget = 8,
+#if defined(PGW_ENABLE_ROUTE_LATENCY_METRICS)
+        .clock_ns = PGW_example_route_latency_clock,
+#endif
+    };
     PGW_StreamReader reader, probe_reader;
     PGW_StreamWriter command, probe_writer;
     PGW_SampleSeq loan;
@@ -933,6 +938,11 @@ int main(void)
                "libc internal and kernel allocation not intercepted)\n",
                (unsigned long long)libc, (unsigned long long)osapi);
     }
+#if defined(PGW_ENABLE_ROUTE_LATENCY_METRICS)
+    CHECK(PGW_example_benchmark_routed_translation(
+        &service, &routes[0], &canonical_route_source, can, gateway,
+        companion, &transport, &baseline) == 0);
+#endif
     CHECK(PGW_Service_stop(&service) == PGW_OK);
     CHECK(PGW_Service_finalize(&service) == PGW_OK);
     CHECK(PGW_RouteSeq_unloan(&route_sequence));

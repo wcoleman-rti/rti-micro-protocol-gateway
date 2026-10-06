@@ -14,6 +14,19 @@
 #include <string.h>
 #include <stdlib.h>
 
+#if defined(PGW_ENABLE_ROUTE_LATENCY_METRICS)
+static atomic_uint_fast64_t test_clock_value;
+
+static bool test_clock(void *state, uint64_t *nanoseconds)
+{
+    (void)state;
+    if (!nanoseconds) return false;
+    *nanoseconds = atomic_fetch_add_explicit(&test_clock_value, 1000,
+                                             memory_order_relaxed) + 1000;
+    return true;
+}
+#endif
+
 static PGW_Status copy_value(const PGW_Sample *sample, void *out, size_t bytes)
 {
     if (!sample || !out || bytes != sizeof(PGW_TestValue)) return PGW_INVALID;
@@ -142,6 +155,9 @@ PGW_Status PGW_test_service_set_routes(PGW_Service *service, PGW_Route *routes,
         (void)PGW_RouteSeq_finalize(&sequence);
         return PGW_CAPACITY;
     }
+#if defined(PGW_ENABLE_ROUTE_LATENCY_METRICS)
+    if (!service->clock_ns) service->clock_ns = test_clock;
+#endif
     PGW_Status status = PGW_Service_set_routes(service, &sequence);
     if (!PGW_RouteSeq_unloan(&sequence) || !PGW_RouteSeq_finalize(&sequence))
         return PGW_LOAN_ERROR;

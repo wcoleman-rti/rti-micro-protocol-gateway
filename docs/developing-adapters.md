@@ -89,12 +89,46 @@ Connext Micro and the gateway:
   [diagnostics conversion](../examples/can_dds/diagnostics_conversion.c);
   generic typed operations are not duplicated there.
 
-  Generated fieldwise conversion is bounded in-memory field assignment, not an
-  extra serialization format. The route core still forwards sample references;
-  the writer adapter copies/converts into its preallocated native scratch before
-  the typed DDS write. The current generator does not promise zero-copy or a
-  same-generated-type pass-through. Such a fast path should be added only with
-  loan-lifetime guarantees and a target benchmark against this bounded fallback.
+Generated fieldwise conversion is bounded in-memory field assignment, not an
+extra serialization format. The core still forwards sample references.
+Bindings may opt into `direct-native-write="true"` when the same generated DDS
+type can be forwarded without semantic conversion. Callback-mode bindings must
+also name `validate-native`; the DDS adapter checks that callback before writing
+the borrowed sample. The adapter verifies source/destination generated type
+identity at bind time and on every borrowed view; schema names and topic names
+do not determine this exact generated-type match. A mismatch uses the negotiated
+sample-view writer or schema-compatible canonical conversion. The direct DDS
+writer call still performs the middleware's normal write/history/transport
+work.
+
+`dds.real_gateway` benchmarks both paths with the same loaned DDS sample,
+alternating their order over repeated batches. The result is a target
+measurement for this signal type and QoS, not a universal DDS performance
+claim. `PGW_DDSStatistics` reports direct and converted write attempts.
+
+On the Linux6 developer target (Micro 4.3.0), five repeated runs of 50,000
+writes per path measured direct medians of 1677-1733 ns/sample and canonical
+medians of 1715-1803 ns/sample. The pooled medians were 1699 and 1737 ns/sample,
+respectively—about 2.2% apart, with overlapping run-to-run ranges and no
+demonstrated meaningful speedup. This benchmark holds one valid reader-loaned
+sample while measuring the writer-side path; it is not a full route throughput
+or WCET qualification.
+
+With `PGW_ENABLE_ROUTE_LATENCY_METRICS=ON`, `dds.real_gateway` also measures
+real CAN-to-DDS route batches through the core with a deliberately different
+source schema, using `write-view` and the schema-compatible canonical fallback.
+The output reports average reader-start-to-writer-return batch latency with
+accepted output counts. This complements the binding-level
+write microbenchmark; its clock starts after CAN polling/decoding, before the
+route reader callback, and stops when the DDS writer callback returns. It
+excludes downstream subscriber delivery.
+
+On the Linux6 developer target (Micro 4.3.0), five runs of 1,000 four-signal
+batches per path produced median per-run average batch latencies of 12,283 ns
+for `write-view` and 12,298 ns for canonical fallback. The observed per-run
+ranges were 8,346-39,771 ns and 6,704-16,704 ns, respectively. These medians
+are effectively equal and the ranges show substantial run-to-run noise; this
+does not demonstrate a meaningful speedup.
 
 ## Add a DDS topic or type
 

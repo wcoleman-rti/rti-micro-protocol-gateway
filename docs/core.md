@@ -51,6 +51,23 @@ the next step. Both are synchronous and allocation-free. Repeating either
 action returns `PGW_NO_CHANGE`, allowing a control layer to avoid publishing
 duplicate state changes. A faulted route cannot be resumed.
 
+`PGW_ENABLE_ROUTE_LATENCY_METRICS` is a default-OFF compile-time option. When
+enabled, a service must supply its monotonic `clock_ns` callback before
+initialization. Each non-empty batch with a completed writer call contributes
+one batch observation measured from immediately before the reader callback to
+immediately after the writer callback returns. The fixed-size atomic
+`PGW_RouteLatencySnapshot` reports batch/sample/outcome counts, duration count,
+sum, min/max, clock failures, and a 32-bucket histogram. Every completed writer
+call is counted, including batches containing backpressure, invalid, or fatal
+outcomes; outcome totals are reported separately. No-data reads and batches
+that never invoke the writer do not contribute latency observations. Clock
+failure or a backwards reading is counted and omits that duration; the timing
+failure itself does not fault the route. Existing diagnostic timestamp failures
+remain separately observable through their existing service status.
+The snapshot API allocates nothing and adds no DDS/remote-control endpoint.
+Metrics are absent, including timing calls and per-route storage, when the
+option is OFF.
+
 With `PGW_ENABLE_REMOTE_CONTROL`, a service may freeze a borrowed control
 resource catalog and nonblocking endpoint before initialization. A step takes at
 most `PGW_CONTROL_MAX_COMMANDS_PER_STEP` commands, applies explicit actions,

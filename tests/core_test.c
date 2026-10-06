@@ -143,6 +143,115 @@ static void route_pause_resume(void)
     assert(strcmp(PGW_status_name(PGW_NO_CHANGE), "NO_CHANGE") == 0);
 }
 
+#if defined(PGW_ENABLE_ROUTE_LATENCY_METRICS)
+typedef struct {
+    uint64_t values[5];
+    size_t count;
+    size_t cursor;
+} LatencyClock;
+
+static bool latency_clock(void *state, uint64_t *nanoseconds)
+{
+    LatencyClock *clock = state;
+    if (!clock || !nanoseconds || clock->cursor >= clock->count) {
+        if (clock) ++clock->cursor;
+        return false;
+    }
+    *nanoseconds = clock->values[clock->cursor++];
+    return true;
+}
+
+static void route_latency_batches(void)
+{
+    PGW_TestReader reader = {
+        .values = {{1, 1}, {2, 2}, {3, 3}}, .available = 3
+    };
+    PGW_TestWriter writer = {.outcome = PGW_WRITE_BACKPRESSURE, .partial = true};
+    PGW_SampleRef refs[4];
+    PGW_WriteResult results[4];
+    PGW_Route route;
+    PGW_test_route(&route, 31, &reader, &writer, refs, results, 4);
+    LatencyClock clock = {.values = {100, 1600, 2000, 3000, 4000}, .count = 5};
+    PGW_Service service = {
+        .route_budget = 1, .sample_budget = 4,
+        .clock_ns = latency_clock, .clock_state = &clock
+    };
+    PGW_RouteLatencySnapshot snapshot;
+    assert(PGW_test_service_set_routes(&service, &route, 1) == PGW_OK);
+    assert(PGW_Route_latency_snapshot(&route, &snapshot) == PGW_INVALID);
+    service.clock_ns = NULL;
+    assert(PGW_Service_initialize(&service) == PGW_INVALID);
+    service.clock_ns = latency_clock;
+    assert(PGW_Service_initialize(&service) == PGW_OK);
+
+    assert(PGW_Service_step(&service) == PGW_OK);
+    assert(PGW_Route_latency_snapshot(&route, &snapshot) == PGW_OK);
+    assert(snapshot.batches == 1 && snapshot.timed_batches == 1);
+    assert(snapshot.samples == 3 && snapshot.accepted == 1 &&
+           snapshot.backpressure == 2 && snapshot.invalid == 0 &&
+           snapshot.fatal == 0);
+    assert(snapshot.total_ns == 1500 && snapshot.minimum_ns == 1500 &&
+           snapshot.maximum_ns == 1500 && snapshot.histogram[1] == 1);
+
+    reader.available = 0;
+    assert(PGW_Service_step(&service) == PGW_OK);
+    assert(PGW_Route_latency_snapshot(&route, &snapshot) == PGW_OK);
+    assert(snapshot.batches == 1 && snapshot.timed_batches == 1 &&
+           snapshot.clock_failures == 0);
+
+    reader.available = 2;
+    writer.outcome = PGW_WRITE_INVALID;
+    writer.partial = false;
+    assert(PGW_Service_step(&service) == PGW_OK);
+    assert(PGW_Route_latency_snapshot(&route, &snapshot) == PGW_OK);
+    assert(snapshot.batches == 2 && snapshot.timed_batches == 2);
+    assert(snapshot.samples == 5 && snapshot.invalid == 2);
+    assert(snapshot.total_ns == 2500 && snapshot.minimum_ns == 1000 &&
+           snapshot.maximum_ns == 1500 && snapshot.histogram[0] == 1);
+
+    reader.available = 1;
+    writer.outcome = PGW_WRITE_ACCEPTED;
+    assert(PGW_Service_step(&service) == PGW_OK);
+    assert(PGW_Route_latency_snapshot(&route, &snapshot) == PGW_OK);
+    assert(snapshot.batches == 3 && snapshot.timed_batches == 2);
+    assert(snapshot.samples == 6 && snapshot.accepted == 2 &&
+           snapshot.invalid == 2 && snapshot.clock_failures == 2);
+
+    assert(PGW_Service_stop(&service) == PGW_OK);
+    assert(PGW_Service_finalize(&service) == PGW_OK);
+    assert(PGW_Route_latency_snapshot(&route, &snapshot) == PGW_INVALID);
+}
+#else
+static bool counted_clock(void *state, uint64_t *nanoseconds)
+{
+    size_t *calls = state;
+    ++*calls;
+    *nanoseconds = *calls;
+    return true;
+}
+
+static void route_latency_disabled_has_no_clock_overhead(void)
+{
+    PGW_TestReader reader = {.values = {{1, 1}}, .available = 1};
+    PGW_TestWriter writer = {.outcome = PGW_WRITE_ACCEPTED};
+    PGW_SampleRef refs[1];
+    PGW_WriteResult results[1];
+    PGW_Route route;
+    size_t clock_calls = 0;
+    PGW_test_route(&route, 31, &reader, &writer, refs, results, 1);
+    PGW_Service service = {
+        .route_budget = 1, .sample_budget = 1,
+        .clock_ns = counted_clock, .clock_state = &clock_calls
+    };
+    assert(PGW_test_service_set_routes(&service, &route, 1) == PGW_OK);
+    assert(PGW_Service_initialize(&service) == PGW_OK);
+    assert(PGW_Service_step(&service) == PGW_OK);
+    assert(clock_calls == 0);
+    assert(PGW_Service_stop(&service) == PGW_OK);
+    assert(PGW_Service_finalize(&service) == PGW_OK);
+}
+#endif
+
 #if defined(PGW_ENABLE_REMOTE_CONTROL)
 typedef struct {
     PGW_ControlCommand commands[8];
@@ -242,7 +351,6 @@ static PGW_Status control_read_telemetry(void *state, const char *name,
 static bool control_clock(void *state, uint64_t *out)
 {
     ControlHarness *harness = state;
-    harness->clock_ns += UINT64_C(50000000);
     *out = harness->clock_ns;
     return true;
 }
@@ -449,7 +557,10 @@ static void remote_control_telemetry_is_periodic_and_failure_bounded(void)
     assert(PGW_Service_set_telemetry(&service, &metric, 1, 100, 100) == PGW_OK);
     assert(PGW_Service_initialize(&service) == PGW_OK);
     PGW_allocation_monitor(true);
-    for (unsigned i = 0; i < 5; ++i) assert(PGW_Service_step(&service) == PGW_OK);
+    for (unsigned i = 0; i < 5; ++i) {
+        harness.clock_ns += UINT64_C(50000000);
+        assert(PGW_Service_step(&service) == PGW_OK);
+    }
     PGW_ControlCounters counters;
     assert(PGW_Service_control_counters(&service, &counters) == PGW_OK);
     assert(harness.telemetry_attempts == 2 && harness.telemetry_reads == 2);
@@ -847,6 +958,11 @@ int main(void)
     bounds_and_schema();
     routing();
     route_pause_resume();
+#if defined(PGW_ENABLE_ROUTE_LATENCY_METRICS)
+    route_latency_batches();
+#else
+    route_latency_disabled_has_no_clock_overhead();
+#endif
 #if defined(PGW_ENABLE_REMOTE_CONTROL)
     remote_control_routes_are_bounded_and_allocation_free();
     remote_control_adapter_actions_are_idempotent();

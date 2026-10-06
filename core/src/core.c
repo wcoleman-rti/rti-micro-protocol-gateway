@@ -662,10 +662,118 @@ static PGW_Status event(PGW_Service *s, PGW_Route *r, uint32_t code, uint64_t co
     return PGW_OK;
 }
 
+#if defined(PGW_ENABLE_ROUTE_LATENCY_METRICS)
+static bool route_latency_initialize(PGW_RouteLatencyStats *stats)
+{
+    atomic_init(&stats->batches, 0);
+    atomic_init(&stats->timed_batches, 0);
+    atomic_init(&stats->samples, 0);
+    atomic_init(&stats->accepted, 0);
+    atomic_init(&stats->backpressure, 0);
+    atomic_init(&stats->invalid, 0);
+    atomic_init(&stats->fatal, 0);
+    atomic_init(&stats->clock_failures, 0);
+    atomic_init(&stats->total_ns, 0);
+    atomic_init(&stats->minimum_ns, UINT64_MAX);
+    atomic_init(&stats->maximum_ns, 0);
+    for (size_t i = 0; i < PGW_ROUTE_LATENCY_HISTOGRAM_BUCKETS; ++i)
+        atomic_init(&stats->histogram[i], 0);
+    if (!atomic_is_lock_free(&stats->batches) ||
+        !atomic_is_lock_free(&stats->total_ns) ||
+        !atomic_is_lock_free(&stats->histogram[0]))
+        return false;
+    return true;
+}
+
+static void route_latency_clock_failure(PGW_Route *route)
+{
+    atomic_fetch_add_explicit(&route->latency.clock_failures, 1,
+                              memory_order_relaxed);
+}
+
+static void route_latency_minimum(PGW_RouteLatencyStats *stats, uint64_t value)
+{
+    uint_fast64_t current = atomic_load_explicit(&stats->minimum_ns,
+                                                memory_order_relaxed);
+    while (value < current &&
+           !atomic_compare_exchange_weak_explicit(&stats->minimum_ns, &current,
+               value, memory_order_relaxed, memory_order_relaxed)) {}
+}
+
+static void route_latency_maximum(PGW_RouteLatencyStats *stats, uint64_t value)
+{
+    uint_fast64_t current = atomic_load_explicit(&stats->maximum_ns,
+                                                memory_order_relaxed);
+    while (value > current &&
+           !atomic_compare_exchange_weak_explicit(&stats->maximum_ns, &current,
+               value, memory_order_relaxed, memory_order_relaxed)) {}
+}
+
+static void route_latency_observe(PGW_Route *route, uint64_t duration_ns)
+{
+    unsigned bucket = 0;
+    uint64_t upper_bound = 1000;
+    while (bucket + 1 < PGW_ROUTE_LATENCY_HISTOGRAM_BUCKETS &&
+           duration_ns > upper_bound) {
+        upper_bound <<= 1;
+        ++bucket;
+    }
+    PGW_RouteLatencyStats *stats = &route->latency;
+    atomic_fetch_add_explicit(&stats->timed_batches, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&stats->total_ns, duration_ns, memory_order_relaxed);
+    atomic_fetch_add_explicit(&stats->histogram[bucket], 1, memory_order_relaxed);
+    route_latency_minimum(stats, duration_ns);
+    route_latency_maximum(stats, duration_ns);
+}
+
+static void route_latency_batch(PGW_Route *route, size_t samples,
+                                uint64_t accepted, uint64_t backpressure,
+                                uint64_t invalid, uint64_t fatal)
+{
+    PGW_RouteLatencyStats *stats = &route->latency;
+    atomic_fetch_add_explicit(&stats->batches, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&stats->samples, samples, memory_order_relaxed);
+    atomic_fetch_add_explicit(&stats->accepted, accepted, memory_order_relaxed);
+    atomic_fetch_add_explicit(&stats->backpressure, backpressure, memory_order_relaxed);
+    atomic_fetch_add_explicit(&stats->invalid, invalid, memory_order_relaxed);
+    atomic_fetch_add_explicit(&stats->fatal, fatal, memory_order_relaxed);
+}
+
+PGW_Status PGW_Route_latency_snapshot(const PGW_Route *route,
+                                     PGW_RouteLatencySnapshot *out)
+{
+    if (!route || !out || !route->latency_initialized) return PGW_INVALID;
+    const PGW_RouteLatencyStats *stats = &route->latency;
+    PGW_RouteLatencySnapshot snapshot = {
+        .batches = atomic_load_explicit(&stats->batches, memory_order_relaxed),
+        .timed_batches = atomic_load_explicit(&stats->timed_batches, memory_order_relaxed),
+        .samples = atomic_load_explicit(&stats->samples, memory_order_relaxed),
+        .accepted = atomic_load_explicit(&stats->accepted, memory_order_relaxed),
+        .backpressure = atomic_load_explicit(&stats->backpressure, memory_order_relaxed),
+        .invalid = atomic_load_explicit(&stats->invalid, memory_order_relaxed),
+        .fatal = atomic_load_explicit(&stats->fatal, memory_order_relaxed),
+        .clock_failures = atomic_load_explicit(&stats->clock_failures, memory_order_relaxed),
+        .total_ns = atomic_load_explicit(&stats->total_ns, memory_order_relaxed),
+        .minimum_ns = atomic_load_explicit(&stats->minimum_ns, memory_order_relaxed),
+        .maximum_ns = atomic_load_explicit(&stats->maximum_ns, memory_order_relaxed)
+    };
+    for (size_t i = 0; i < PGW_ROUTE_LATENCY_HISTOGRAM_BUCKETS; ++i)
+        snapshot.histogram[i] = atomic_load_explicit(&stats->histogram[i],
+                                                     memory_order_relaxed);
+    if (!snapshot.timed_batches) snapshot.minimum_ns = 0;
+    *out = snapshot;
+    return PGW_OK;
+}
+#endif
+
 PGW_Status PGW_Service_initialize(PGW_Service *s)
 {
     if (!s || s->lifecycle != PGW_UNINITIALIZED || !s->routes_initialized ||
-        !PGW_RouteSeq_get_length(&s->routes) || !s->route_budget || !s->sample_budget) return PGW_INVALID;
+        !PGW_RouteSeq_get_length(&s->routes) || !s->route_budget || !s->sample_budget
+#if defined(PGW_ENABLE_ROUTE_LATENCY_METRICS)
+        || !s->clock_ns
+#endif
+        ) return PGW_INVALID;
     s->lifecycle = PGW_INITIALIZING;
     s->cursor = 0;
     size_t count = PGW_RouteSeq_get_length(&s->routes);
@@ -678,6 +786,15 @@ PGW_Status PGW_Service_initialize(PGW_Service *s)
             r->lifecycle = PGW_FAULTED;
             break;
         }
+#if defined(PGW_ENABLE_ROUTE_LATENCY_METRICS)
+        if (!route_latency_initialize(&r->latency)) {
+            status = PGW_UNSUPPORTED;
+            r->error = (PGW_Error){status, r->id, "latency counter backend"};
+            r->lifecycle = PGW_FAULTED;
+            break;
+        }
+        r->latency_initialized = true;
+#endif
         if (!r->storage_initialized || !r->samples_borrowed || !r->results_borrowed ||
             !PGW_SampleSeq_get_maximum(&r->samples) ||
             PGW_SampleSeq_get_length(&r->samples) != 0 ||
@@ -704,6 +821,9 @@ PGW_Status PGW_Service_initialize(PGW_Service *s)
         for (size_t i = 0; i < count; ++i) {
             PGW_Route *r = PGW_RouteSeq_get_reference(&s->routes, i);
             if (!route_storage_finalize(r)) status = PGW_LOAN_ERROR;
+#if defined(PGW_ENABLE_ROUTE_LATENCY_METRICS)
+            r->latency_initialized = false;
+#endif
             if (r->lifecycle != PGW_FAULTED) r->lifecycle = PGW_UNINITIALIZED;
         }
         if (!PGW_RouteSeq_unloan(&s->routes) || !PGW_RouteSeq_finalize(&s->routes))
@@ -724,6 +844,11 @@ static PGW_Status route_step(PGW_Service *s, PGW_Route *r)
     r->lifecycle = PGW_RUNNING;
     size_t maximum = PGW_SampleSeq_get_maximum(&r->samples);
     size_t budget = s->sample_budget < maximum ? s->sample_budget : maximum;
+#if defined(PGW_ENABLE_ROUTE_LATENCY_METRICS)
+    uint64_t latency_start = 0;
+    bool latency_start_valid = s->clock_ns(s->clock_state, &latency_start);
+    if (!latency_start_valid) route_latency_clock_failure(r);
+#endif
     PGW_Status status = r->reader.iface->read(r->reader.state, &r->samples, budget);
     size_t count = PGW_SampleSeq_get_length(&r->samples);
     if (status != PGW_OK) {
@@ -742,6 +867,11 @@ static PGW_Status route_step(PGW_Service *s, PGW_Route *r)
         atomic_store_explicit(&r->counters.values[PGW_COUNT_HIGH_WATER], count, memory_order_relaxed);
     bool outcomes_ready = count <= budget && PGW_WriteResultSeq_set_length(&r->results, count);
     bool fatal = !outcomes_ready;
+#if defined(PGW_ENABLE_ROUTE_LATENCY_METRICS)
+    bool writer_called = false;
+    bool latency_finish_valid = false;
+    uint64_t latency_finish = 0;
+#endif
     if (outcomes_ready)
         for (size_t i = 0; i < count; ++i) {
             *PGW_WriteResultSeq_get_reference(&r->results, i) = PGW_WRITE_FATAL;
@@ -749,23 +879,39 @@ static PGW_Status route_step(PGW_Service *s, PGW_Route *r)
         }
     if (!fatal && count) {
         status = r->writer.iface->write(r->writer.state, &r->samples, &r->results);
+#if defined(PGW_ENABLE_ROUTE_LATENCY_METRICS)
+        writer_called = true;
+        latency_finish_valid = s->clock_ns(s->clock_state, &latency_finish);
+#endif
         if ((size_t)PGW_WriteResultSeq_get_length(&r->results) != count) fatal = true;
         if (status != PGW_OK && status != PGW_BACKPRESSURE && status != PGW_INVALID)
             fatal = true;
     }
-    uint64_t backpressure = 0, invalid = 0;
+    uint64_t backpressure = 0, invalid = 0, accepted = 0, fatal_outcomes = 0;
     if (outcomes_ready && (size_t)PGW_WriteResultSeq_get_length(&r->results) == count) {
         for (size_t i = 0; i < count; ++i) {
             PGW_CounterId id;
             switch (*PGW_WriteResultSeq_get_reference(&r->results, (RTI_INT32)i)) {
-                case PGW_WRITE_ACCEPTED: id = PGW_COUNT_ACCEPTED; break;
+                case PGW_WRITE_ACCEPTED: id = PGW_COUNT_ACCEPTED; ++accepted; break;
                 case PGW_WRITE_BACKPRESSURE: id = PGW_COUNT_BACKPRESSURE; ++backpressure; break;
                 case PGW_WRITE_INVALID: id = PGW_COUNT_INVALID; ++invalid; break;
-                default: id = PGW_COUNT_FATAL; fatal = true; break;
+                default: id = PGW_COUNT_FATAL; ++fatal_outcomes; fatal = true; break;
             }
             PGW_Counters_add(&r->counters, id, 1);
         }
     }
+#if defined(PGW_ENABLE_ROUTE_LATENCY_METRICS)
+    if (writer_called) {
+        route_latency_batch(r, count, accepted, backpressure, invalid, fatal_outcomes);
+        if (!latency_finish_valid) route_latency_clock_failure(r);
+        if (latency_start_valid && latency_finish_valid) {
+            if (latency_finish >= latency_start)
+                route_latency_observe(r, latency_finish - latency_start);
+            else
+                route_latency_clock_failure(r);
+        }
+    }
+#endif
     PGW_Status returned = r->reader.iface->return_loan(r->reader.state, &r->samples);
     (void)PGW_SampleSeq_set_length(&r->samples, 0);
     PGW_Counters_add(&r->counters, PGW_COUNT_LOANS, UINT64_MAX);
@@ -833,6 +979,9 @@ PGW_Status PGW_Service_finalize(PGW_Service *s)
         if (!route_storage_finalize(r))
             status = fail(r, PGW_LOAN_ERROR, "sequence finalize");
         else r->lifecycle = PGW_UNINITIALIZED;
+#if defined(PGW_ENABLE_ROUTE_LATENCY_METRICS)
+        r->latency_initialized = false;
+#endif
     }
     if (!PGW_RouteSeq_unloan(&s->routes) || !PGW_RouteSeq_finalize(&s->routes))
         status = PGW_LOAN_ERROR;

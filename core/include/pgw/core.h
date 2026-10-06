@@ -386,6 +386,47 @@ typedef struct {
     bool bindings_borrowed;           /**< Internal binding-buffer loan state. */
 } PGW_Registry;
 
+#if defined(PGW_ENABLE_ROUTE_LATENCY_METRICS)
+#define PGW_ROUTE_LATENCY_HISTOGRAM_BUCKETS 32u
+
+/** @brief Atomic, fixed-size route batch-latency aggregation. */
+typedef struct {
+    atomic_uint_fast64_t batches;       /**< Completed non-empty writer calls. */
+    atomic_uint_fast64_t timed_batches; /**< Batches with valid start/end clock readings. */
+    atomic_uint_fast64_t samples;       /**< Input samples in completed writer calls. */
+    atomic_uint_fast64_t accepted;
+    atomic_uint_fast64_t backpressure;
+    atomic_uint_fast64_t invalid;
+    atomic_uint_fast64_t fatal;
+    atomic_uint_fast64_t clock_failures; /**< Failed or backwards clock readings. */
+    atomic_uint_fast64_t total_ns;      /**< Sum of valid batch durations; wraps modulo 2^64. */
+    atomic_uint_fast64_t minimum_ns;
+    atomic_uint_fast64_t maximum_ns;
+    atomic_uint_fast64_t histogram[PGW_ROUTE_LATENCY_HISTOGRAM_BUCKETS];
+} PGW_RouteLatencyStats;
+
+/** @brief Non-transactional copy of per-route batch latency statistics.
+ *
+ * Histogram bucket 0 covers durations through 1,000 ns. Each following
+ * bucket doubles its upper bound; bucket 31 covers durations above
+ * 1,000 * 2^30 ns. Values are nanoseconds and counters wrap modulo 2^64.
+ */
+typedef struct {
+    uint64_t batches;
+    uint64_t timed_batches;
+    uint64_t samples;
+    uint64_t accepted;
+    uint64_t backpressure;
+    uint64_t invalid;
+    uint64_t fatal;
+    uint64_t clock_failures;
+    uint64_t total_ns;
+    uint64_t minimum_ns;
+    uint64_t maximum_ns;
+    uint64_t histogram[PGW_ROUTE_LATENCY_HISTOGRAM_BUCKETS];
+} PGW_RouteLatencySnapshot;
+#endif
+
 /** @brief One route between a reader and writer.
  * Sample and result sequences are loans over caller-provided backing buffers;
  * keep those buffers alive through service finalization. A route fault stores
@@ -399,6 +440,10 @@ typedef struct {
     PGW_SampleSeq samples;              /**< Internal sequence over caller sample storage. */
     PGW_WriteResultSeq results;         /**< Internal sequence over caller result storage. */
     PGW_Counters counters;               /**< Per-route counters, initialized by service. */
+#if defined(PGW_ENABLE_ROUTE_LATENCY_METRICS)
+    PGW_RouteLatencyStats latency;       /**< Fixed-size batch latency statistics. */
+    bool latency_initialized;            /**< Internal latency atomic initialization state. */
+#endif
     PGW_Lifecycle lifecycle;             /**< Current route lifecycle state. */
     PGW_Error error;                     /**< Last recorded route fault. */
     bool storage_initialized;            /**< Internal sequence state. */
@@ -610,7 +655,9 @@ typedef struct {
     size_t sample_budget;            /**< Maximum samples processed per route. */
     PGW_Diagnostics *diagnostics;    /**< Optional borrowed event sink. */
     PGW_Lifecycle lifecycle;         /**< Current service lifecycle state. */
-    /** Optional clock callback used to timestamp diagnostic events. */
+    /** Clock callback for diagnostic event timestamps and optional latency metrics.
+     * Must be monotonic; required by PGW_ENABLE_ROUTE_LATENCY_METRICS builds.
+     */
     bool (*clock_ns)(void *, uint64_t *);
     void *clock_state;               /**< Context passed to @c clock_ns. */
     bool routes_initialized;         /**< Internal route-sequence state. */
@@ -744,6 +791,18 @@ PGW_Status PGW_Route_resume(PGW_Route *);
  *         sequence initialization fails, or PGW_CAPACITY if the loan fails.
  */
 PGW_Status PGW_Service_set_routes(PGW_Service *, const PGW_RouteSeq *);
+#if defined(PGW_ENABLE_ROUTE_LATENCY_METRICS)
+/** @brief Copy bounded route batch-latency statistics.
+ *
+ * The build must enable PGW_ENABLE_ROUTE_LATENCY_METRICS and the service must
+ * supply a monotonic clock callback before initialization. Timing covers the
+ * reader callback through return from the writer callback for each non-empty
+ * batch. Timing clock errors are counted and omit the duration without
+ * changing route outcomes; diagnostic timestamp errors remain independent.
+ */
+PGW_Status PGW_Route_latency_snapshot(const PGW_Route *,
+                                     PGW_RouteLatencySnapshot *);
+#endif
 #if defined(PGW_ENABLE_REMOTE_CONTROL)
 /** @brief Freeze a non-empty control resource set and its optional endpoint.
  * Configure only before initialization. The resource array and adapter
@@ -763,8 +822,9 @@ PGW_Status PGW_Service_set_telemetry(PGW_Service *, PGW_ControlTelemetryMetric *
 #endif
 /** @brief Initialize a configured service and its routes.
  * Requires configured route storage and nonzero route/sample budgets. Validates
- * route interfaces, schema compatibility, and storage, and binds each writer
- * to its route reader's representation.
+ * route interfaces and storage, then asks each writer to negotiate its source
+ * representation. Builds with
+ * PGW_ENABLE_ROUTE_LATENCY_METRICS also require a monotonic clock callback.
  * @return PGW_OK on success or a status describing invalid configuration,
  *         unsupported counters, or a route initialization failure.
  */

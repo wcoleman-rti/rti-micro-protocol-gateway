@@ -75,6 +75,7 @@ rescan linker, or mismatched Debug/Release selection is an error, not a fallback
 | `PGW_ENABLE_CAN` | ON | CAN adapter and memory/SocketCAN transports |
 | `PGW_ENABLE_DDS` | ON | Real Micro DDS adapter, Appgen and discovery |
 | `PGW_ENABLE_REMOTE_CONTROL` | OFF | Opt-in control IDL/core interface; requires DDS |
+| `PGW_ENABLE_ROUTE_LATENCY_METRICS` | OFF | Compile bounded per-route batch latency statistics; requires a monotonic service clock |
 | `PGW_REMOTE_CONTROL_MAX_CONTROLLERS` | 1 | Compile-time bound for control-domain peers (1..32) |
 | `PGW_BUILD_TESTS` | ON | Requirement verification, including core runtime lifecycle |
 | `PGW_BUILD_EXAMPLES` | ON | Runnable examples |

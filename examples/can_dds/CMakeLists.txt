@@ -168,6 +168,9 @@ if(PGW_BUILD_TESTS)
     add_executable(pgw_dds_test test_dds.c)
     target_link_libraries(pgw_dds_test PRIVATE pgw_example_dds_model
         PGW::can_memory pgw_allocation_probe PGW::build_options)
+    if(PGW_ENABLE_ROUTE_LATENCY_METRICS)
+        target_sources(pgw_dds_test PRIVATE route_latency_benchmark.c)
+    endif()
     if(PGW_ENABLE_REMOTE_CONTROL)
         math(EXPR dynamic_domain "${PGW_EXAMPLE_DDS_DOMAIN} + 1")
         target_compile_definitions(pgw_dds_test PRIVATE
