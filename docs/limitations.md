@@ -12,8 +12,8 @@
 
 # Extension and certification boundaries
 
-The implementation requires an externally installed, licensed Connext Micro
-4.3.0 SDK. RTI runtime libraries and implementation sources are external; the
+The implementation requires an externally installed, licensed RTI Connext
+Micro 4.3.0 SDK. RTI runtime libraries and implementation sources are external; the
 bundled CMake utility modules retain their original license notices.
 Gateway-authored files carry the project license in [LICENSE](../LICENSE);
 third-party files with separate notices remain under their own terms.

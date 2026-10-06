@@ -10,12 +10,13 @@
   the software.
 -->
 
-# Memory-CAN gateway benchmark
+# Memory-CAN adapter benchmark
 
-`pgw_can_benchmark [steps] [timing0|1] [metadata0|1]` measures actual generated CAN codec,
-adapter and core routing paths. Steps default to 100,000 and must be within
-1..100,000,000. Timing and metadata capture default to 1. This is **not a DDS simulation**, live
-SocketCAN test, physical-bus throughput measurement or wire-latency estimate.
+`pgw_can_benchmark [steps] [timing0|1] [metadata0|1]` measures the generated CAN
+codec, adapter, and core routing paths. Steps default to 100,000 and must be
+within 1..100,000,000. Timing and metadata capture default to 1. This is **not a
+DDS simulation**, live SocketCAN test, physical-bus throughput measurement, or
+wire-latency estimate.
 
 ## Workload and assertions
 

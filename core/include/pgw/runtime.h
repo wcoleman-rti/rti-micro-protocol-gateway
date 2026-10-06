@@ -13,6 +13,10 @@
 #ifndef PGW_RUNTIME_H
 #define PGW_RUNTIME_H
 
+/** @addtogroup pgw_core_api
+ * @{
+ */
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -99,4 +103,5 @@ bool PGW_Runner_stop(PGW_Runner *runner);
  */
 bool PGW_Runner_finalize(PGW_Runner *runner);
 #endif
+/** @} */
 #endif

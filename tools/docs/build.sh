@@ -19,13 +19,14 @@ mkdir -p build/docs-source/docs \
     build/docs-source/adapters/dds/connext_micro \
     build/docs-source/examples/can_dds \
     build/docs-source/tools/dbc_codegen
+cp -R docs/assets build/docs-source/docs/
 for page in docs/*.md; do
-    if [ "$page" = "docs/index.md" ]; then
+    if [ "$page" = "docs/index.md" ] || [ "$page" = "docs/api-guide.md" ]; then
         continue
     fi
     cp "$page" build/docs-source/docs/
 done
-cp docs/index.md LICENSE build/docs-source/
+cp docs/index.md docs/api-guide.md LICENSE build/docs-source/
 cp adapters/can/README.md build/docs-source/adapters/can/
 cp adapters/dds/connext_micro/README.md \
     build/docs-source/adapters/dds/connext_micro/

@@ -10,9 +10,14 @@
   the software.
 -->
 
+<img src="../../docs/assets/rti-logo.png" alt="RTI logo: Your systems. Working as one." width="220">
+
 # DBC signal generator
 
-Use the pinned build-time parser in the repository-local environment:
+Generate a bounded CAN codec, IDL, and signal metadata from a DBC file and
+mapping. The generator is a host build tool, not a runtime dependency.
+
+Use the pinned parser in the repository-local environment:
 
 ```sh
 python3 -m venv .venv

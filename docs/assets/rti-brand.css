@@ -1,0 +1,80 @@
+@import url("https://fonts.googleapis.com/css2?family=Roboto+Condensed:wght@500;600;700&display=swap");
+
+:root {
+    --md-primary-fg-color: #004c97;
+    --md-primary-fg-color--light: #2d70ad;
+    --md-primary-fg-color--dark: #003b73;
+    --md-accent-fg-color: #ed8b00;
+    --md-typeset-a-color: #004c97;
+}
+
+.md-header {
+    background-color: #fff;
+    color: #004c97;
+}
+
+.md-header__button,
+.md-header__title {
+    color: #004c97;
+}
+
+.md-header__button.md-logo img {
+    width: auto;
+    height: 2.75rem;
+    max-height: none;
+}
+
+.md-tabs {
+    background-color: #004c97;
+}
+
+.md-typeset h1,
+.md-typeset h2,
+.md-typeset h3,
+.md-typeset h4,
+.md-header__title {
+    font-family: "Roboto Condensed", "Arial Narrow", sans-serif;
+    font-weight: 600;
+}
+
+.md-typeset h1,
+.md-typeset h2,
+.md-typeset h3 {
+    color: #004c97;
+}
+
+.md-typeset a {
+    text-decoration-color: #ed8b00;
+    text-decoration-thickness: 2px;
+    text-underline-offset: 0.15em;
+}
+
+.md-typeset a:hover {
+    color: #003b73;
+    text-decoration-color: #004c97;
+}
+
+.md-typeset a:focus-visible {
+    outline: 2px solid #004c97;
+    outline-offset: 2px;
+}
+
+.md-typeset blockquote {
+    border-left-color: #ed8b00;
+}
+
+.md-typeset table:not([class]) th {
+    background-color: #004c97;
+    color: #fff;
+}
+
+.rti-home-brand {
+    margin: 0 0 1.5rem;
+}
+
+.rti-home-brand img {
+    display: block;
+    width: 260px;
+    max-width: 100%;
+    height: auto;
+}

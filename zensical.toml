@@ -14,9 +14,11 @@ site_url = "https://wcoleman-rti.github.io/rti-micro-protocol-gateway/"
 docs_dir = "build/docs-source"
 site_dir = "site"
 use_directory_urls = false # Make file:// previews open page files directly.
+extra_css = ["docs/assets/rti-brand.css"]
 nav = [
   { "Home" = "index.md" },
   { "Guides" = [
+    { "C API guide" = "api-guide.md" },
     { "Build configuration" = "docs/build.md" },
     { "Core contracts" = "docs/core.md" },
     { "Adapter and DDS binding development" = "docs/developing-adapters.md" },
@@ -40,3 +42,16 @@ nav = [
     { "CAN / DDS gateway" = "examples/can_dds/README.md" },
   ] },
 ]
+
+[project.theme]
+language = "en"
+logo = "docs/assets/rti-logo.png"
+
+[project.theme.font]
+text = "Montserrat"
+code = "Roboto Mono"
+
+[[project.theme.palette]]
+scheme = "default"
+primary = "blue"
+accent = "orange"

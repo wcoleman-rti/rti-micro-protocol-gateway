@@ -12,6 +12,10 @@
 
 #ifndef PGW_CAN_MEMORY_H
 #define PGW_CAN_MEMORY_H
+/** @addtogroup pgw_can_api
+ * @{
+ */
+
 #include "pgw/can.h"
 
 /** @brief In-memory CAN transport with caller-backed receive/transmit rings.
@@ -62,4 +66,5 @@ PGW_Status PGW_CANMemory_take_sent(PGW_CANMemory *, PGW_CANFrame *);
  * has completed.
  */
 PGW_CANTransport PGW_CANMemory_transport(PGW_CANMemory *);
+/** @} */
 #endif

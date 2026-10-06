@@ -10,7 +10,9 @@
   the software.
 -->
 
-# Build-host configuration compiler
+<img src="../../docs/assets/rti-logo.png" alt="RTI logo: Your systems. Working as one." width="220">
+
+# Gateway configuration compiler
 
 Install the pinned host dependency into the project's selected environment:
 

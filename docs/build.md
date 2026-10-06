@@ -10,12 +10,12 @@
   the software.
 -->
 
-# Building with installed Connext Micro
+# Building with RTI Connext Micro
 
 ## Prerequisites
 
-Use CMake 3.24+, a C11 compiler, Python 3, a licensed installed **Connext Micro
-4.3.0** SDK, and Java 17 for the RTI host generators. Select the SDK root,
+Use CMake 3.24+, a C11 compiler, Python 3, a licensed installed **RTI Connext
+Micro 4.3.0** SDK, and Java 17 for the RTI host generators. Select the SDK root,
 matching PIL/PSL architecture pair, target name and JRE for your installation.
 
 For the maintained DBC/XML host tools, install their declared build-time

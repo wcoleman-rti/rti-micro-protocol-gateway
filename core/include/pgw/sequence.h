@@ -13,6 +13,10 @@
 #ifndef PGW_SEQUENCE_H
 #define PGW_SEQUENCE_H
 
+/** @addtogroup pgw_core_api
+ * @{
+ */
+
 #include "reda/reda_sequence.h"
 
 /** @brief Opaque sample delivered by a stream reader.
@@ -55,4 +59,5 @@ typedef const PGW_Sample *PGW_SampleRef;
 /** @brief Opaque generated sequence of PGW_SampleRef values. */
 typedef struct PGW_SampleSeq PGW_SampleSeq;
 
+/** @} */
 #endif
