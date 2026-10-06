@@ -512,6 +512,13 @@ static PGW_Status bind_source(void *state, const PGW_Representation *source)
         source->access->size != sizeof(PGW_SampleAccessI) ||
         (!source->access->copy_value && !source->access->view))
         return PGW_UNSUPPORTED;
+    if (source->access->view && !source->view_contract)
+        return PGW_UNSUPPORTED;
+    if (!source->access->copy_value &&
+        (source->view_contract->kind != PGW_SAMPLE_VIEW_CANONICAL ||
+         source->view_contract->value_size != sizeof(PGW_Signal) ||
+         source->view_contract->type_identity != &PGW_CAN_SIGNAL_VALUE_IDENTITY))
+        return PGW_UNSUPPORTED;
     if (cat->source && cat->source != source) return PGW_UNSUPPORTED;
     cat->source = source;
     return PGW_OK;

@@ -541,10 +541,10 @@ static PGW_Status create_appgen_participant_at_domain(const char *name,
     PGW_DDSStaticEndpoint *endpoints, size_t endpoint_capacity,
     size_t *endpoint_count, DDS_DomainParticipant **out)
 {
-    if (!registered_model || !name || !*name || !endpoints || !endpoint_count || !out)
-        return PGW_INVALID;
+    if (!endpoint_count || !out) return PGW_INVALID;
     *out = NULL;
     *endpoint_count = 0;
+    if (!registered_model || !name || !*name || !endpoints) return PGW_INVALID;
     const struct APPGEN_DomainParticipantModel *model = find_participant_model(name);
     if (!model) return PGW_INVALID;
     PGW_Status status = register_participant_components(model);
@@ -571,10 +571,23 @@ static PGW_Status create_appgen_participant_at_domain(const char *name,
     if (status != PGW_OK) {
         fprintf(stderr, "DDS static entities failed for %s: %s\n",
                 name, PGW_status_name(status));
-        if (DDS_DomainParticipant_delete_contained_entities(participant) != DDS_RETCODE_OK ||
-            DDS_DomainParticipantFactory_delete_participant(factory, participant) != DDS_RETCODE_OK)
-            return PGW_FATAL;
         *endpoint_count = 0;
+        DDS_ReturnCode_t cleanup_status =
+            DDS_DomainParticipant_delete_contained_entities(participant);
+        if (cleanup_status != DDS_RETCODE_OK) {
+            fprintf(stderr, "DDS contained-entity cleanup failed for %s: %d\n",
+                    name, (int)cleanup_status);
+            *out = participant;
+            return PGW_FATAL;
+        }
+        cleanup_status =
+            DDS_DomainParticipantFactory_delete_participant(factory, participant);
+        if (cleanup_status != DDS_RETCODE_OK) {
+            fprintf(stderr, "DDS participant cleanup failed for %s: %d\n",
+                    name, (int)cleanup_status);
+            *out = participant;
+            return PGW_FATAL;
+        }
         return status;
     }
     *out = participant;
@@ -671,8 +684,11 @@ static PGW_Status create_bounded_control_participant(
     bool controller_side, PGW_DDSStaticEndpoint *endpoints,
     size_t endpoint_capacity, size_t *endpoint_count, DDS_DomainParticipant **out)
 {
-    if (!options || !options->enabled || !registered_model ||
-        !endpoint_count || !out || !endpoints) return PGW_INVALID;
+    if (!endpoint_count || !out) return PGW_INVALID;
+    *out = NULL;
+    *endpoint_count = 0;
+    if (!options || !options->enabled || !registered_model || !endpoints)
+        return PGW_INVALID;
     const struct APPGEN_DomainParticipantModel *model =
         find_participant_model(participant_name);
     if (!model) return PGW_INVALID;
@@ -689,8 +705,12 @@ static PGW_Status create_bounded_control_participant(
         &qos, endpoints, endpoint_capacity, endpoint_count, out);
     if (DDS_DomainParticipantQos_finalize(&qos) != DDS_RETCODE_OK &&
         status == PGW_OK) {
-        if (*out && PGW_DDS_delete_dynamic_participant(*out) != PGW_OK)
+        if (*out && PGW_DDS_delete_dynamic_participant(*out) != PGW_OK) {
+            fprintf(stderr,
+                "DDS participant cleanup after QoS finalization failure failed\n");
+            *endpoint_count = 0;
             return PGW_FATAL;
+        }
         *out = NULL;
         *endpoint_count = 0;
         return PGW_FATAL;

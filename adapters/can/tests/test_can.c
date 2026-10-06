@@ -59,6 +59,42 @@ static PGW_Status source_copy(const PGW_Sample *s, void *out, size_t size)
     return PGW_OK;
 }
 
+static PGW_Status canonical_source_view(const PGW_Sample *s, PGW_SampleView *view)
+{
+    if (!s || !view) return PGW_INVALID;
+    *view = (PGW_SampleView){
+        PGW_SAMPLE_VIEW_CANONICAL, s, sizeof(PGW_Signal),
+        &PGW_CAN_SIGNAL_VALUE_IDENTITY, NULL, NULL
+    };
+    return PGW_OK;
+}
+
+static const unsigned char native_source_type_identity = 0;
+
+static PGW_Status native_source_view(const PGW_Sample *s, PGW_SampleView *view)
+{
+    if (!s || !view) return PGW_INVALID;
+    *view = (PGW_SampleView){
+        PGW_SAMPLE_VIEW_NATIVE, s, sizeof(uint32_t),
+        &native_source_type_identity, NULL, NULL
+    };
+    return PGW_OK;
+}
+
+static const PGW_SampleAccessI native_view_access = {
+    PGW_ABI_VERSION, sizeof(PGW_SampleAccessI), NULL, NULL, native_source_view
+};
+static const PGW_SampleViewDescriptor native_view_contract = {
+    PGW_SAMPLE_VIEW_NATIVE, sizeof(uint32_t), &native_source_type_identity, NULL
+};
+static const PGW_SampleAccessI canonical_view_access = {
+    PGW_ABI_VERSION, sizeof(PGW_SampleAccessI), NULL, NULL, canonical_source_view
+};
+static const PGW_SampleViewDescriptor canonical_view_contract = {
+    PGW_SAMPLE_VIEW_CANONICAL, sizeof(PGW_Signal),
+    &PGW_CAN_SIGNAL_VALUE_IDENTITY, NULL
+};
+
 static void commands(PGW_SampleSeq *seq, PGW_WriteResultSeq *outcomes,
                      PGW_Signal *values, size_t n)
 {
@@ -119,6 +155,11 @@ static void partial_messages(const PGW_Schema *schema,
     cfg.disable_metadata_capture = true;
     assert(PGW_CANAdapter.create(&cfg, &arena, &connection) == PGW_OK);
     assert(PGW_CANAdapter.connection->writer(connection, "all", &writer) == PGW_OK);
+    PGW_Representation native_source = {
+        source->schema, "test.native_signal", sizeof(uint32_t),
+        _Alignof(uint32_t), &native_view_access, &native_view_contract
+    };
+    assert(writer.iface->bind(writer.state, &native_source) == PGW_UNSUPPORTED);
     assert(writer.iface->bind(writer.state, source) == PGW_OK);
     assert(PGW_CANAdapter.connection->reader(connection, "all", &reader) == PGW_OK);
     assert(PGW_SampleSeq_initialize(&input));
@@ -213,10 +254,14 @@ int main(void)
         PGW_ABI_VERSION, sizeof(PGW_SampleAccessI), source_copy, NULL, NULL};
     PGW_Representation source = {&schema, "test.signal", sizeof(PGW_Signal),
                                   _Alignof(PGW_Signal), &source_access, NULL};
+    PGW_Representation canonical_view_source = {
+        &schema, "test.signal.view", sizeof(PGW_Signal), _Alignof(PGW_Signal),
+        &canonical_view_access, &canonical_view_contract
+    };
     PGW_CANFrame engine = {0}, aux = {0}, bad = {0};
     const uint8_t baseline[] = {0xe8, 0x03, 0xff, 0x0a, 0xa5, 0x02, 0xcc, 0xdd};
     const uint8_t patched[] = {0xd2, 0x04, 0xff, 0xea, 0xa4, 0x02, 0xcc, 0xdd};
-    partial_messages(&schema, &source);
+    partial_messages(&schema, &canonical_view_source);
     assert(PGW_CANMemory_initialize(&memory, rx, 16, tx, 1) == PGW_OK);
     cfg.transport = PGW_CANMemory_transport(&memory);
     assert(PGW_CANMapping_initialize(&cfg.mapping,

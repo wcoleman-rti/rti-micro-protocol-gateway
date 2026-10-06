@@ -229,13 +229,27 @@ typedef struct {
  * registered from its static descriptors. Static type registrations, topics,
  * endpoint QoS, and entities are reused; only the DDS domain ID is selected at
  * this call. The caller supplies fixed storage for the model's endpoint
- * handles and owns the returned participant.
+ * handles and owns the returned participant. With valid output pointers,
+ * endpoint_count is zero on failure and endpoint handles must not be used. If
+ * rollback fails, this returns PGW_FATAL with *out set to the participant; the
+ * caller must retain it and retry cleanup with
+ * PGW_DDS_delete_dynamic_participant().
  */
 PGW_Status PGW_DDS_create_participant_at_domain(const char *, DDS_DomainId_t,
     PGW_DDSStaticEndpoint *, size_t, size_t *, DDS_DomainParticipant **);
+/** @brief Create the gateway's dedicated, resource-bounded control participant.
+ * On rollback failure, PGW_FATAL may leave *out non-NULL; retry cleanup with
+ * PGW_DDS_delete_dynamic_participant(). With valid output pointers,
+ * endpoint_count is zero on failure; ignore endpoint handles unless PGW_OK.
+ */
 PGW_Status PGW_DDS_create_control_participant(
     const PGW_DDSRemoteControlOptions *, PGW_DDSStaticEndpoint *, size_t,
     size_t *, DDS_DomainParticipant **);
+/** @brief Create the controller-side participant with the inverse fixed bounds.
+ * On rollback failure, PGW_FATAL may leave *out non-NULL; retry cleanup with
+ * PGW_DDS_delete_dynamic_participant(). With valid output pointers,
+ * endpoint_count is zero on failure; ignore endpoint handles unless PGW_OK.
+ */
 PGW_Status PGW_DDS_create_controller_participant(
     const PGW_DDSRemoteControlOptions *, PGW_DDSStaticEndpoint *, size_t,
     size_t *, DDS_DomainParticipant **);
@@ -245,7 +259,7 @@ PGW_Status PGW_DDS_create_control_participant(const PGW_DDSRemoteControlOptions 
 /** @brief Create the controller-side participant with the inverse fixed bounds. */
 PGW_Status PGW_DDS_create_controller_participant(const PGW_DDSRemoteControlOptions *,
     PGW_DDSStaticEndpoint *, size_t, size_t *, DDS_DomainParticipant **);
-/** @brief Delete a participant created by PGW_DDS_create_participant_at_domain. */
+/** @brief Retry deletion of an owned dynamic participant returned by a creator above. */
 PGW_Status PGW_DDS_delete_dynamic_participant(DDS_DomainParticipant *);
 /** @brief Validate typed activation/domain/telemetry options before initialization. */
 PGW_Status PGW_DDS_remote_control_options_validate(
