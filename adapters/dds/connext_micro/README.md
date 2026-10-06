@@ -10,11 +10,13 @@
   the software.
 -->
 
-# Connext Micro adapter
+<img src="../../../docs/assets/rti-logo.png" alt="RTI logo: Your systems. Working as one." width="220">
 
-`PGW::adapter_dds_connext_micro` uses the installed Micro 4.3.0 C, Appgen, DPDE,
-history, UDP, and OSAPI libraries. It neither creates replacement endpoints
-nor interprets unknown discovered types.
+# RTI Connext Micro adapter
+
+`PGW::adapter_dds_connext_micro` uses the installed RTI Connext Micro 4.3.0 C,
+Appgen, DPDE, history, UDP, and OSAPI libraries. It neither creates replacement
+endpoints nor interprets unknown discovered types.
 The public API is declared in `<pgw/dds/connext_micro.h>`.
 
 It does not complete the public opaque `PGW_Connection` or `PGW_Sample` tags.

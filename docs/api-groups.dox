@@ -1,0 +1,28 @@
+/**
+ * \defgroup pgw_core_api Core and lifecycle
+ * Service, route, registry, representation, runtime, and bounded sequence
+ * interfaces used to assemble and run a gateway.
+ */
+
+/**
+ * \defgroup pgw_can_api CAN adapter and transports
+ * CAN configuration, codec integration, frame metadata, and memory or
+ * SocketCAN transport interfaces.
+ */
+
+/**
+ * \defgroup pgw_dds_api RTI Connext Micro adapter
+ * DDS connections, generated type bindings, endpoint configuration, and
+ * optional control interfaces for RTI Connext Micro.
+ */
+
+/**
+ * \defgroup pgw_signal_api Signal representation and bindings
+ * Typed signal values, schema descriptors, and CAN signal metadata.
+ */
+
+/**
+ * \defgroup pgw_diagnostics_api Diagnostics and local export
+ * Bounded counters and event collection, snapshots, JSON formatting, and
+ * nonblocking local export.
+ */

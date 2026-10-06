@@ -16,6 +16,10 @@
 #include "pgw/core.h"
 #include "pgw/signal.h"
 
+/** @addtogroup pgw_can_api
+ * @{
+ */
+
 /** Maximum payload size supported by a normalized CAN frame. */
 #define PGW_CAN_MAX_PAYLOAD 64u
 /** Frame uses a 29-bit extended identifier rather than an 11-bit identifier. */
@@ -296,4 +300,5 @@ PGW_Status PGW_CAN_baseline_timestamp(const PGW_Connection *connection,
  */
 const PGW_Counters *PGW_CAN_counters(const PGW_Connection *);
 
+/** @} */
 #endif

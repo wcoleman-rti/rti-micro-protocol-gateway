@@ -10,9 +10,9 @@
   the software.
 -->
 
-# Actual Micro/MAG/CAN integrated profiling
+# RTI Connext Micro, MAG, and CAN benchmark
 
-`pgw_dds_benchmark` links the installed Connext Micro libraries, actual MAG
+`pgw_dds_benchmark` links the installed RTI Connext Micro libraries, actual MAG
 generated named gateway/companion entities, generated Signal/Probe bindings,
 and the memory CAN transport. It is not a DDS simulation; memory CAN substitutes
 only for the transport side of the CAN adapter.

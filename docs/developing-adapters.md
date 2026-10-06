@@ -12,6 +12,9 @@
 
 # Developing adapters and DDS bindings
 
+Use this guide to add a protocol adapter or DDS binding while keeping transport
+code separate from application types.
+
 ## Source ownership
 
 Configuration grammars live in `resources/schema/`. The
@@ -27,12 +30,12 @@ the reader/writer operations of a `PGW_Connection`. A protocol adapter implement
 the `PGW_AdapterI` and `PGW_ConnectionI` contracts; it does not define the
 application meaning of every sample it transports. See [core contracts](core.md).
 
-`PGW::adapter_dds_connext_micro` is a reusable Connext Micro transport
+`PGW::adapter_dds_connext_micro` is a reusable RTI Connext Micro transport
 implementation. Its participants and named DDS entities come from the generated
 AppGen model. The adapter is not hard-coded for the signal topic: each
 `PGW_DDSEndpointConfig` selects a generated endpoint and a `PGW_DDSBinding`
 appropriate for that endpoint's type. The binding is a typed bridge between
-Connext Micro and the gateway:
+RTI Connext Micro and the gateway:
 
 - RTI `rtiddsgen` produces type-specific DDS structures and typed APIs, including
   operations used to take, return, and write that type.

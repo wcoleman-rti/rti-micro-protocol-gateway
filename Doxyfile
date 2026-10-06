@@ -17,8 +17,9 @@ OUTPUT_LANGUAGE        = English
 INPUT                  = core/include/pgw \
                          adapters/can/include/pgw \
                          adapters/dds/connext_micro/include/pgw \
-                         bindings/signal/include/pgw/signal.h
-FILE_PATTERNS          = *.h
+                         bindings/signal/include/pgw/signal.h \
+                         docs/api-groups.dox
+FILE_PATTERNS          = *.h *.dox
 RECURSIVE              = YES
 EXCLUDE_PATTERNS       =
 STRIP_FROM_PATH        = core/include adapters/can/include adapters/dds/connext_micro/include bindings/signal/include

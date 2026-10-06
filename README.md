@@ -10,18 +10,20 @@
   the software.
 -->
 
-# RTI Micro protocol gateway
+<img src="docs/assets/rti-logo.png" alt="RTI logo: Your systems. Working as one." width="220">
 
-A resource-bounded C11 gateway for routing data between protocol adapters. The
+# RTI Micro Protocol Gateway
+
+A resource-bounded C11 gateway for routing data between protocol adapters. Its
 core uses opaque samples and statically registered bindings; adapters own
-connectivity and sample metadata. DDS bindings can use loan-scoped sample/context
-views for direct native writes or explicitly negotiated static cross-schema
-translation. Remote control is optional and defaults off.
+connectivity and sample metadata. RTI Connext Micro DDS bindings support
+loan-scoped sample and context views for native writes or explicitly negotiated
+static cross-schema translation. Remote control is optional and off by default.
 
 ## Quick start
 
-You need CMake 3.24+, a C11 compiler, Python 3, a licensed Connext Micro 4.3.0
-installation, and Java 17 for the RTI generators. Install the host-tool
+You need CMake 3.24+, a C11 compiler, Python 3, a licensed RTI Connext Micro
+4.3.0 SDK, and Java 17 for the RTI generators. Install the host-tool
 dependencies and configure with the paths/architecture for your SDK:
 
 ```sh
@@ -58,19 +60,21 @@ For more detail, start at the [hosted documentation site](https://wcoleman-rti.g
 
 - **Core** — bounded synchronous routing, lifecycle, schemas, diagnostics, and
   optional scheduler policy.
-- **Adapters** — CAN transports and the Connext Micro DDS integration.
-- **Bindings and tools** — application value conversion and build-time
-  configuration/DBC code generation.
-- **Schemas and bindings** — strict XML configuration schemas and IDL stored
-  with the core or the binding that owns each wire type.
+- **Adapters** — CAN transports and the RTI Connext Micro DDS integration.
+- **Bindings and generators** — application value conversion, configuration
+  validation, and build-time DBC code generation.
+- **Schemas** — strict XML configuration schemas and IDL stored with the core
+  or the binding that owns each wire type.
 - **Examples, tests, benchmarks** — runnable integration example, verification,
   and measurement workloads.
 
-Browse the [C API reference](https://wcoleman-rti.github.io/rti-micro-protocol-gateway/reference/index.html)
-or the guides on [core contracts](https://wcoleman-rti.github.io/rti-micro-protocol-gateway/docs/core.html),
+Start with the [C API guide](docs/api-guide.md), or browse the
+[C API reference](https://wcoleman-rti.github.io/rti-micro-protocol-gateway/reference/index.html)
+by API area, search, or alphabetical symbol index. See also the guides on
+[core contracts](https://wcoleman-rti.github.io/rti-micro-protocol-gateway/docs/core.html),
 [testing](https://wcoleman-rti.github.io/rti-micro-protocol-gateway/docs/testing.html),
 [performance](https://wcoleman-rti.github.io/rti-micro-protocol-gateway/docs/performance.html),
-and [migration boundaries](https://wcoleman-rti.github.io/rti-micro-protocol-gateway/docs/limitations.html).
+and [extension and certification boundaries](https://wcoleman-rti.github.io/rti-micro-protocol-gateway/docs/limitations.html).
 
 This is a prototype, not a certified implementation, an SDK-free core, an
 arbitrary-topic router, or a whole-process allocation guarantee. No physical or

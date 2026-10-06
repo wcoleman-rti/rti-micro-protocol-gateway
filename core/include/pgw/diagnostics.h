@@ -13,6 +13,10 @@
 #ifndef PGW_DIAGNOSTICS_H
 #define PGW_DIAGNOSTICS_H
 
+/** @addtogroup pgw_diagnostics_api
+ * @{
+ */
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -194,4 +198,5 @@ bool PGW_Diagnostics_drain(PGW_Diagnostics *, PGW_EventSeq *);
  */
 bool PGW_snapshot_json(const PGW_CounterSnapshot *, char *, size_t, size_t *);
 
+/** @} */
 #endif

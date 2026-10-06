@@ -10,7 +10,9 @@
   the software.
 -->
 
-# Bounded CAN adapter
+<img src="../../docs/assets/rti-logo.png" alt="RTI logo: Your systems. Working as one." width="220">
+
+# CAN adapter
 
 Targets: `PGW::adapter_can`, `PGW::can_memory`, and, on Linux,
 `PGW::can_socketcan`. The adapter uses `PGW::core`/Micro sequences and the

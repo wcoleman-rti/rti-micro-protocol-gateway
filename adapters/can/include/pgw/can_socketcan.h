@@ -12,6 +12,10 @@
 
 #ifndef PGW_CAN_SOCKETCAN_H
 #define PGW_CAN_SOCKETCAN_H
+/** @addtogroup pgw_can_api
+ * @{
+ */
+
 #include "pgw/can.h"
 
 /** @brief Linux SocketCAN raw-socket filter identifier and mask.
@@ -80,4 +84,5 @@ PGW_Status PGW_CANSocketConfig_finalize(PGW_CANSocketConfig *);
  * The socket object is borrowed and must outlive the transport connection.
  */
 PGW_CANTransport PGW_CANSocket_transport(PGW_CANSocket *);
+/** @} */
 #endif

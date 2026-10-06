@@ -10,9 +10,9 @@
   the software.
 -->
 
-# Typed Micro sequences
+# Typed sequences for RTI Connext Micro
 
-Runtime registries, routes and write outcomes use one typed sequence member, not
+Runtime registries, routes, and write outcomes use one typed sequence member, not
 parallel pointer/count/capacity members. Each sequence is a distinct C type with
 its own matching installed Micro sequence implementation.
 

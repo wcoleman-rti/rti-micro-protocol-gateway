@@ -10,7 +10,7 @@
   the software.
 -->
 
-# Isolated SocketCAN/vcan integration
+# Isolated SocketCAN and vcan integration
 
 The Linux SocketCAN adapter is implemented and compiled, but the maintained
 automated suite does not claim successful vcan or physical-bus traffic. Current

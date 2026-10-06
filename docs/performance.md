@@ -10,7 +10,7 @@
   the software.
 -->
 
-# Benchmarking
+# Performance benchmarking
 
 ```sh
 python3 benchmarks/runner/run.py build/benchmarks/pgw_core_benchmark --repeat 3

@@ -12,6 +12,12 @@
 
 # RTI Micro Protocol Gateway
 
+<p class="rti-home-brand"><img src="docs/assets/rti-logo.png" alt="RTI logo: Your systems. Working as one." width="260"></p>
+
+Connect protocol adapters with a bounded C11 routing core. This prototype
+supports RTI Connext Micro DDS bindings, CAN transports, and optional remote
+control.
+
 ## Guides
 
 - [Build configuration](docs/build.md)
@@ -31,8 +37,9 @@
 
 ## API reference
 
-Browse the [public C header reference](reference/index.html).
+Start with the [C API guide](api-guide.md) to find interfaces by task, or browse
+the [public C header reference](reference/index.html) by API area, search, or
+alphabetical symbol index.
 
-Repository administrators should select **GitHub Actions** as the Pages build
-and deployment source in the repository's Pages settings before the first
-deployment.
+To publish this site, select **GitHub Actions** as the Pages build and
+deployment source in the repository's Pages settings.

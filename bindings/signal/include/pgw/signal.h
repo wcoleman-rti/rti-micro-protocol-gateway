@@ -13,6 +13,10 @@
 #ifndef PGW_SIGNAL_H
 #define PGW_SIGNAL_H
 
+/** @addtogroup pgw_signal_api
+ * @{
+ */
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -134,4 +138,5 @@ typedef enum PGW_CodecStatus {
 #ifdef __cplusplus
 }
 #endif
+/** @} */
 #endif

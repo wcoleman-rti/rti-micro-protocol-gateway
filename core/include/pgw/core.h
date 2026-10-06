@@ -13,6 +13,10 @@
 #ifndef PGW_CORE_H
 #define PGW_CORE_H
 
+/** @addtogroup pgw_core_api
+ * @{
+ */
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -852,4 +856,5 @@ PGW_Status PGW_Service_finalize(PGW_Service *);
  */
 const char *PGW_status_name(PGW_Status);
 
+/** @} */
 #endif

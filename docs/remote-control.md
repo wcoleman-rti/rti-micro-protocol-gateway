@@ -10,11 +10,11 @@
   the software.
 -->
 
-# DDS remote control
+# RTI Connext Micro remote control
 
 ## Build and activation
 
-Remote control is compile-time opt-in and requires the DDS adapter:
+Remote control is an opt-in build feature and requires the DDS adapter:
 
 ```sh
 cmake -S . -B build-control -DCMAKE_BUILD_TYPE=Release \

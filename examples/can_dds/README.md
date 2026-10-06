@@ -10,13 +10,15 @@
   the software.
 -->
 
-# CAN / actual Micro DDS gateway
+<img src="../../docs/assets/rti-logo.png" alt="RTI logo: Your systems. Working as one." width="220">
 
-**Yes, the gateway is functionally bidirectional:** the real DDS/MAG integration
-test receives CAN-state values through Micro and sends a DDS command back through
+# RTI Micro Protocol Gateway with CAN and DDS
+
+The gateway is bidirectional: the real DDS/MAG integration test receives
+CAN-state values through RTI Connext Micro and sends a DDS command back through
 the CAN adapter, checking the exact patched frame bytes. The runtime executable
-supports SocketCAN, but successful vcan/physical socket traffic is explicitly
-unverified here; use `--memory` for the safe no-interface demo below.
+supports SocketCAN, but successful vcan or physical socket traffic is not
+verified here. Use `--memory` for the safe no-interface demo below.
 
 ## Build and run safely
 

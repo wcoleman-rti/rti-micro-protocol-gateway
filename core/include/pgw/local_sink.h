@@ -12,6 +12,10 @@
 
 #ifndef PGW_LOCAL_SINK_H
 #define PGW_LOCAL_SINK_H
+/** @addtogroup pgw_diagnostics_api
+ * @{
+ */
+
 #include "pgw/core.h"
 
 /** @brief Nonblocking JSON-lines counter snapshot sink.
@@ -48,4 +52,5 @@ PGW_Status PGW_LocalSink_initialize(PGW_LocalSink *, int, char *, size_t);
  *         for a failed/short write.
  */
 PGW_Status PGW_LocalSink_snapshot(PGW_LocalSink *, const PGW_CounterSnapshot *);
+/** @} */
 #endif

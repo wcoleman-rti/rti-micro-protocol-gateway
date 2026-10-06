@@ -12,6 +12,10 @@
 
 #ifndef PGW_DDS_CONNEXT_MICRO_H
 #define PGW_DDS_CONNEXT_MICRO_H
+/** @addtogroup pgw_dds_api
+ * @{
+ */
+
 #include "pgw/core.h"
 #include "rti_me_c.h"
 #include "app_gen/app_gen.h"
@@ -323,4 +327,5 @@ DDS_DomainParticipant *PGW_DDS_participant(PGW_Connection *);
 extern const PGW_AdapterI PGW_DDSConnextMicroAdapter;
 /** @brief Connext Micro connection interface descriptor. */
 extern const PGW_ConnectionI PGW_DDSConnextMicroConnection;
+/** @} */
 #endif
