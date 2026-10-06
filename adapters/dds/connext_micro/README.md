@@ -153,5 +153,5 @@ not initial/incremental allocation counts, are the relevant Micro pool limits.
 Entity counts are not a DDS RAM estimate, and the declared gateway/companion
 inventory does not provide arbitrary DPDE peer headroom.
 
-See [the runnable example](../../examples/can_dds/README.md) for verified paths
+See [the runnable example](../../../examples/can_dds/README.md) for verified paths
 and explicit coverage gaps.
