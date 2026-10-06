@@ -57,6 +57,9 @@ jobs:
           test -s site/docs/limitations.html
           test -s site/reference/index.html
           test -s site/adapters/can/index.html
+          test -s site/adapters/dds/connext_micro/index.html
+          test -s site/examples/can_dds/index.html
+          test -s site/tools/dbc_codegen/index.html
 
       - name: Upload Pages artifact
         if: github.event_name == 'push' && github.ref == 'refs/heads/develop'

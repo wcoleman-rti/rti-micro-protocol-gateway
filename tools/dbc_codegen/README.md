@@ -105,24 +105,22 @@ not stale generated source files.
 
 ## Optional typed Micro binding
 
-`bindings/signal/src/dds_binding.c` is separate from the pure codec and native
-header-only target. Compile it alongside generated `signals.c`,
-`signalsPlugin.c`, `signalsSupport.c`, and `pgw_codec.c`; link
-`PGW::adapter_dds_connext_micro`. Include `<pgw/signal_dds.h>` for the adapter-owned
-`PGW_DDSBinding` interface. `PGW_signal_dds_binding` registers all inventory
-keys; `PGW_signal_dds_binding_<category>` registers only its category keys, so
-category writers can retain category-sized key/history bounds. All share the
-same logical schema/fingerprint. DDS entity topology remains MAG-owned.
+The optional Micro binding uses the RTI-converted service type XML to generate
+`dds_type_bindings.c` and its fieldwise native-type header at build time.
+`bindings/signal/src/dds_conversion.c` supplies the remaining semantic bridge:
+it validates signal IDs/tags against the DBC inventory and maps the DDS tagged
+union to/from `PGW_Signal`. The generated per-category bindings register only
+their category keys, so the existing category-sized DDS key/history bounds
+remain unchanged. All use the same logical schema/fingerprint; DDS entity
+topology remains MAG-owned.
 
-Typed state and native adapter wrappers are distinct. The binding initializes
-sequence descriptors and one reusable typed scratch sample from the caller's
-arena, takes/returns typed middleware loans, explicitly copies union arms to
-native values, and writes with an optional portable source timestamp supplied
-by the adapter. Unknown IDs, wrong per-ID tags and nonfinite double values are
-rejected by conversion. Middleware key registration occurs during adapter
-initialization, at portable epoch time; transport command range/baseline
-validation remains in the codec/adapter. `tests/codegen/test_dds_conversion.c`
-checks typed conversion against the installed Micro-generated type support.
+The generated binding initializes sequence descriptors and reusable typed
+scratch from the caller's arena, takes/returns typed middleware loans, invokes
+the canonical conversion, and writes with an optional portable source
+timestamp. Fieldwise-compatible scalar structs and a single scalar key can be
+generated without conversion/key C callbacks. `tests/codegen/test_dds_conversion.c`
+continues to check signal conversion against the installed Micro-generated
+type support.
 Run Micro type generation on the emitted **`signals.idl`**, not directly on
-`resources/signal.idl`: a generated header named `signal.h` can shadow the POSIX
+`bindings/signal/idl/signal.idl`: a generated header named `signal.h` can shadow the POSIX
 system header when its directory is added to compiler include paths.

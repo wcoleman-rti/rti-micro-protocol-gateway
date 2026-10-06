@@ -27,7 +27,10 @@ guarantee or a cross-version infrastructure ABI promise.
 - DPSE profile/remote assertions; this prototype uses finite DPDE resources.
 - Shared-library plugins, hot reload, runtime graph/type discovery and
   dynamic stream creation.
-- General schema transformations, DynamicData and serialized CDR forwarding.
+- Runtime type discovery, arbitrary schema transformation, DynamicData and
+  serialized CDR forwarding. Statically compiled DDS bindings may provide
+  explicit cross-schema translators over `PGW_SampleView`; there is no generic
+  transformation engine or runtime-discovered mapping.
 - Parallel gateway sessions/thread pools.
 - Extended DBC multiplexing, floating-point DBC fields, J1939 and ISO-TP.
 - Profinet, OPC UA, MQTT and non-Linux CAN transports.

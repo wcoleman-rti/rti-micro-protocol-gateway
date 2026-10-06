@@ -14,6 +14,9 @@
 #include "pgw/dds/connext_micro.h"
 #include "pgw/can.h"
 #include "pgw/compiled_config.h"
+#if defined(PGW_ENABLE_REMOTE_CONTROL)
+#include "control_resources.h"
+#endif
 #include <string.h>
 
 #include "osapi/osapi_log.h"
@@ -94,3 +97,131 @@ PGW_Status PGW_example_attach_routes(PGW_Connection *can, PGW_Connection *dds,
     }
     return PGW_OK;
 }
+#if defined(PGW_ENABLE_REMOTE_CONTROL)
+PGW_Status PGW_example_control_resources(PGW_Connection *can, PGW_Connection *dds,
+    PGW_Route *routes, size_t route_count, PGW_ControlResource *resources,
+    size_t capacity, size_t *resource_count)
+{
+    if (!resources || !resource_count || capacity < pgw_control_resource_count ||
+        (pgw_control_resource_count && (!can || !dds || !routes)))
+        return PGW_INVALID;
+    for (size_t i = 0; i < pgw_control_resource_count; ++i) {
+        const PGW_CompiledControlResource *compiled =
+            &pgw_control_resources[i];
+        PGW_ControlResource *resource = &resources[i];
+        *resource = (PGW_ControlResource){
+            .id = compiled->id,
+            .command_capabilities = compiled->command_capabilities,
+            .telemetry_capabilities = compiled->telemetry_capabilities
+        };
+        PGW_Status status;
+        if (!strcmp(compiled->kind, "route")) {
+            resource->kind = PGW_CONTROL_RESOURCE_ROUTE;
+            bool found = false;
+            for (RTI_INT32 j = 0;
+                 j < PGW_CompiledRouteSeq_get_length(&pgw_config_routes); ++j) {
+                const PGW_CompiledRoute *route =
+                    PGW_CompiledRouteSeq_get_reference(&pgw_config_routes, j);
+                if (!strcmp(route->name, compiled->name) && (size_t)j < route_count) {
+                    resource->route = &routes[j];
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) return PGW_INVALID;
+        } else {
+            PGW_Connection *connection =
+                !strcmp(compiled->adapter, "can") ? can :
+                !strcmp(compiled->adapter, "connext_micro") ? dds : NULL;
+            PGW_ControlResourceKind kind;
+            const char *resource_name = compiled->name;
+            char stream_name[128];
+            if (!connection) return PGW_UNSUPPORTED;
+            if (!strcmp(compiled->kind, "connection")) {
+                kind = PGW_CONTROL_RESOURCE_CONNECTION;
+            } else if (!strcmp(compiled->kind, "input") ||
+                       !strcmp(compiled->kind, "output")) {
+                kind = !strcmp(compiled->kind, "input") ?
+                    PGW_CONTROL_RESOURCE_INPUT : PGW_CONTROL_RESOURCE_OUTPUT;
+                const char *separator = strstr(compiled->name, "::");
+                if (!separator || strlen(separator + 2) >= sizeof(stream_name))
+                    return PGW_INVALID;
+                strcpy(stream_name, separator + 2);
+                resource_name = stream_name;
+                if (!strcmp(compiled->adapter, "can")) {
+                    const char *native = native_endpoint(
+                        "can", resource_name, kind == PGW_CONTROL_RESOURCE_INPUT);
+                    if (!native) return PGW_INVALID;
+                    resource_name = native;
+                }
+            } else return PGW_INVALID;
+            resource->kind = kind;
+            if (!strcmp(compiled->adapter, "can"))
+                status = PGW_CAN_control_target(connection, kind, resource_name,
+                    &resource->adapter, &resource->adapter_state);
+            else
+                status = PGW_DDS_control_target(connection, kind, resource_name,
+                    &resource->adapter, &resource->adapter_state);
+            if (status != PGW_OK) return status;
+        }
+    }
+    *resource_count = pgw_control_resource_count;
+    return PGW_OK;
+}
+
+PGW_Status PGW_example_control_telemetry(PGW_Connection *can, PGW_Connection *dds,
+    PGW_ControlTelemetryMetric *metrics, size_t capacity, size_t *metric_count)
+{
+#if PGW_CONTROL_TELEMETRY_METRIC_COUNT == 0
+    (void)can;
+    (void)dds;
+    (void)metrics;
+    (void)capacity;
+    if (!metric_count) return PGW_INVALID;
+    *metric_count = 0;
+    return PGW_OK;
+#else
+    if (!metric_count || (pgw_control_telemetry_metric_count &&
+        (!metrics || capacity < pgw_control_telemetry_metric_count)))
+        return PGW_INVALID;
+    for (size_t i = 0; i < pgw_control_telemetry_metric_count; ++i) {
+        const PGW_CompiledControlTelemetry *compiled =
+            &pgw_control_telemetry_metrics[i];
+        PGW_ControlTelemetryMetric *metric = &metrics[i];
+        PGW_ControlResourceKind kind;
+        if (!strcmp(compiled->resource_kind, "connection"))
+            kind = PGW_CONTROL_RESOURCE_CONNECTION;
+        else if (!strcmp(compiled->resource_kind, "input"))
+            kind = PGW_CONTROL_RESOURCE_INPUT;
+        else if (!strcmp(compiled->resource_kind, "output"))
+            kind = PGW_CONTROL_RESOURCE_OUTPUT;
+        else return PGW_INVALID;
+        PGW_Connection *connection =
+            !strcmp(compiled->adapter, "can") ? can :
+            !strcmp(compiled->adapter, "connext_micro") ? dds : NULL;
+        if (!connection) return PGW_UNSUPPORTED;
+        PGW_Status status;
+        if (!strcmp(compiled->adapter, "can"))
+            status = PGW_CAN_control_target(connection, kind, compiled->resource,
+                &metric->adapter, &metric->adapter_state);
+        else
+            status = PGW_DDS_control_target(connection, kind, compiled->resource,
+                &metric->adapter, &metric->adapter_state);
+        if (status != PGW_OK) return status;
+        *metric = (PGW_ControlTelemetryMetric){
+            .id = compiled->id,
+            .resource_id = compiled->resource_id,
+            .telemetry_kind = compiled->telemetry_kind,
+            .adapter_metric_bit = compiled->adapter_metric_bit,
+            .name = compiled->name,
+            .unit = compiled->unit,
+            .scalar_type = (PGW_ControlScalarType)compiled->scalar_type,
+            .adapter = metric->adapter,
+            .adapter_state = metric->adapter_state
+        };
+    }
+    *metric_count = pgw_control_telemetry_metric_count;
+    return PGW_OK;
+#endif
+}
+#endif

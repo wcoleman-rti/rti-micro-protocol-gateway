@@ -47,6 +47,17 @@ typedef struct {
     uint32_t interface_index;            /**< Platform interface index, if available. */
 } PGW_CANFrame;
 
+/** @brief CAN metadata retained with a decoded gateway sample. */
+typedef struct {
+    PGW_Timestamp timestamp;
+    uint32_t frame_id;
+    uint32_t flags;
+    uint32_t interface_index;
+} PGW_CANMetadata;
+
+extern const unsigned char PGW_CAN_SIGNAL_VALUE_IDENTITY;
+extern const unsigned char PGW_CAN_METADATA_IDENTITY;
+
 #define REDA_SEQUENCE_USER_API
 #define T PGW_CANFrame
 #define TSeq PGW_CANFrameSeq
@@ -204,6 +215,12 @@ typedef struct {
 
 /** @brief CAN adapter descriptor for registration in a PGW_Registry. */
 extern const PGW_AdapterI PGW_CANAdapter;
+#if defined(PGW_ENABLE_REMOTE_CONTROL)
+/** @brief Resolve a configured CAN connection/category to its control context. */
+PGW_Status PGW_CAN_control_target(PGW_Connection *, PGW_ControlResourceKind,
+                                  const char *, const PGW_ControlAdapterI **,
+                                  void **);
+#endif
 /** @brief Initialize a mapping by loaning immutable definition arrays.
  * @param mapping Mapping storage, not already initialized.
  * @param messages Non-empty message definitions.

@@ -11,13 +11,15 @@
  */
 
 #include "pgw/can.h"
+#if defined(PGW_ENABLE_REMOTE_CONTROL)
+#include "control_manifest.h"
+#endif
 #include <math.h>
 #include <string.h>
 
 typedef struct PGW_CANSample {
     PGW_Signal signal;
-    PGW_Timestamp timestamp;
-    uint32_t frame_id, flags, interface_index;
+    PGW_CANMetadata metadata;
 } PGW_CANSample;
 #define REDA_SEQUENCE_USER_API
 #define T PGW_CANSample
@@ -52,6 +54,7 @@ typedef struct PGW_CANCategoryState {
     PGW_CANConnection *connection;
     const char *name;
     PGW_Representation representation;
+    PGW_SampleViewDescriptor view_contract;
     PGW_CANSampleSeq queue;
     PGW_CANLoanSeq loan;
     size_t head, count;
@@ -61,6 +64,8 @@ typedef struct PGW_CANCategoryState {
     bool queue_borrowed;
     bool loan_initialized;
     bool loan_borrowed;
+    bool input_enabled;
+    bool output_enabled;
 } PGW_CANCategoryState;
 #define REDA_SEQUENCE_USER_API
 #define T PGW_CANCategoryState
@@ -93,8 +98,12 @@ struct PGW_CANConnection {
     PGW_CANStats stats;
     PGW_Counters counters;
     bool closed;
+    bool control_enabled;
     uint32_t sequence_initialization;
 };
+#if defined(PGW_ENABLE_REMOTE_CONTROL)
+static const PGW_ControlAdapterI can_control;
+#endif
 
 #include "osapi/osapi_log.h"
 #include "osapi/osapi_log_impl.h"
@@ -285,12 +294,30 @@ static PGW_Status copy_value(const PGW_Sample *s, void *v, size_t size)
 static PGW_Status timestamp(const PGW_Sample *s, PGW_Timestamp *t)
 {
     if (!s || !t) return PGW_INVALID;
-    *t = ((const PGW_CANSample *)s)->timestamp;
+    *t = ((const PGW_CANSample *)s)->metadata.timestamp;
     return t->valid ? PGW_OK : PGW_NO_DATA;
 }
 
+const unsigned char PGW_CAN_METADATA_IDENTITY = 0;
+const unsigned char PGW_CAN_SIGNAL_VALUE_IDENTITY = 0;
+
+static PGW_Status sample_view(const PGW_Sample *opaque, PGW_SampleView *view)
+{
+    const PGW_CANSample *sample = (const PGW_CANSample *)opaque;
+    if (!sample || !view) return PGW_INVALID;
+    *view = (PGW_SampleView){
+        .kind = PGW_SAMPLE_VIEW_CANONICAL,
+        .value = &sample->signal,
+        .value_size = sizeof(sample->signal),
+        .type_identity = &PGW_CAN_SIGNAL_VALUE_IDENTITY,
+        .context = &sample->metadata,
+        .context_identity = &PGW_CAN_METADATA_IDENTITY
+    };
+    return PGW_OK;
+}
+
 static const PGW_SampleAccessI sample_access = {
-    PGW_ABI_VERSION, sizeof(PGW_SampleAccessI), copy_value, timestamp
+    PGW_ABI_VERSION, sizeof(PGW_SampleAccessI), copy_value, timestamp, sample_view
 };
 
 static const PGW_SignalDescriptor *signal_by_id(PGW_CANConnection *c, uint32_t id)
@@ -311,6 +338,7 @@ PGW_Status PGW_CAN_poll(PGW_Connection *connection, size_t budget)
     uint64_t before;
     PGW_Status result = PGW_OK;
     if (!c || c->closed) return PGW_INVALID;
+    if (!c->control_enabled) return PGW_OK;
     before = c->stats.receive_drops;
     if (budget > c->config.receive_budget) budget = c->config.receive_budget;
     for (n = 0; n < budget; ++n) {
@@ -388,6 +416,7 @@ PGW_Status PGW_CAN_poll(PGW_Connection *connection, size_t budget)
                     PGW_CANCategoryStateSeq_get_reference(&c->categories, k);
                 PGW_CANSample *sample;
                 if (strcmp(cat->name, d->category)) continue;
+                if (!cat->input_enabled) break;
                 size_t capacity = (size_t)PGW_CANSampleSeq_get_maximum(&cat->queue);
                 if (cat->count == capacity) {
                     ++c->stats.receive_drops;
@@ -398,10 +427,9 @@ PGW_Status PGW_CAN_poll(PGW_Connection *connection, size_t budget)
                     &cat->queue, (RTI_INT32)((cat->head + cat->count) % capacity));
                 sample->signal = *decoded;
                 if (!c->config.disable_metadata_capture) {
-                    sample->timestamp = frame.timestamp;
-                    sample->frame_id = frame.id;
-                    sample->flags = frame.flags;
-                    sample->interface_index = frame.interface_index;
+                    sample->metadata = (PGW_CANMetadata){
+                        frame.timestamp, frame.id, frame.flags, frame.interface_index
+                    };
                 }
                 ++cat->count;
                 if (cat->count > c->stats.queue_high_water) {
@@ -426,6 +454,8 @@ static PGW_Status read_samples(void *state, PGW_SampleSeq *seq, size_t budget)
     PGW_Status status;
     if (!seq || !PGW_SampleSeq_get_contiguous_buffer(seq) ||
         cat->connection->closed) return PGW_INVALID;
+    if (!cat->connection->control_enabled || !cat->input_enabled)
+        return PGW_NO_DATA;
     if (cat->borrowed) {
         PGW_Counters_add(&cat->connection->counters, PGW_COUNT_LOAN_ERRORS, 1);
         return PGW_LOAN_ERROR;
@@ -479,11 +509,54 @@ static PGW_Status bind_source(void *state, const PGW_Representation *source)
     PGW_CANCategoryState *cat = state;
     if (!source || !PGW_schema_equal(source->schema, cat->representation.schema) ||
         !source->access || source->access->version != PGW_ABI_VERSION ||
-        source->access->size < sizeof(PGW_SampleAccessI) ||
-        !source->access->copy_value) return PGW_UNSUPPORTED;
+        source->access->size != sizeof(PGW_SampleAccessI) ||
+        (!source->access->copy_value && !source->access->view))
+        return PGW_UNSUPPORTED;
+    if (source->access->view && !source->view_contract)
+        return PGW_UNSUPPORTED;
+    if (!source->access->copy_value &&
+        (source->view_contract->kind != PGW_SAMPLE_VIEW_CANONICAL ||
+         source->view_contract->value_size != sizeof(PGW_Signal) ||
+         source->view_contract->type_identity != &PGW_CAN_SIGNAL_VALUE_IDENTITY))
+        return PGW_UNSUPPORTED;
     if (cat->source && cat->source != source) return PGW_UNSUPPORTED;
     cat->source = source;
     return PGW_OK;
+}
+
+static PGW_Status sample_signal(const PGW_Representation *source,
+                               const PGW_Sample *sample,
+                               const PGW_Signal **value,
+                               PGW_Signal *copy)
+{
+    const PGW_SampleAccessI *access = source->access;
+    if (access->view) {
+        PGW_SampleView view;
+        PGW_Status status = access->view(sample, &view);
+        if (status == PGW_OK) {
+            if (!view.value || ((view.context == NULL) !=
+                                (view.context_identity == NULL)) ||
+                !source->view_contract ||
+                view.kind != source->view_contract->kind ||
+                view.value_size != source->view_contract->value_size ||
+                view.type_identity != source->view_contract->type_identity ||
+                view.context_identity != source->view_contract->context_identity)
+                return PGW_INVALID;
+            if (view.kind == PGW_SAMPLE_VIEW_CANONICAL &&
+                view.value_size == sizeof(PGW_Signal)) {
+                *value = view.value;
+                return PGW_OK;
+            }
+            if (view.kind != PGW_SAMPLE_VIEW_NATIVE)
+                return PGW_INVALID;
+        } else if (status != PGW_UNSUPPORTED) {
+            return status;
+        }
+    }
+    if (!access->copy_value) return PGW_UNSUPPORTED;
+    PGW_Status status = access->copy_value(sample, copy, sizeof(*copy));
+    if (status == PGW_OK) *value = copy;
+    return status;
 }
 
 static PGW_Status write_samples(void *state, const PGW_SampleSeq *seq,
@@ -501,24 +574,33 @@ static PGW_Status write_samples(void *state, const PGW_SampleSeq *seq,
     n = (size_t)PGW_SampleSeq_get_length(seq);
     if ((size_t)PGW_WriteResultSeq_get_length(results) != n || n > (size_t)INT32_MAX)
         return PGW_INVALID;
+    if (!c->control_enabled || !cat->output_enabled) {
+        for (i = 0; i < (RTI_INT32)n; ++i) {
+            *PGW_WriteResultSeq_get_reference(results, i) = PGW_WRITE_BACKPRESSURE;
+            ++c->stats.backpressure_commands;
+            PGW_Counters_add(&c->counters, PGW_COUNT_BACKPRESSURE, 1);
+        }
+        return PGW_OK;
+    }
     if (!PGW_CANIndexSeq_set_length(&c->write_messages, (RTI_INT32)n))
         return PGW_CAPACITY;
     for (m = 0; m < PGW_CANMessageSeq_get_length(&c->messages); ++m)
         PGW_CANMessageSeq_get_reference(&c->messages, m)->staged = false;
     for (i = 0; i < (RTI_INT32)n; ++i) {
-        PGW_Signal value;
+        PGW_Signal copied_value;
+        const PGW_Signal *value;
         const PGW_SignalDescriptor *d;
         PGW_CANMessage *msg;
         PGW_CANFrame candidate;
         *PGW_CANIndexSeq_get_reference(&c->write_messages, i) = SIZE_MAX;
         *PGW_WriteResultSeq_get_reference(results, i) = PGW_WRITE_INVALID;
-        if (cat->source->access->copy_value(
+        if (sample_signal(cat->source,
                 *PGW_SampleSeq_get_reference(seq, i), &value,
-                                           sizeof(value)) != PGW_OK)
+                &copied_value) != PGW_OK)
             goto invalid;
-        d = signal_by_id(c, value.id);
-        if (!d || strcmp(d->category, cat->name) || d->kind != value.value.kind ||
-            (value.value.kind == PGW_VALUE_DOUBLE && !isfinite(value.value.data.real)))
+        d = signal_by_id(c, value->id);
+        if (!d || strcmp(d->category, cat->name) || d->kind != value->value.kind ||
+            (value->value.kind == PGW_VALUE_DOUBLE && !isfinite(value->value.data.real)))
             goto invalid;
         msg = PGW_CANMessageSeq_get_reference(&c->messages, d->message_index);
         if (!msg->baseline) {
@@ -526,8 +608,8 @@ static PGW_Status write_samples(void *state, const PGW_SampleSeq *seq,
             goto invalid;
         }
         candidate = msg->staged ? msg->stage : msg->shadow;
-        if (c->config.mapping.patch(c->config.mapping.context, value.id,
-                &value.value, candidate.data, candidate.length) != PGW_CODEC_OK)
+        if (c->config.mapping.patch(c->config.mapping.context, value->id,
+                &value->value, candidate.data, candidate.length) != PGW_CODEC_OK)
             goto invalid;
         msg->stage = candidate;
         msg->staged = true;
@@ -609,6 +691,36 @@ static PGW_Status get_writer(PGW_Connection *connection, const char *name,
     return status;
 }
 
+#if defined(PGW_ENABLE_REMOTE_CONTROL)
+PGW_Status PGW_CAN_control_target(PGW_Connection *opaque,
+                                  PGW_ControlResourceKind kind,
+                                  const char *name,
+                                  const PGW_ControlAdapterI **iface,
+                                  void **state)
+{
+    PGW_CANConnection *connection = (PGW_CANConnection *)opaque;
+    if (!connection || connection->closed || !name || !*name || !iface || !state)
+        return PGW_INVALID;
+    if (kind == PGW_CONTROL_RESOURCE_CONNECTION) {
+        *iface = &can_control;
+        *state = connection;
+        return PGW_OK;
+    }
+    if (kind != PGW_CONTROL_RESOURCE_INPUT && kind != PGW_CONTROL_RESOURCE_OUTPUT)
+        return PGW_UNSUPPORTED;
+    for (RTI_INT32 i = 0; i < PGW_CANCategoryStateSeq_get_length(&connection->categories); ++i) {
+        PGW_CANCategoryState *category =
+            PGW_CANCategoryStateSeq_get_reference(&connection->categories, i);
+        if (!strcmp(category->name, name)) {
+            *iface = &can_control;
+            *state = category;
+            return PGW_OK;
+        }
+    }
+    return PGW_INVALID;
+}
+#endif
+
 static PGW_Status release_sequences(PGW_CANConnection *c)
 {
     bool ok = true;
@@ -664,6 +776,66 @@ static PGW_Status close_connection(PGW_Connection *connection)
     PGW_Status released = release_sequences(c);
     return status == PGW_OK ? released : status;
 }
+
+#if defined(PGW_ENABLE_REMOTE_CONTROL)
+static PGW_Status control_apply(void *state, PGW_ControlAction action)
+{
+    if (!state) return PGW_INVALID;
+    if (action == PGW_CONTROL_CONNECTION_UP ||
+        action == PGW_CONTROL_CONNECTION_DOWN) {
+        PGW_CANConnection *connection = state;
+        if (connection->closed) return PGW_INVALID;
+        bool desired = action == PGW_CONTROL_CONNECTION_UP;
+        if (connection->control_enabled == desired) return PGW_NO_CHANGE;
+        connection->control_enabled = desired;
+        return PGW_OK;
+    }
+    if (action == PGW_CONTROL_INPUT_ENABLE ||
+        action == PGW_CONTROL_INPUT_DISABLE ||
+        action == PGW_CONTROL_OUTPUT_ENABLE ||
+        action == PGW_CONTROL_OUTPUT_DISABLE) {
+        PGW_CANCategoryState *category = state;
+        if (!category->connection || category->connection->closed) return PGW_INVALID;
+        bool input = action == PGW_CONTROL_INPUT_ENABLE ||
+                     action == PGW_CONTROL_INPUT_DISABLE;
+        bool desired = action == PGW_CONTROL_INPUT_ENABLE ||
+                       action == PGW_CONTROL_OUTPUT_ENABLE;
+        bool *enabled = input ? &category->input_enabled : &category->output_enabled;
+        if (*enabled == desired) return PGW_NO_CHANGE;
+        *enabled = desired;
+        if (input && !desired) {
+            category->head = 0;
+            category->count = 0;
+        }
+        return PGW_OK;
+    }
+    return PGW_UNSUPPORTED;
+}
+
+static PGW_Status control_read_telemetry(void *state, const char *name,
+                                         PGW_ControlScalar *out)
+{
+    if (!state || !name || !out || strcmp(name, "received_frames"))
+        return PGW_UNSUPPORTED;
+    PGW_CANStats stats;
+    PGW_Status status = PGW_CAN_stats((PGW_Connection *)state, &stats);
+    if (status != PGW_OK) return status;
+    out->type = PGW_CONTROL_SCALAR_UINT64;
+    out->value.uint64_value = stats.received_frames;
+    return PGW_OK;
+}
+
+static const PGW_ControlAdapterI can_control = {
+    PGW_CONTROL_ABI_VERSION,
+    sizeof(PGW_ControlAdapterI),
+    PGW_CAN_CONTROL_MANIFEST_VERSION,
+    PGW_CAN_CONTROL_RESOURCE_KIND_MASK,
+    PGW_CAN_CONTROL_ACTION_MASK,
+    control_apply,
+    PGW_CAN_CONTROL_TELEMETRY_METRIC_MASK,
+    control_read_telemetry
+};
+#endif
 
 static PGW_Status array(PGW_Arena *arena, size_t count, size_t size,
                         size_t alignment, void **out)
@@ -792,6 +964,7 @@ static PGW_Status create(const void *configuration, PGW_Arena *arena,
     c->sequence_initialization |= UINT32_C(1) << ((id) + 4); \
 } while (0)
     ALLOC(c, 1, PGW_CANConnection);
+    c->control_enabled = true;
     c->config.entity_id = cfg->entity_id;
     c->config.transport = cfg->transport;
     c->config.receive_budget = cfg->receive_budget;
@@ -814,9 +987,15 @@ static PGW_Status create(const void *configuration, PGW_Arena *arena,
         PGW_CANCategoryState *cat = PGW_CANCategoryStateSeq_get_reference(&c->categories, i);
         const PGW_CANCategory *category = PGW_CANCategorySeq_get_reference(&cfg->categories, i);
         cat->connection = c; cat->name = category->name;
+        cat->input_enabled = true;
+        cat->output_enabled = true;
+        cat->view_contract = (PGW_SampleViewDescriptor){
+            PGW_SAMPLE_VIEW_CANONICAL, sizeof(PGW_Signal),
+            &PGW_CAN_SIGNAL_VALUE_IDENTITY, &PGW_CAN_METADATA_IDENTITY
+        };
         cat->representation = (PGW_Representation){
             category->schema, "can.signal", sizeof(PGW_CANSample),
-            _Alignof(PGW_CANSample), &sample_access};
+            _Alignof(PGW_CANSample), &sample_access, &cat->view_contract};
         PGW_CANSample *queue_buffer;
         if (!PGW_CANSampleSeq_initialize(&cat->queue)) { status = PGW_FATAL; goto fail; }
         cat->queue_initialized = true;
@@ -885,5 +1064,12 @@ static const PGW_ConnectionI connection_iface = {
     get_reader, get_writer, close_connection
 };
 const PGW_AdapterI PGW_CANAdapter = {
-    PGW_ABI_VERSION, sizeof(PGW_AdapterI), "can", create, &connection_iface
+    .version = PGW_ABI_VERSION,
+    .size = sizeof(PGW_AdapterI),
+    .name = "can",
+    .create = create,
+    .connection = &connection_iface,
+#if defined(PGW_ENABLE_REMOTE_CONTROL)
+    .control = &can_control
+#endif
 };

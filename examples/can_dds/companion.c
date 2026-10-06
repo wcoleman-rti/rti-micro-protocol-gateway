@@ -25,7 +25,7 @@ static PGW_Status copy(const PGW_Sample *sample, void *out, size_t size)
     return PGW_OK;
 }
 static const PGW_SampleAccessI access_i = {
-    PGW_ABI_VERSION, sizeof(PGW_SampleAccessI), copy, NULL};
+    PGW_ABI_VERSION, sizeof(PGW_SampleAccessI), copy, NULL, NULL};
 int main(int argc, char **argv)
 {
     const size_t storage_capacity = 131072;

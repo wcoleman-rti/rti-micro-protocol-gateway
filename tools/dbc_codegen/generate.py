@@ -302,7 +302,8 @@ PGW_CodecStatus PGW_codec_patch(const PGW_Signal *signal, uint8_t *baseline, siz
             "true" if m["extended"] else "false", "true" if m["fd"] else "false", str(m["signal_count"])]) + "},")
     tables.extend(["};", f"const size_t PGW_codec_message_count = {len(messages)};"])
     source = Path(__file__).with_name("codec.c.in").read_text().replace("/*TABLES*/", "\n".join(tables))
-    idl = (Path(__file__).resolve().parents[2] / "resources" / "signal.idl").read_text()
+    idl = (Path(__file__).resolve().parents[2] / "bindings" / "signal" / "idl" /
+           "signal.idl").read_text()
     for name, text in (("pgw_codec.h", header), ("pgw_codec.c", source), ("signals.idl", idl),
                        ("manifest.json", json.dumps(manifest, sort_keys=True, indent=2) + "\n")):
         output.joinpath(name).write_text(text, encoding="utf-8", newline="\n")

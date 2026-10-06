@@ -13,9 +13,18 @@
 # Core contracts
 
 `PGW_Sample` is incomplete. Only a negotiated representation accessor may
-interpret a sample. Schema name, version and fingerprint must all match.
-No payload/metadata tuple, per-sample operations table, forwarding queue or
-runtime discovery is part of the routing core.
+interpret a sample. The core validates each representation but delegates
+source/destination compatibility to the destination writer's `bind` operation.
+An adapter without an explicit translator should continue to require exact
+schema name, version, and fingerprint equality.
+An adapter may expose a borrowed `PGW_SampleView` containing its native sample
+and associated context; a static view contract declares the kind, payload
+identity/size, and context identity before the writer binds. The runtime view
+must match that contract and remains valid only until the source loan is
+returned. The routing core does not serialize, copy, retain, or interpret the
+view. Sample-access ABI version 2 adds this contract; adapters must be rebuilt
+against the matching interface. No per-sample operations table, forwarding
+queue or runtime discovery is part of the routing core.
 
 Readers fill the route's fixed `PGW_SampleSeq` pointer array. `OK` creates an
 adapter loan, including an empty sequence; `NO_DATA` does not. Every successful
@@ -36,12 +45,48 @@ the affected samples; fatal read/write/return failures fault that route with
 must not assume service-wide shutdown or retry.
 Route faults have their own counter, distinct from per-sample fatal write
 outcomes; faulting a route does not double-count a rejected sample.
+`PGW_Route_pause` excludes a ready/running route from routing without changing
+the service's round-robin schedule; `PGW_Route_resume` makes it eligible for
+the next step. Both are synchronous and allocation-free. Repeating either
+action returns `PGW_NO_CHANGE`, allowing a control layer to avoid publishing
+duplicate state changes. A faulted route cannot be resumed.
+
+`PGW_ENABLE_ROUTE_LATENCY_METRICS` is a default-OFF compile-time option. When
+enabled, a service must supply its monotonic `clock_ns` callback before
+initialization. Each non-empty batch with a completed writer call contributes
+one batch observation measured from immediately before the reader callback to
+immediately after the writer callback returns. The fixed-size atomic
+`PGW_RouteLatencySnapshot` reports batch/sample/outcome counts, duration count,
+sum, min/max, clock failures, and a 32-bucket histogram. Every completed writer
+call is counted, including batches containing backpressure, invalid, or fatal
+outcomes; outcome totals are reported separately. No-data reads and batches
+that never invoke the writer do not contribute latency observations. Clock
+failure or a backwards reading is counted and omits that duration; the timing
+failure itself does not fault the route. Existing diagnostic timestamp failures
+remain separately observable through their existing service status.
+The snapshot API allocates nothing and adds no DDS/remote-control endpoint.
+Metrics are absent, including timing calls and per-route storage, when the
+option is OFF.
+
+With `PGW_ENABLE_REMOTE_CONTROL`, a service may freeze a borrowed control
+resource catalog and nonblocking endpoint before initialization. A step takes at
+most `PGW_CONTROL_MAX_COMMANDS_PER_STEP` commands, applies explicit actions,
+publishes results with source correlation metadata, then visits routes. Route
+actions use the same pause/resume operations above; adapter actions use optional
+versioned operation tables and are checked against their declared capability
+mask. Initialization seeds one state snapshot per selected resource. Failed
+state writes leave only the latest snapshot dirty; a step retries at most one
+dirty resource. Failed result writes are counted and are not retried, so they do
+not imply controller delivery. `PGW_Service_control_counters` copies the
+bounded local counters without adding another DDS endpoint. When the feature is
+compiled but no control catalog is configured, service stepping performs no
+control reads or writes.
 
 Storage comes from caller arrays or a checked, initialization-only arena.
 There is no runtime resizing or fallback allocator. Interface ABI versions,
-required callbacks, capacities, duplicate registrations and exact schemas are
-validated before READY. Registries are frozen by the embedding application
-after static registration.
+required callbacks, capacities, duplicate registrations, and writer-negotiated
+source compatibility are validated before READY. Registries are frozen by the
+embedding application after static registration.
 Adapter/binding registries and route catalogs are `PGW_AdapterSeq`,
 `PGW_RepresentationSeq` and `PGW_RouteSeq`. Their initialization functions
 accept native typed sequence views over caller-provisioned storage.

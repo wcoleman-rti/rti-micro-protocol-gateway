@@ -18,7 +18,7 @@ after a build; component test names identify their requirement scope.
 
 | Requirement | Verification | Observable / remaining scope |
 | --- | --- | --- |
-| CORE-OPAQUE | core requirement executable | Negotiated accessors, exact schema rejection, fixed native pointer sequence |
+| CORE-OPAQUE | core requirement executable | Negotiated accessors, writer-owned source compatibility (the fake writer rejects mismatched schemas; DDS bindings may explicitly negotiate views), fixed native pointer sequence |
 | CORE-LOAN | core requirement executable | Normal, empty, NO_DATA, invalid, backpressure and fatal writes return exactly once |
 | CORE-FAIR | core requirement executable | 10,000 steps; saturated route does not stop second route |
 | CORE-BOUNDS | core requirement executable | Arithmetic overflow, arena alignment/exhaustion, registry freeze, no sequence growth |
@@ -30,7 +30,8 @@ after a build; component test names identify their requirement scope.
 | PERF-CORE | core benchmark smoke | Exact counts and loan balance; bounded timing capture; zero runtime allocation |
 | CODEC | `pgw_codegen_host`, `pgw_codec_golden`, `pgw_signal_dds_conversion` | Reproducible build-only generation, strict rejection, golden endian/mux/FD/extended bytes, exact int64 boundaries and generated DDS conversions |
 | CAN | `can.bounded_mapping`, `can.socket_errors` | Baselines, byte preservation, loan lifetime, partial sends/rollback, bounded transport, metadata and explicit command/error outcomes |
-| DDS/MAG | `dds.real_gateway`, `config.actual_mag`, `dds.companion_processes`, `config.strict_xml` | Real bidirectional gateway traffic, second schema, timestamp policy, diagnostics subscriber, effective MAG resources and separate processes |
+| DDS/MAG | `dds.real_gateway`, `config.actual_mag`, `dds.companion_processes`, `config.strict_xml` | Real bidirectional gateway traffic, cross-schema CAN-to-DDS bind negotiation, timestamp policy, diagnostics subscriber, effective MAG resources, separate processes, and target direct-vs-canonical DDS write timing; the route-latency build additionally compares `write-view` and canonical fallback batches |
+| Remote control | `dds.remote_control_roundtrip`, `REQ_CORE_ROUTING_LOANS_ALLOCATION_DIAGNOSTICS`, `config.strict_xml` | Startup-selected dedicated participant/domain, bounded commands, keyed transient-local state, correlated result, state retry and adapter-manifest validation |
 | BUILD | `build.rti_launcher`, `core.runtime_lifecycle` | Persistent JRE/warning policy, initialization-created parked runner using RTI OSAPI, no allocations during activation/first/repeated steps |
 | PERF-CAN | `REQ_BENCHMARK_CAN_SMOKE`, `REQ_BENCHMARK_CAN_COUNTER_ONLY` | Actual memory-CAN decode/core/patch pipeline, golden transmitted bytes, explicit backpressure and all wrapped allocator controls |
 | PERF-DDS | `REQ_BENCHMARK_DDS_SMOKE`, `REQ_BENCHMARK_DDS_COUNTER_ONLY` | Actual Micro/MAG gateway and companion over memory CAN, peer-observed DDS samples, separate accepted/offered/drop units and opt-in portable timestamp preservation |

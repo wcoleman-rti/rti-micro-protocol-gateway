@@ -12,6 +12,9 @@
 
 add_library(pgw_adapter_can STATIC src/can.c)
 add_library(PGW::adapter_can ALIAS pgw_adapter_can)
+set_property(TARGET pgw_adapter_can PROPERTY PGW_ADAPTER_MANIFEST
+    "${CMAKE_CURRENT_SOURCE_DIR}/adapter.xml")
+pgw_generate_adapter_control_idl(pgw_adapter_can)
 target_include_directories(pgw_adapter_can PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>)

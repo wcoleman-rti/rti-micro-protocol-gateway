@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+<adapter name="can" version="1" control-api-version="1">
+  <control>
+    <capability kind="connection" actions="up|down"/>
+    <capability kind="input" actions="enable|disable"/>
+    <capability kind="output" actions="enable|disable"/>
+  </control>
+  <telemetry>
+    <metric resource-kind="connection" name="received_frames" scalar="uint64" unit="frames"/>
+  </telemetry>
+</adapter>

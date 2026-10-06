@@ -43,7 +43,12 @@ ctest --test-dir build --output-on-failure
 Supply the SDK's exact `RTIME_PIL_ARCH`, `RTIME_PSL_ARCH`, and
 `RTIME_TARGET_NAME`; the finder verifies those values against installed
 archives. SDK and Java locations are explicit inputs, not embedded defaults. The
-persisted launcher in
+`RTIME_TARGET_NAME` selects the installed Micro OSAPI/NETIO library profile; it
+does not require downstream gateway code to be compiled with a compiler of the
+same version encoded in that target name. GCC 13 or newer may compile the
+gateway and examples for the selected profile. The verified developer build
+uses GNU 15.2 with the Micro Linux6 library profile.
+The persisted launcher in
 `build/pgw-tools` embeds the configured JRE, so subsequent builds work even with
 `JREHOME` unset in the shell. Generator outputs stay in the build tree.
 `PGW_PYTHON_EXECUTABLE` explicitly selects one interpreter for every host
@@ -69,6 +74,9 @@ rescan linker, or mismatched Debug/Release selection is an error, not a fallback
 | --- | --- | --- |
 | `PGW_ENABLE_CAN` | ON | CAN adapter and memory/SocketCAN transports |
 | `PGW_ENABLE_DDS` | ON | Real Micro DDS adapter, Appgen and discovery |
+| `PGW_ENABLE_REMOTE_CONTROL` | OFF | Opt-in control IDL/core interface; requires DDS |
+| `PGW_ENABLE_ROUTE_LATENCY_METRICS` | OFF | Compile bounded per-route batch latency statistics; requires a monotonic service clock |
+| `PGW_REMOTE_CONTROL_MAX_CONTROLLERS` | 1 | Compile-time bound for control-domain peers (1..32) |
 | `PGW_BUILD_TESTS` | ON | Requirement verification, including core runtime lifecycle |
 | `PGW_BUILD_EXAMPLES` | ON | Runnable examples |
 | `PGW_BUILD_BENCHMARKS` | OFF | Benchmark workloads |
@@ -109,6 +117,13 @@ pgw_micro_codegen(
   DEPENDS "${imported_idl}")
 # Returns SIGNALS_C_SOURCES and SIGNALS_C_HEADERS; always C, Micro,
 # non-interpreted support (-interpreted 0).
+
+pgw_micro_convert(
+  FROM IDL TO XML INPUT "${schema}"
+  OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated"
+  VAR TYPE_MODEL
+  DEPENDS "${schema_target}")
+# TYPE_MODEL is the build-time rtiddsgen XML representation of the IDL types.
 
 pgw_micro_appgen(
   XML_FILE "${system_xml}"
@@ -194,9 +209,6 @@ cmake -S . -B build-package -DCMAKE_BUILD_TYPE=Release \
   -DRTIME_PSL_ARCH="<installed PSL architecture>" \
   -DRTIME_TARGET_NAME="<installed target name>" \
   -DPGW_JREHOME="<installed Java 17 runtime>" \
-  -DRTIME_PIL_ARCH="<installed PIL architecture>" \
-  -DRTIME_PSL_ARCH="<installed PSL architecture>" \
-  -DRTIME_TARGET_NAME="<installed target name>" \
   -DPGW_BUILD_TESTS=OFF -DPGW_BUILD_EXAMPLES=OFF \
   -DCMAKE_INSTALL_PREFIX="$PWD/build-package/package-prefix"
 cmake --build build-package --parallel

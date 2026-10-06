@@ -39,6 +39,10 @@ macro(pgw_micro_codegen)
     connextdds_rtiddsgen_run(MICRO LANG C EXTRA_ARGS -interpreted 0 ${ARGN})
 endmacro()
 
+macro(pgw_micro_convert)
+    connextdds_rtiddsgen_convert(MICRO ${ARGN})
+endmacro()
+
 macro(pgw_micro_appgen)
     connextdds_rtiddsmag_run(LANG C ${ARGN})
 endmacro()

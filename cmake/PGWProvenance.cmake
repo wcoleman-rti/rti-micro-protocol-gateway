@@ -54,7 +54,7 @@ function(pgw_generate_provenance)
         _pgw_provenance_string("${CMAKE_C_FLAGS_${_configuration}}"
             build flags "${_configuration}")
     endforeach()
-    foreach(_option IN ITEMS PGW_ENABLE_CAN PGW_ENABLE_DDS PGW_ENABLE_RUNNER
+    foreach(_option IN ITEMS PGW_ENABLE_CAN PGW_ENABLE_DDS PGW_ENABLE_REMOTE_CONTROL PGW_ENABLE_RUNNER
             PGW_BUILD_TESTS PGW_BUILD_EXAMPLES PGW_BUILD_BENCHMARKS
             PGW_WARNINGS_AS_ERRORS PGW_GENERATOR_WARNINGS_AS_ERRORS)
         if(${_option})
@@ -65,6 +65,8 @@ function(pgw_generate_provenance)
         string(JSON _provenance SET "${_provenance}" build options "${_option}" ${_boolean})
     endforeach()
     _pgw_provenance_string("${PGW_GENERATOR_WARNING_ALLOW_REGEX}" build generator_warning_allow_regex)
+    _pgw_provenance_string("${PGW_REMOTE_CONTROL_MAX_CONTROLLERS}"
+        build remote_control_max_controllers)
     if(CMAKE_CONFIGURATION_TYPES)
         set(PGW_PROVENANCE_FILE "${CMAKE_BINARY_DIR}/$<CONFIG>/provenance.json")
     else()

@@ -67,9 +67,37 @@ int main(void)
     PGW_CANMemory memory;
     PGW_CANFrame rx[1], tx[1];
     PGW_CANSocket socket = {.fd = -1};
+    PGW_Route uninitialized_route = {0};
+    PGW_SampleView sample_view = {
+        .kind = PGW_SAMPLE_VIEW_CANONICAL,
+        .value = &records[0],
+        .value_size = sizeof(records[0])
+    };
+#if defined(PGW_ENABLE_REMOTE_CONTROL)
+    PGW_DDSRemoteControlOptions control_options = {
+        PGW_DDS_REMOTE_CONTROL_OPTIONS_VERSION,
+        sizeof(PGW_DDSRemoteControlOptions), false, 0, 0
+    };
+#endif
     PGW_Status (*volatile sink_initialize)(PGW_LocalSink *, int, char *, size_t)
         = PGW_LocalSink_initialize;
     (void)sink_initialize;
+    if (!sample_view.value || sample_view.kind != PGW_SAMPLE_VIEW_CANONICAL)
+        return 7;
+#if defined(PGW_ENABLE_ROUTE_LATENCY_METRICS)
+    PGW_RouteLatencySnapshot latency_snapshot;
+    if (PGW_Route_latency_snapshot(&uninitialized_route, &latency_snapshot) != PGW_INVALID)
+        return 8;
+#endif
+    if (PGW_Route_pause(&uninitialized_route) != PGW_INVALID ||
+        PGW_Route_resume(&uninitialized_route) != PGW_INVALID ||
+        PGW_status_name(PGW_NO_CHANGE) == NULL) {
+        return 5;
+    }
+#if defined(PGW_ENABLE_REMOTE_CONTROL)
+    if (PGW_DDS_remote_control_options_validate(&control_options, false, 0) != PGW_OK)
+        return 6;
+#endif
     if (!PGW_Runtime_initialize() ||
         !PGW_SampleSeq_initialize(&samples) ||
         !PGW_SampleSeq_finalize(&samples)) {

@@ -85,7 +85,7 @@ int main(void)
     atomic_init(&calls, 0);
     const PGW_Schema schema = {"runner-test", 1, "runner-test-v1"};
     const PGW_Representation representation = {
-        &schema, "runner-test", sizeof(int), _Alignof(int), NULL};
+        &schema, "runner-test", sizeof(int), _Alignof(int), NULL, NULL};
     const PGW_StreamReaderI reader = {
         PGW_ABI_VERSION, sizeof(PGW_StreamReaderI), read_empty, return_empty};
     const PGW_StreamWriterI writer = {

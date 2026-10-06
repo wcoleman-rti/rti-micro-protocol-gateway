@@ -37,6 +37,14 @@ static uint64_t now_ns(void)
     return (uint64_t)t.tv_sec * UINT64_C(1000000000) + (uint64_t)t.tv_nsec;
 }
 
+static bool service_clock(void *context, uint64_t *nanoseconds)
+{
+    (void)context;
+    if (!nanoseconds) return false;
+    *nanoseconds = now_ns();
+    return *nanoseconds != 0;
+}
+
 static void observe(Histogram *h, uint64_t duration)
 {
     unsigned bucket = 0;
@@ -192,7 +200,10 @@ int main(int argc, char **argv)
                                         &route_result_storage) == PGW_OK);
     assert(PGW_RouteSeq_initialize(&route_sequence));
     assert(PGW_RouteSeq_loan_contiguous(&route_sequence, &route, 1, 1));
-    PGW_Service service = {.route_budget = 1, .sample_budget = 4};
+    PGW_Service service = {
+        .route_budget = 1, .sample_budget = 4,
+        .clock_ns = service_clock
+    };
     assert(PGW_Service_set_routes(&service, &route_sequence) == PGW_OK);
     assert(PGW_Service_initialize(&service) == PGW_OK);
     PGW_StreamReader baseline_reader;

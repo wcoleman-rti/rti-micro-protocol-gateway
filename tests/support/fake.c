@@ -14,6 +14,19 @@
 #include <string.h>
 #include <stdlib.h>
 
+#if defined(PGW_ENABLE_ROUTE_LATENCY_METRICS)
+static atomic_uint_fast64_t test_clock_value;
+
+static bool test_clock(void *state, uint64_t *nanoseconds)
+{
+    (void)state;
+    if (!nanoseconds) return false;
+    *nanoseconds = atomic_fetch_add_explicit(&test_clock_value, 1000,
+                                             memory_order_relaxed) + 1000;
+    return true;
+}
+#endif
+
 static PGW_Status copy_value(const PGW_Sample *sample, void *out, size_t bytes)
 {
     if (!sample || !out || bytes != sizeof(PGW_TestValue)) return PGW_INVALID;
@@ -23,10 +36,11 @@ static PGW_Status copy_value(const PGW_Sample *sample, void *out, size_t bytes)
 
 static const PGW_Schema schema = {"test.counter", 1, "integer-key-u64-v1"};
 static const PGW_SampleAccessI sample_access = {
-    PGW_ABI_VERSION, sizeof(PGW_SampleAccessI), copy_value, NULL
+    PGW_ABI_VERSION, sizeof(PGW_SampleAccessI), copy_value, NULL, NULL
 };
 const PGW_Representation PGW_test_representation = {
-    &schema, "test.counter.native", sizeof(PGW_TestValue), _Alignof(PGW_TestValue), &sample_access
+    &schema, "test.counter.native", sizeof(PGW_TestValue),
+    _Alignof(PGW_TestValue), &sample_access, NULL
 };
 
 static PGW_Status read_samples(void *state, PGW_SampleSeq *seq, size_t budget)
@@ -57,7 +71,10 @@ static PGW_Status return_samples(void *state, PGW_SampleSeq *seq)
 static PGW_Status bind(void *state, const PGW_Representation *representation)
 {
     PGW_TestWriter *w = state;
-    if (!representation->access || !representation->access->copy_value) return PGW_UNSUPPORTED;
+    if (!representation || !w->target_schema ||
+        !PGW_schema_equal(representation->schema, w->target_schema) ||
+        !representation->access || !representation->access->copy_value)
+        return PGW_UNSUPPORTED;
     w->source = representation;
     return PGW_OK;
 }
@@ -99,6 +116,7 @@ void PGW_test_route(PGW_Route *route, uint32_t id, PGW_TestReader *reader,
         .reader = {reader, &PGW_test_reader_iface, &PGW_test_representation},
         .writer = {writer, &PGW_test_writer_iface, &PGW_test_representation}
     };
+    writer->target_schema = PGW_test_representation.schema;
     if (PGW_test_route_initialize_storage(route, refs, results, capacity) != PGW_OK) abort();
 }
 
@@ -137,6 +155,9 @@ PGW_Status PGW_test_service_set_routes(PGW_Service *service, PGW_Route *routes,
         (void)PGW_RouteSeq_finalize(&sequence);
         return PGW_CAPACITY;
     }
+#if defined(PGW_ENABLE_ROUTE_LATENCY_METRICS)
+    if (!service->clock_ns) service->clock_ns = test_clock;
+#endif
     PGW_Status status = PGW_Service_set_routes(service, &sequence);
     if (!PGW_RouteSeq_unloan(&sequence) || !PGW_RouteSeq_finalize(&sequence))
         return PGW_LOAN_ERROR;

@@ -16,6 +16,8 @@
 
 - [Build configuration](docs/build.md)
 - [Core contracts](docs/core.md)
+- [Developing adapters and DDS bindings](docs/developing-adapters.md)
+- [DDS remote control](docs/remote-control.md)
 - [Typed sequences](docs/sequences.md)
 - [Testing](docs/testing.md)
 - [Limitations](docs/limitations.md)

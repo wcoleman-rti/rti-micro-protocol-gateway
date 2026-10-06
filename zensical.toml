@@ -19,6 +19,8 @@ nav = [
   { "Guides" = [
     { "Build configuration" = "docs/build.md" },
     { "Core contracts" = "docs/core.md" },
+    { "Adapter and DDS binding development" = "docs/developing-adapters.md" },
+    { "DDS remote control" = "docs/remote-control.md" },
     { "Typed sequences" = "docs/sequences.md" },
     { "Testing" = "docs/testing.md" },
     { "Limitations" = "docs/limitations.md" },
@@ -31,5 +33,10 @@ nav = [
   ] },
   { "Resources" = [
     { "CAN adapter README" = "adapters/can/README.md" },
+    { "Connext Micro adapter README" = "adapters/dds/connext_micro/README.md" },
+    { "DBC code generator README" = "tools/dbc_codegen/README.md" },
+  ] },
+  { "Examples" = [
+    { "CAN / DDS gateway" = "examples/can_dds/README.md" },
   ] },
 ]

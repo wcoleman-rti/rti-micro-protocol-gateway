@@ -14,7 +14,11 @@ set -eu
 rm -rf build/docs-source
 mkdir -p build/docs-source
 doxygen Doxyfile
-mkdir -p build/docs-source/docs build/docs-source/adapters/can
+mkdir -p build/docs-source/docs \
+    build/docs-source/adapters/can \
+    build/docs-source/adapters/dds/connext_micro \
+    build/docs-source/examples/can_dds \
+    build/docs-source/tools/dbc_codegen
 for page in docs/*.md; do
     if [ "$page" = "docs/index.md" ]; then
         continue
@@ -23,4 +27,8 @@ for page in docs/*.md; do
 done
 cp docs/index.md LICENSE build/docs-source/
 cp adapters/can/README.md build/docs-source/adapters/can/
+cp adapters/dds/connext_micro/README.md \
+    build/docs-source/adapters/dds/connext_micro/
+cp examples/can_dds/README.md build/docs-source/examples/can_dds/
+cp tools/dbc_codegen/README.md build/docs-source/tools/dbc_codegen/
 zensical build --clean --strict

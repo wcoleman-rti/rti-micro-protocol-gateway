@@ -15,10 +15,10 @@
 Install the pinned host dependency into the project's selected environment:
 
 ```sh
-.venv/bin/pip install -r tools/config_codegen/requirements.txt
+.venv/bin/python -m pip install -r tools/config_codegen/requirements.txt
 ```
 
-`config_codegen.py` validates `resources/gateway.xsd` with lxml, then applies
+`config_codegen.py` validates `resources/schema/gateway.xsd` with lxml, then applies
 semantic checks before emitting C. The parser rejects DTD/entities, unknown
 elements/attributes, duplicate IDs/native endpoints, unresolved participants,
 topics/types/bindings/routes, role mismatch, stale mapping fingerprints,
@@ -34,6 +34,21 @@ CAN transports are supplied by the application; the XML never secretly chooses
 a physical interface. Generated native capacities, CAN polling/write budgets,
 route graph, scheduler budgets, and diagnostics period are consumed by the example.
 This is not Routing Service XML or a general runtime configuration loader.
+
+`PGW_ENABLE_REMOTE_CONTROL` is a compile-time option, defaults OFF, and requires
+the DDS adapter. With it enabled, the example compiler emits a deterministic
+service-specific `Resource` enum and a flattened standalone controller IDL for
+the resources explicitly selected in `<control>`. Versioned adapter-library
+XML declares capabilities under `<adapter><control>` and individual metrics
+under `<adapter><telemetry>`. Capability `actions` are pipe-delimited (for
+example, `actions="up|down"`). The manifest is validated against the generated
+macros used by each adapter's runtime capability descriptor. The compiler
+rejects unlinked adapters, unsupported actions, invalid stream directions,
+duplicate selections, and normalized enum collisions. The common control IDL
+and `combine_idl.py` preserve include dependency order and reject missing/cyclic
+includes. A telemetry topic/writer is generated only when a declared metric is
+selected in the service XML. The feature-off build does not invoke control IDL
+generation.
 
 `dds_workload.py` substitutes category **key cardinalities** from the generated
 mapping inventory into a standard DDS XML template. It also includes/excludes
@@ -66,6 +81,24 @@ Explicit dependencies include mapping/IDL inputs, tool sources, XML templates,
 XSD, configured workload settings, and the persistent JRE-aware RTI launcher.
 Normal RTI warnings fail the build; Java/environment exceptions must be specific,
 reviewed, surfaced allowlist entries. The verified pipeline uses Java 17.
+
+For DDS bindings, the example runs `pgw_micro_convert(FROM IDL TO XML)` at build
+time. `dds_binding_codegen.py` reads that RTI-produced type model and the
+generated gateway binding declarations to emit typed Micro reader/writer,
+sequence, loan-return, and `PGW_DDSBinding` glue. `conversion="fieldwise"`
+generates a canonical scalar struct and matching-name conversion with compile-
+time type checks; `conversion="callbacks"` connects explicit semantic mapping
+functions. Key-registration values for a single scalar key can be generated;
+composite or application-policy keys use a callback. An identical generated
+DDS type can opt into `direct-native-write="true"`; callback-based conversion
+also requires `validate-native`. The DDS adapter compares generated plugin
+identity in the borrowed sample view and calls the typed writer directly,
+regardless of schema labels. For cross-schema translation, pair `bind-view`
+and `write-view`: bind-view must validate the source representation's static
+view contract before READY; write-view translates that borrowed payload/context
+to the generated DDS type. Canonical conversion fallback is available only
+when the schemas match. Neither path bypasses Micro's own history/serialization
+work.
 
 Tests: `config.strict_xml` covers grammar/references/policies/bounds;
 `config.actual_mag` runs the actual installed MAG, demonstrates topology-resource

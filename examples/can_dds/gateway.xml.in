@@ -12,11 +12,11 @@
 -->
 
 <gateway dds="dds.xml" route-budget="4" sample-budget="8" diagnostic-period-steps="1000">
-  <binding id="powertrain" symbol="PGW_signal_dds_binding_powertrain" type="PGW_DDS::Signal" schema="pgw.signal" fingerprint="@fingerprint@"/>
-  <binding id="auxiliary" symbol="PGW_signal_dds_binding_auxiliary" type="PGW_DDS::Signal" schema="pgw.signal" fingerprint="@fingerprint@"/>
-  <binding id="probe" symbol="PGW_probe_binding" type="PGWTest::Probe" schema="pgw.probe" fingerprint="@probe_fingerprint@"/>
-  <binding id="diagnostics" symbol="PGW_diagnostics_binding" type="PGWManagement::Snapshot" schema="pgw.diagnostics" fingerprint="@diagnostics_fingerprint@"/>
-  <connection id="gateway" participant="GatewayParticipants::Gateway">
+  <binding id="powertrain" symbol="PGW_signal_dds_binding_powertrain" type="PGW_DDS::Signal" schema="pgw.signal" fingerprint="@fingerprint@" schema-version="1" representation-name="signal.native" native-type="PGW_Signal" native-header="pgw/signal.h" support-header="signalsSupport.h" conversion="callbacks" dds-to-native="PGW_signal_from_dds" native-to-dds="PGW_signal_to_dds" register-keys="PGW_signal_register_keys_powertrain" supports-timestamp="true" direct-native-write="true" validate-native="PGW_signal_validate_dds" bind-view="PGW_signal_bind_view" write-view="PGW_signal_write_view"/>
+  <binding id="auxiliary" symbol="PGW_signal_dds_binding_auxiliary" type="PGW_DDS::Signal" schema="pgw.signal" fingerprint="@fingerprint@" schema-version="1" representation-name="signal.native" native-type="PGW_Signal" native-header="pgw/signal.h" support-header="signalsSupport.h" conversion="callbacks" dds-to-native="PGW_signal_from_dds" native-to-dds="PGW_signal_to_dds" register-keys="PGW_signal_register_keys_auxiliary" supports-timestamp="true" direct-native-write="true" validate-native="PGW_signal_validate_dds" bind-view="PGW_signal_bind_view" write-view="PGW_signal_write_view"/>
+  <binding id="probe" symbol="PGW_probe_binding" type="PGWTest::Probe" schema="pgw.probe" fingerprint="@probe_fingerprint@" schema-version="1" representation-name="probe.native" native-type="PGW_ProbeValue" native-header="probe_binding.h" support-header="probeSupport.h" conversion="fieldwise" register-key-value="1" supports-timestamp="true" direct-native-write="true"/>
+  <binding id="diagnostics" symbol="PGW_diagnostics_binding" type="PGWManagement::Snapshot" schema="pgw.diagnostics" fingerprint="@diagnostics_fingerprint@" schema-version="1" representation-name="diagnostics.native" native-type="PGW_CounterSnapshot" native-header="pgw/diagnostics.h" support-header="diagnosticsSupport.h" conversion="callbacks" dds-to-native="PGW_diagnostics_from_dds" native-to-dds="PGW_diagnostics_to_dds" register-keys="PGW_diagnostics_register_keys" sample-copy="PGW_diagnostics_sample_copy"/>
+  <connection id="gateway" participant="GatewayParticipants::Gateway" adapter="connext_micro">
     <stream name="state_powertrain" endpoint="Out::StatePowertrain" binding="powertrain" role="writer" capacity="8"/>
     <stream name="state_auxiliary" endpoint="Out::StateAuxiliary" binding="auxiliary" role="writer" capacity="8"/>
     <stream name="command_powertrain" endpoint="In::CommandPowertrain" binding="powertrain" role="reader" capacity="8"/>
@@ -24,7 +24,7 @@
     <stream name="probe" endpoint="Out::Probe" binding="probe" role="writer" capacity="1" preserve-source-timestamp="true"/>
     <stream name="diagnostics" endpoint="Out::Diagnostics" binding="diagnostics" role="writer" capacity="4"/>
   </connection>
-  <connection id="companion" participant="GatewayParticipants::Companion">
+  <connection id="companion" participant="GatewayParticipants::Companion" adapter="connext_micro">
     <stream name="state_powertrain" endpoint="In::StatePowertrain" binding="powertrain" role="reader" capacity="8"/>
     <stream name="state_auxiliary" endpoint="In::StateAuxiliary" binding="auxiliary" role="reader" capacity="8"/>
     <stream name="command_powertrain" endpoint="Out::CommandPowertrain" binding="powertrain" role="writer" capacity="8"/>

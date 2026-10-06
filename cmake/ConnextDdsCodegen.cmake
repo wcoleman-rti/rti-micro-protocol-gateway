@@ -977,7 +977,7 @@ function(connextdds_rtiddsgen_convert)
     else()
         # CodeGen 2 has the other bug, it can't parse a file from the
         # working directory. Reference: CODEGENII-877
-        set(input_dir)
+        set(input_dir "${CMAKE_CURRENT_BINARY_DIR}")
         set(input_name ${_CODEGEN_INPUT})
     endif()
 
