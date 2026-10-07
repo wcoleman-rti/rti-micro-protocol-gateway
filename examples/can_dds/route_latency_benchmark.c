@@ -7,22 +7,18 @@
  * of any type, including any warranty for fitness for any purpose.
  */
 
-#define _POSIX_C_SOURCE 200809L
+#include "pgw/atomic.h"
 #include "route_latency_benchmark.h"
 #include "pgw/dds/connext_micro.h"
+#include "pgw/runtime.h"
 #include "pgw/signal.h"
 #include "osapi/osapi_thread.h"
 #include <stdio.h>
-#include <time.h>
 
 bool PGW_example_route_latency_clock(void *context, uint64_t *out)
 {
-    struct timespec now;
     (void)context;
-    if (!out || clock_gettime(CLOCK_MONOTONIC, &now) != 0) return false;
-    *out = (uint64_t)now.tv_sec * UINT64_C(1000000000) +
-        (uint64_t)now.tv_nsec;
-    return true;
+    return PGW_Runtime_monotonic_time_ns(out);
 }
 
 static int run_can_route_batches(PGW_Service *service, PGW_Connection *can,
@@ -33,15 +29,15 @@ static int run_can_route_batches(PGW_Service *service, PGW_Connection *can,
     if (!PGW_SessionSeq_get_length(&service->sessions)) return 1;
     PGW_Session *session = PGW_SessionSeq_get_reference(&service->sessions, 0);
     for (size_t i = 0; i < batches; ++i) {
-        uint64_t target = atomic_load_explicit(&session->dispatched_routes,
-                                                memory_order_acquire) + 1;
+        uint64_t target = PGW_ATOMIC_LOAD(&session->dispatched_routes,
+                                                OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) + 1;
         if (PGW_CANMemory_inject(transport, frame) != PGW_OK) return 1;
         for (unsigned attempt = 0; attempt < 2000 &&
-             atomic_load_explicit(&session->dispatched_routes,
-                                  memory_order_acquire) < target; ++attempt)
+             PGW_ATOMIC_LOAD(&session->dispatched_routes,
+                                  OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) < target; ++attempt)
             OSAPI_Thread_sleep(1);
-        if (atomic_load_explicit(&session->dispatched_routes,
-                                 memory_order_acquire) < target)
+        if (PGW_ATOMIC_LOAD(&session->dispatched_routes,
+                                 OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) < target)
             return 1;
     }
     return 0;

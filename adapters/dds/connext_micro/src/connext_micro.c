@@ -10,6 +10,7 @@
  * the software.
  */
 
+#include "pgw/atomic.h"
 #include "pgw/dds/connext_micro.h"
 #include "app_gen/app_gen_plugin.h"
 #include "dds_c/dds_c_rh_plugin.h"
@@ -49,12 +50,12 @@ typedef struct PGW_DDSEndpoint {
     bool loaned;
     PGW_SampleSeq *loan;
     struct DDS_DataReaderListener listener;
-    _Atomic(const PGW_ReaderListener *) listener_target;
-    atomic_uint callbacks_inflight;
+    PGW_ATOMIC(const PGW_ReaderListener *) listener_target;
+    PGW_ATOMIC(RTI_UINT32) callbacks_inflight;
     bool listener_installed;
     PGW_DDSStatistics statistics;
-    atomic_bool input_enabled;
-    atomic_bool output_enabled;
+    PGW_ATOMIC(RTI_UINT32) input_enabled;
+    PGW_ATOMIC(RTI_UINT32) output_enabled;
     OSAPI_Mutex_T *mutex;
 } PGW_DDSEndpoint;
 
@@ -62,27 +63,28 @@ static void dds_reader_data_available(void *opaque, DDS_DataReader *reader)
 {
     PGW_DDSEndpoint *endpoint = opaque;
     if (!endpoint || endpoint->reader != reader) return;
-    atomic_fetch_add_explicit(&endpoint->callbacks_inflight, 1,
-                              memory_order_acq_rel);
-    const PGW_ReaderListener *listener = atomic_load_explicit(
-        &endpoint->listener_target, memory_order_acquire);
+    PGW_ATOMIC_ADD(&endpoint->callbacks_inflight, 1,
+                              OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE_RELEASE);
+    const PGW_ReaderListener *listener =
+        (const PGW_ReaderListener *)PGW_ATOMIC_LOAD(
+            &endpoint->listener_target, OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE);
     if (listener) listener->on_data_available(listener->context);
-    atomic_fetch_sub_explicit(&endpoint->callbacks_inflight, 1,
-                              memory_order_release);
+    PGW_ATOMIC_SUB(&endpoint->callbacks_inflight, 1,
+                              OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE_RELEASE);
 }
 
 static PGW_Status clear_dds_reader_listener(PGW_DDSEndpoint *endpoint)
 {
     if (!endpoint || !endpoint->reader) return PGW_INVALID;
-    atomic_store_explicit(&endpoint->listener_target, NULL,
-                          memory_order_release);
+    PGW_ATOMIC_STORE(&endpoint->listener_target, NULL,
+                          OSAPI_ATOMIC_MEMORY_ORDER_RELEASE);
     struct DDS_DataReaderListener empty =
         DDS_DataReaderListener_INITIALIZER;
     if (DDS_DataReader_set_listener(endpoint->reader, &empty,
                                     DDS_STATUS_MASK_NONE) != DDS_RETCODE_OK)
         return PGW_IO_ERROR;
-    while (atomic_load_explicit(&endpoint->callbacks_inflight,
-                                memory_order_acquire))
+    while (PGW_ATOMIC_LOAD(&endpoint->callbacks_inflight,
+                                OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE))
         OSAPI_Thread_sleep(1);
     endpoint->listener_installed = false;
     return PGW_OK;
@@ -101,7 +103,7 @@ typedef struct PGW_DDSConnection {
     size_t storage_bytes;
     bool endpoints_initialized;
     bool endpoints_borrowed;
-    atomic_bool control_enabled;
+    PGW_ATOMIC(RTI_UINT32) control_enabled;
 } PGW_DDSConnection;
 #if defined(PGW_ENABLE_REMOTE_CONTROL)
 static const PGW_ControlAdapterI dds_control;
@@ -217,13 +219,15 @@ static void dds_control_data_available(void *opaque, DDS_DataReader *reader)
 {
     PGW_DDSControlTransport *transport = opaque;
     if (!transport || transport->command_reader != reader) return;
-    atomic_fetch_add_explicit(&transport->command_callbacks_inflight, 1,
-                              memory_order_acq_rel);
-    const PGW_ReaderListener *listener = atomic_load_explicit(
-        &transport->command_listener_target, memory_order_acquire);
+    PGW_ATOMIC_ADD(&transport->command_callbacks_inflight, 1,
+                              OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE_RELEASE);
+    const PGW_ReaderListener *listener =
+        (const PGW_ReaderListener *)PGW_ATOMIC_LOAD(
+            &transport->command_listener_target,
+            OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE);
     if (listener) listener->on_data_available(listener->context);
-    atomic_fetch_sub_explicit(&transport->command_callbacks_inflight, 1,
-                              memory_order_release);
+    PGW_ATOMIC_SUB(&transport->command_callbacks_inflight, 1,
+                              OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE_RELEASE);
 }
 
 static PGW_Status register_control_listener(
@@ -232,27 +236,27 @@ static PGW_Status register_control_listener(
     PGW_DDSControlTransport *transport = opaque;
     if (!transport || !transport->command_reader || !listener ||
         !listener->on_data_available ||
-        atomic_load_explicit(&transport->command_listener_target,
-                             memory_order_acquire))
+        PGW_ATOMIC_LOAD(&transport->command_listener_target,
+                             OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE))
         return PGW_INVALID;
     transport->command_listener = (struct DDS_DataReaderListener)
         DDS_DataReaderListener_INITIALIZER;
     transport->command_listener.as_listener.listener_data = transport;
     transport->command_listener.on_data_available =
         dds_control_data_available;
-    atomic_store_explicit(&transport->command_listener_target, listener,
-                          memory_order_release);
+    PGW_ATOMIC_STORE(&transport->command_listener_target, listener,
+                          OSAPI_ATOMIC_MEMORY_ORDER_RELEASE);
     if (DDS_DataReader_set_listener(transport->command_reader,
             &transport->command_listener, DDS_DATA_AVAILABLE_STATUS) !=
         DDS_RETCODE_OK) {
-        atomic_store_explicit(&transport->command_listener_target, NULL,
-                              memory_order_release);
+        PGW_ATOMIC_STORE(&transport->command_listener_target, NULL,
+                              OSAPI_ATOMIC_MEMORY_ORDER_RELEASE);
         struct DDS_DataReaderListener empty =
             DDS_DataReaderListener_INITIALIZER;
         (void)DDS_DataReader_set_listener(transport->command_reader, &empty,
                                            DDS_STATUS_MASK_NONE);
-        while (atomic_load_explicit(&transport->command_callbacks_inflight,
-                                    memory_order_acquire))
+        while (PGW_ATOMIC_LOAD(&transport->command_callbacks_inflight,
+                                    OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE))
             OSAPI_Thread_sleep(1);
         return PGW_IO_ERROR;
     }
@@ -266,19 +270,21 @@ static PGW_Status unregister_control_listener(
     PGW_DDSControlTransport *transport = opaque;
     if (!transport || !transport->command_reader || !listener)
         return PGW_INVALID;
-    const PGW_ReaderListener *registered = atomic_load_explicit(
-        &transport->command_listener_target, memory_order_acquire);
+    const PGW_ReaderListener *registered =
+        (const PGW_ReaderListener *)PGW_ATOMIC_LOAD(
+            &transport->command_listener_target,
+            OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE);
     if (!registered) return PGW_OK;
     if (registered != listener) return PGW_INVALID;
-    atomic_store_explicit(&transport->command_listener_target, NULL,
-                          memory_order_release);
+    PGW_ATOMIC_STORE(&transport->command_listener_target, NULL,
+                          OSAPI_ATOMIC_MEMORY_ORDER_RELEASE);
     struct DDS_DataReaderListener empty =
         DDS_DataReaderListener_INITIALIZER;
     if (DDS_DataReader_set_listener(transport->command_reader, &empty,
                                    DDS_STATUS_MASK_NONE) != DDS_RETCODE_OK)
         return PGW_IO_ERROR;
-    while (atomic_load_explicit(&transport->command_callbacks_inflight,
-                                memory_order_acquire))
+    while (PGW_ATOMIC_LOAD(&transport->command_callbacks_inflight,
+                                OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE))
         OSAPI_Thread_sleep(1);
     return PGW_OK;
 }
@@ -287,8 +293,10 @@ static PGW_Status control_rearm_commands(void *opaque)
 {
     PGW_DDSControlTransport *transport = opaque;
     if (!transport) return PGW_INVALID;
-    const PGW_ReaderListener *listener = atomic_load_explicit(
-        &transport->command_listener_target, memory_order_acquire);
+    const PGW_ReaderListener *listener =
+        (const PGW_ReaderListener *)PGW_ATOMIC_LOAD(
+            &transport->command_listener_target,
+            OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE);
     if (listener) listener->on_data_available(listener->context);
     return PGW_OK;
 }
@@ -453,8 +461,8 @@ PGW_Status PGW_DDS_control_transport_initialize(
     configured.telemetry_handle_count = telemetry_selected ? metric_count : 0;
     configured.initialized = true;
     *transport = configured;
-    atomic_init(&transport->command_listener_target, NULL);
-    atomic_init(&transport->command_callbacks_inflight, 0);
+    PGW_ATOMIC_INIT(&transport->command_listener_target, NULL);
+    PGW_ATOMIC_INIT(&transport->command_callbacks_inflight, 0);
     transport->command_listener = (struct DDS_DataReaderListener)
         DDS_DataReaderListener_INITIALIZER;
     return PGW_OK;
@@ -469,11 +477,11 @@ PGW_ControlEndpoint PGW_DDS_control_endpoint(PGW_DDSControlTransport *transport)
 PGW_Status PGW_DDS_control_transport_finalize(PGW_DDSControlTransport *transport)
 {
     if (!transport || !transport->initialized) return PGW_INVALID;
-    if (atomic_load_explicit(&transport->command_listener_target,
-                             memory_order_acquire))
+    if (PGW_ATOMIC_LOAD(&transport->command_listener_target,
+                             OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE))
         return PGW_INVALID;
-    while (atomic_load_explicit(&transport->command_callbacks_inflight,
-                                memory_order_acquire))
+    while (PGW_ATOMIC_LOAD(&transport->command_callbacks_inflight,
+                                OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE))
         OSAPI_Thread_sleep(1);
     *transport = (PGW_DDSControlTransport){0};
     return PGW_OK;
@@ -945,8 +953,9 @@ static PGW_Status release_failed_read(PGW_DDSEndpoint *ep, PGW_SampleSeq *seq,
 
 static void notify_dds_reader(PGW_DDSEndpoint *endpoint)
 {
-    const PGW_ReaderListener *listener = atomic_load_explicit(
-        &endpoint->listener_target, memory_order_acquire);
+    const PGW_ReaderListener *listener =
+        (const PGW_ReaderListener *)PGW_ATOMIC_LOAD(
+            &endpoint->listener_target, OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE);
     if (listener) listener->on_data_available(listener->context);
 }
 
@@ -960,9 +969,9 @@ static PGW_Status read_samples_impl(void *state, PGW_SampleSeq *seq,
         ++ep->statistics.loan_errors;
         return PGW_LOAN_ERROR;
     }
-    if (!atomic_load_explicit(&ep->connection->control_enabled,
-                              memory_order_acquire) ||
-        !atomic_load_explicit(&ep->input_enabled, memory_order_acquire))
+    if (!PGW_ATOMIC_LOAD(&ep->connection->control_enabled,
+                              OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) ||
+        !PGW_ATOMIC_LOAD(&ep->input_enabled, OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE))
         return PGW_NO_DATA;
     limit = budget < ep->config->capacity ? budget : ep->config->capacity;
     RTI_INT32 maximum = PGW_SampleSeq_get_maximum(seq);
@@ -1050,26 +1059,26 @@ static PGW_Status register_listener(void *state,
     PGW_DDSEndpoint *endpoint = state;
     if (!endpoint || !endpoint->reader || !listener ||
         !listener->on_data_available || endpoint->listener_installed ||
-        atomic_load_explicit(&endpoint->listener_target,
-                             memory_order_acquire))
+        PGW_ATOMIC_LOAD(&endpoint->listener_target,
+                             OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE))
         return PGW_INVALID;
     struct DDS_DataReaderListener configured =
         DDS_DataReaderListener_INITIALIZER;
     configured.as_listener.listener_data = endpoint;
     configured.on_data_available = dds_reader_data_available;
     endpoint->listener = configured;
-    atomic_store_explicit(&endpoint->listener_target, listener,
-                          memory_order_release);
+    PGW_ATOMIC_STORE(&endpoint->listener_target, listener,
+                          OSAPI_ATOMIC_MEMORY_ORDER_RELEASE);
     if (DDS_DataReader_set_listener(endpoint->reader, &endpoint->listener,
             DDS_DATA_AVAILABLE_STATUS) != DDS_RETCODE_OK) {
-        atomic_store_explicit(&endpoint->listener_target, NULL,
-                              memory_order_release);
+        PGW_ATOMIC_STORE(&endpoint->listener_target, NULL,
+                              OSAPI_ATOMIC_MEMORY_ORDER_RELEASE);
         struct DDS_DataReaderListener empty =
             DDS_DataReaderListener_INITIALIZER;
         (void)DDS_DataReader_set_listener(endpoint->reader, &empty,
                                            DDS_STATUS_MASK_NONE);
-        while (atomic_load_explicit(&endpoint->callbacks_inflight,
-                                    memory_order_acquire))
+        while (PGW_ATOMIC_LOAD(&endpoint->callbacks_inflight,
+                                    OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE))
             OSAPI_Thread_sleep(1);
         return PGW_IO_ERROR;
     }
@@ -1083,8 +1092,9 @@ static PGW_Status unregister_listener(void *state,
 {
     PGW_DDSEndpoint *endpoint = state;
     if (!endpoint || !endpoint->reader || !listener) return PGW_INVALID;
-    const PGW_ReaderListener *registered = atomic_load_explicit(
-        &endpoint->listener_target, memory_order_acquire);
+    const PGW_ReaderListener *registered =
+        (const PGW_ReaderListener *)PGW_ATOMIC_LOAD(
+            &endpoint->listener_target, OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE);
     if (!endpoint->listener_installed && !registered) return PGW_OK;
     if (registered != listener) return PGW_INVALID;
     return clear_dds_reader_listener(endpoint);
@@ -1141,9 +1151,9 @@ static PGW_Status write_samples_impl(void *state, const PGW_SampleSeq *seq,
     size_t count = (size_t)length;
     if (count > ep->config->capacity) return PGW_CAPACITY;
     if (!PGW_WriteResultSeq_set_length(results, length)) return PGW_INVALID;
-    if (!atomic_load_explicit(&ep->connection->control_enabled,
-                              memory_order_acquire) ||
-        !atomic_load_explicit(&ep->output_enabled, memory_order_acquire)) {
+    if (!PGW_ATOMIC_LOAD(&ep->connection->control_enabled,
+                              OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) ||
+        !PGW_ATOMIC_LOAD(&ep->output_enabled, OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE)) {
         for (size_t i = 0; i < count; ++i) {
             *PGW_WriteResultSeq_get_reference(results, (RTI_INT32)i) =
                 PGW_WRITE_BACKPRESSURE;
@@ -1423,11 +1433,11 @@ static PGW_Status control_apply(void *state, PGW_ControlAction action)
         PGW_DDSConnection *connection = state;
         if (!connection->participant) return PGW_INVALID;
         bool desired = action == PGW_CONTROL_CONNECTION_UP;
-        if (atomic_load_explicit(&connection->control_enabled,
-                                 memory_order_acquire) == desired)
+        if (PGW_ATOMIC_LOAD(&connection->control_enabled,
+                                 OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) == desired)
             return PGW_NO_CHANGE;
-        atomic_store_explicit(&connection->control_enabled, desired,
-                              memory_order_release);
+        PGW_ATOMIC_STORE(&connection->control_enabled, desired,
+                              OSAPI_ATOMIC_MEMORY_ORDER_RELEASE);
         return PGW_OK;
     }
     if (action == PGW_CONTROL_INPUT_ENABLE ||
@@ -1441,11 +1451,11 @@ static PGW_Status control_apply(void *state, PGW_ControlAction action)
             return PGW_INVALID;
         bool desired = action == PGW_CONTROL_INPUT_ENABLE ||
                        action == PGW_CONTROL_OUTPUT_ENABLE;
-        atomic_bool *enabled = input ? &endpoint->input_enabled :
+        PGW_ATOMIC(RTI_UINT32) *enabled = input ? &endpoint->input_enabled :
                                        &endpoint->output_enabled;
-        if (atomic_load_explicit(enabled, memory_order_acquire) == desired)
+        if (PGW_ATOMIC_LOAD(enabled, OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) == desired)
             return PGW_NO_CHANGE;
-        atomic_store_explicit(enabled, desired, memory_order_release);
+        PGW_ATOMIC_STORE(enabled, desired, OSAPI_ATOMIC_MEMORY_ORDER_RELEASE);
         return PGW_OK;
     }
     return PGW_UNSUPPORTED;
@@ -1509,7 +1519,7 @@ static PGW_Status create_connection(const void *configuration, PGW_Arena *arena,
     status = allocate(arena, 1, sizeof(*connection), (void **)&connection);
     if (status != PGW_OK) return status;
     memset(connection, 0, sizeof(*connection));
-    atomic_init(&connection->control_enabled, true);
+    PGW_ATOMIC_INIT(&connection->control_enabled, true);
     PGW_DDSEndpoint *endpoint_storage;
     status = allocate(arena, (size_t)endpoint_count, sizeof(PGW_DDSEndpoint),
                       (void **)&endpoint_storage);
@@ -1546,10 +1556,10 @@ static PGW_Status create_connection(const void *configuration, PGW_Arena *arena,
         const PGW_DDSTypeBinding *binding = ec->type_binding;
         ep->config = ec;
         ep->connection = connection;
-        atomic_init(&ep->listener_target, NULL);
-        atomic_init(&ep->callbacks_inflight, 0);
-        atomic_init(&ep->input_enabled, true);
-        atomic_init(&ep->output_enabled, true);
+        PGW_ATOMIC_INIT(&ep->listener_target, NULL);
+        PGW_ATOMIC_INIT(&ep->callbacks_inflight, 0);
+        PGW_ATOMIC_INIT(&ep->input_enabled, true);
+        PGW_ATOMIC_INIT(&ep->output_enabled, true);
         ep->mutex = OSAPI_Mutex_new();
         if (!ep->mutex) {status = PGW_FATAL; goto fail;}
         ep->type_identity = binding->type_identity();

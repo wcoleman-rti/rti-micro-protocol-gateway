@@ -10,8 +10,9 @@
  * the software.
  */
 
-#define _POSIX_C_SOURCE 200809L
+#include "pgw/atomic.h"
 #include "pgw/dds/connext_micro.h"
+#include "pgw/runtime.h"
 #include "pgw/can_memory.h"
 #include "pgw/runtime.h"
 #include "pgw/compiled_config.h"
@@ -27,26 +28,25 @@
 #include "allocation.h"
 #include "signalsSupport.h"
 #include "osapi/osapi_thread.h"
+#include "osapi/osapi_system.h"
 #if defined(PGW_ENABLE_ROUTE_LATENCY_METRICS)
 #include "route_latency_benchmark.h"
 #endif
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-#include <stdatomic.h>
-#include <time.h>
 
 extern const PGW_DDSConfig pgw_config_gateway, pgw_config_companion;
 #if defined(PGW_ENABLE_REMOTE_CONTROL)
 extern const size_t pgw_control_resource_count;
 #endif
-static atomic_bool frozen;
-static atomic_uint_fast64_t runtime_arena_calls;
+static PGW_ATOMIC(RTI_UINT32) frozen;
+static PGW_ATOMIC(RTI_UINT64) runtime_arena_calls;
 PGW_Status __real_PGW_Arena_allocate(PGW_Arena *, size_t, size_t, void **);
 PGW_Status __wrap_PGW_Arena_allocate(PGW_Arena *arena, size_t bytes,
                                     size_t alignment, void **out)
 {
-    if (atomic_load(&frozen)) atomic_fetch_add(&runtime_arena_calls, 1);
+    if (PGW_ATOMIC_LOAD_SEQ(&frozen)) PGW_ATOMIC_ADD_SEQ(&runtime_arena_calls, 1);
     return __real_PGW_Arena_allocate(arena, bytes, alignment, out);
 }
 #define CHECK(expression) do { if (!(expression)) { \
@@ -83,11 +83,7 @@ static const PGW_SampleAccessI probe_payload_only = {
 };
 static bool benchmark_clock_ns(uint64_t *out)
 {
-    struct timespec time;
-    if (!out || clock_gettime(CLOCK_MONOTONIC, &time) != 0) return false;
-    *out = (uint64_t)time.tv_sec * UINT64_C(1000000000) +
-        (uint64_t)time.tv_nsec;
-    return true;
+    return PGW_Runtime_monotonic_time_ns(out);
 }
 
 static PGW_CodecStatus decode(void *context, size_t index, const uint8_t *bytes,
@@ -141,8 +137,8 @@ static bool wait_route_counter(const PGW_Route *route, PGW_CounterId counter,
                                uint64_t expected)
 {
     for (unsigned attempt = 0; attempt < 1000; ++attempt) {
-        if (atomic_load_explicit(&route->counters.values[counter],
-                                 memory_order_acquire) >= expected)
+        if (PGW_ATOMIC_LOAD(&route->counters.values[counter],
+                                 OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) >= expected)
             return true;
         OSAPI_Thread_sleep(1);
     }
@@ -306,6 +302,7 @@ static int benchmark_dds_write_paths(PGW_Connection *gateway,
 
 int main(void)
 {
+    CHECK(PGW_Runtime_initialize());
     const size_t memory_capacity = 262144;
     void *memory = malloc(memory_capacity);
     CHECK(memory);
@@ -748,11 +745,11 @@ int main(void)
     CHECK(PGW_Service_start(&service) == PGW_OK);
     {
         void *control;
-        atomic_store(&frozen, true);
+        PGW_ATOMIC_STORE_SEQ(&frozen, true);
         CHECK(PGW_Arena_allocate(&arena, 1, 1, &control) == PGW_OK);
-        CHECK(atomic_load(&runtime_arena_calls) == 1);
-        atomic_store(&frozen, false);
-        atomic_store(&runtime_arena_calls, 0);
+        CHECK(PGW_ATOMIC_LOAD_SEQ(&runtime_arena_calls) == 1);
+        PGW_ATOMIC_STORE_SEQ(&frozen, false);
+        PGW_ATOMIC_STORE_SEQ(&runtime_arena_calls, 0);
     }
     CHECK(PGW_DDSConnextMicroAdapter.connection->lookup_stream_reader(companion, "state_powertrain", &reader) == PGW_OK);
     CHECK(PGW_SampleSeq_initialize(&loan));
@@ -760,7 +757,7 @@ int main(void)
     CHECK(PGW_WriteResultSeq_loan_contiguous(&result_sequence, &result, 0, 1));
     CHECK(PGW_SampleSeq_loan_contiguous(&loan, refs, 0, 8));
     size_t ready_arena_used = arena.used;
-    atomic_store(&frozen, true);
+    PGW_ATOMIC_STORE_SEQ(&frozen, true);
     PGW_allocation_monitor(true);
     CHECK(PGW_CANMemory_inject(&transport, &baseline) == PGW_OK);
     bool received = false;
@@ -947,11 +944,11 @@ int main(void)
         CHECK(snapshot.values[PGW_COUNT_LOANS] == 0);
         CHECK(snapshot.values[PGW_COUNT_FATAL] == 0);
     }
-    CHECK(arena.used == ready_arena_used && atomic_load(&runtime_arena_calls) == 0);
+    CHECK(arena.used == ready_arena_used && PGW_ATOMIC_LOAD_SEQ(&runtime_arena_calls) == 0);
     {
         uint64_t libc = PGW_allocation_calls(), osapi = PGW_osapi_allocation_calls();
         PGW_allocation_monitor(false);
-        atomic_store(&frozen, false);
+        PGW_ATOMIC_STORE_SEQ(&frozen, false);
         printf("Runtime allocation coverage: gateway arena requests=0; "
                "observed libc=%llu OSAPI=%llu (process-wide middleware-inclusive; "
                "libc internal and kernel allocation not intercepted)\n",

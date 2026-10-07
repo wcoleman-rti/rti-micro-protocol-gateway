@@ -16,6 +16,7 @@
  * @{
  */
 
+#include "pgw/atomic.h"
 #include "pgw/core.h"
 #include "rti_me_c.h"
 #include "app_gen/app_gen.h"
@@ -220,8 +221,8 @@ typedef struct {
     DDS_InstanceHandle_t *telemetry_handles;
     size_t telemetry_handle_count;
     struct DDS_DataReaderListener command_listener;
-    _Atomic(const PGW_ReaderListener *) command_listener_target;
-    atomic_uint command_callbacks_inflight;
+    PGW_ATOMIC(const PGW_ReaderListener *) command_listener_target;
+    PGW_ATOMIC(RTI_UINT32) command_callbacks_inflight;
     bool initialized;
 } PGW_DDSControlTransport;
 

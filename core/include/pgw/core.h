@@ -20,10 +20,11 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <stdatomic.h>
 #include "rti_me_c.h"
+#include "pgw/atomic.h"
 #include "pgw/sequence.h"
 #include "pgw/diagnostics.h"
+#include "osapi/osapi_mutex.h"
 
 #define PGW_ABI_VERSION 4u
 
@@ -448,18 +449,18 @@ typedef struct {
 
 /** @brief Atomic, fixed-size route batch-latency aggregation. */
 typedef struct {
-    atomic_uint_fast64_t batches;       /**< Completed non-empty writer calls. */
-    atomic_uint_fast64_t timed_batches; /**< Batches with valid start/end clock readings. */
-    atomic_uint_fast64_t samples;       /**< Input samples in completed writer calls. */
-    atomic_uint_fast64_t accepted;
-    atomic_uint_fast64_t backpressure;
-    atomic_uint_fast64_t invalid;
-    atomic_uint_fast64_t fatal;
-    atomic_uint_fast64_t clock_failures; /**< Failed or backwards clock readings. */
-    atomic_uint_fast64_t total_ns;      /**< Sum of valid batch durations; wraps modulo 2^64. */
-    atomic_uint_fast64_t minimum_ns;
-    atomic_uint_fast64_t maximum_ns;
-    atomic_uint_fast64_t histogram[PGW_ROUTE_LATENCY_HISTOGRAM_BUCKETS];
+    PGW_ATOMIC(RTI_UINT64) batches;       /**< Completed non-empty writer calls. */
+    PGW_ATOMIC(RTI_UINT64) timed_batches; /**< Batches with valid start/end clock readings. */
+    PGW_ATOMIC(RTI_UINT64) samples;       /**< Input samples in completed writer calls. */
+    PGW_ATOMIC(RTI_UINT64) accepted;
+    PGW_ATOMIC(RTI_UINT64) backpressure;
+    PGW_ATOMIC(RTI_UINT64) invalid;
+    PGW_ATOMIC(RTI_UINT64) fatal;
+    PGW_ATOMIC(RTI_UINT64) clock_failures; /**< Failed or backwards clock readings. */
+    PGW_ATOMIC(RTI_UINT64) total_ns;      /**< Sum of valid batch durations; wraps modulo 2^64. */
+    PGW_ATOMIC(RTI_UINT64) minimum_ns;
+    PGW_ATOMIC(RTI_UINT64) maximum_ns;
+    PGW_ATOMIC(RTI_UINT64) histogram[PGW_ROUTE_LATENCY_HISTOGRAM_BUCKETS];
 } PGW_RouteLatencyStats;
 
 /** @brief Non-transactional copy of per-route batch latency statistics.
@@ -501,14 +502,15 @@ typedef struct {
     PGW_RouteLatencyStats latency;       /**< Fixed-size batch latency statistics. */
     bool latency_initialized;            /**< Internal latency atomic initialization state. */
 #endif
-    atomic_int lifecycle;                /**< Synchronized route lifecycle state. */
+    PGW_ATOMIC(RTI_INT32) lifecycle;      /**< Synchronized route lifecycle state. */
     PGW_Error error;                     /**< Last recorded route fault. */
     PGW_Session *session;                 /**< Owning session, set during service initialization. */
     PGW_ReaderListener listener;          /**< Core-owned notification registration. */
     DDS_GuardCondition *ready_condition;  /**< Route-specific dispatcher condition. */
     PGW_AsyncWaitSetHandler ready_handler; /**< Handler registered for that condition. */
     void *ready_context;                  /**< Borrowed handler context (the route). */
-    atomic_bool pending;                   /**< Coalesced per-reader readiness flag. */
+    PGW_ATOMIC(RTI_UINT64) ready_generation; /**< Coalesced reader-ready generation. */
+    PGW_ATOMIC(RTI_UINT64) dispatched_generation; /**< Last generation consumed by its worker. */
     bool listener_registered;              /**< Internal adapter listener state. */
     bool ready_attached;                  /**< Condition attached to the session dispatcher. */
     bool storage_initialized;            /**< Internal sequence state. */
@@ -553,11 +555,11 @@ struct PGW_Session {
     PGW_AsyncWaitSet async_waitset;      /**< Session-owned condition dispatcher. */
     struct PGW_Service *service;         /**< Owning service while initialized. */
     size_t cursor;                       /**< Internal rotating route-dispatch cursor. */
-    atomic_uint_fast64_t wakeups;         /**< Successful session WaitSet wakes. */
-    atomic_uint_fast64_t dispatched_routes; /**< Completed ready-route dispatches. */
-    atomic_int lifecycle;                 /**< Current session lifecycle state. */
-    atomic_int error;                     /**< Last route-dispatch or worker error. */
-    atomic_bool stopping;                 /**< Internal worker stop request. */
+    PGW_ATOMIC(RTI_UINT64) wakeups;        /**< Successful session WaitSet wakes. */
+    PGW_ATOMIC(RTI_UINT64) dispatched_routes; /**< Completed ready-route dispatches. */
+    PGW_ATOMIC(RTI_INT32) lifecycle;       /**< Current session lifecycle state. */
+    PGW_ATOMIC(RTI_INT32) error;          /**< Last route-dispatch or worker error. */
+    PGW_ATOMIC(RTI_UINT32) stopping;      /**< Internal worker stop request. */
     bool routes_initialized;              /**< Internal route-sequence state. */
     bool routes_borrowed;                 /**< Internal route-buffer loan state. */
 };
@@ -773,7 +775,8 @@ typedef struct PGW_Service {
     PGW_SessionSeq sessions;         /**< Borrowed explicit session array. */
     size_t sample_budget;            /**< Maximum samples processed per route. */
     PGW_Diagnostics *diagnostics;    /**< Optional borrowed event sink. */
-    atomic_int lifecycle;            /**< Current service lifecycle state. */
+    PGW_ATOMIC(RTI_INT32) lifecycle;  /**< Current service lifecycle state. */
+    OSAPI_Mutex_T *state_mutex;       /**< Serializes route state transitions. */
     /** Clock callback for diagnostic event timestamps and optional latency metrics.
      * Must be monotonic; required by PGW_ENABLE_ROUTE_LATENCY_METRICS builds.
      */
@@ -785,9 +788,9 @@ typedef struct PGW_Service {
     PGW_ControlEndpoint control;         /**< Optional preconfigured control transport. */
     PGW_Session *control_session;         /**< Session that serializes control and timer events. */
     PGW_ReaderListener control_listener;  /**< Core-owned command readiness callback. */
-    atomic_bool control_pending;          /**< Coalesced command-ready state. */
+    PGW_ATOMIC(RTI_UINT64) control_generation; /**< Coalesced command-ready generation. */
     bool control_listener_registered;     /**< Internal listener registration state. */
-    atomic_flag control_lock;             /**< Protects control state and counter snapshots. */
+    OSAPI_Mutex_T *control_mutex;         /**< Protects control state and counter snapshots. */
     PGW_ControlResource *control_resources; /**< Borrowed selected resources. */
     size_t control_resource_count;       /**< Number of selected resources. */
     size_t control_state_retry_cursor;   /**< Internal dirty-state retry position. */

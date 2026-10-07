@@ -56,6 +56,11 @@ add_library(PGW::build_options ALIAS pgw_build_options)
 target_compile_options(pgw_build_options INTERFACE
     "$<$<C_COMPILER_ID:GNU,Clang>:-Wall;-Wextra;-Wpedantic>"
     "$<$<AND:$<BOOL:${PGW_WARNINGS_AS_ERRORS}>,$<C_COMPILER_ID:GNU,Clang>>:-Werror>")
+set(PGW_ALLOCATION_INTERPOSITION_SUPPORTED OFF)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
+   CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    set(PGW_ALLOCATION_INTERPOSITION_SUPPORTED ON)
+endif()
 
 if(PGW_BUILD_TESTS)
     enable_testing()
@@ -155,7 +160,7 @@ if(PGW_BUILD_EXAMPLES)
 endif()
 if(PGW_BUILD_TESTS)
     pgw_add_component(tests)
-    if(TARGET pgw_runtime_test AND TARGET pgw_allocation_probe)
+    if(TARGET pgw_runtime_test AND PGW_ALLOCATION_INTERPOSITION_SUPPORTED)
         target_link_libraries(pgw_runtime_test PRIVATE pgw_allocation_probe)
         target_compile_definitions(pgw_runtime_test PRIVATE PGW_TEST_ALLOCATION_PROBE=1)
     endif()

@@ -202,7 +202,10 @@ license is installed at `${CMAKE_INSTALL_DATADIR}/pgw/LICENSE`. Runtime-only
 consumers need neither Python nor Java. Exported names preserve `PGW::core`,
 `PGW::diagnostics_local`, `PGW::adapter_can`,
 `PGW::can_memory`, `PGW::can_socketcan`, `PGW::adapter_dds_connext_micro`, and
-`PGW::binding_signal`, when those components were built. The infrastructure and
+`PGW::binding_signal`, when those components were built. The local descriptor
+sink is POSIX-only, and SocketCAN is Linux-only. Allocation-interposing
+benchmarks are enabled on GNU/Clang Linux hosts; POSIX DDS integration
+benchmarks are Linux-only. The infrastructure and
 optional DDS convenience targets are also exported for dependency closure.
 
 The installed configuration binds PGW and Micro to the archive variant that

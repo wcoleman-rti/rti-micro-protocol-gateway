@@ -10,13 +10,12 @@
  * the software.
  */
 
-#define _POSIX_C_SOURCE 200809L
+#include "pgw/atomic.h"
 #include "pgw/core.h"
 #include "pgw/runtime.h"
+#include "osapi/osapi_mutex.h"
 #include "osapi/osapi_system.h"
 #include "osapi/osapi_thread.h"
-#include <pthread.h>
-#include <stdatomic.h>
 #include <stdio.h>
 #ifdef PGW_TEST_ALLOCATION_PROBE
 #include "allocation.h"
@@ -27,10 +26,10 @@
 } } while (0)
 
 typedef struct {
-    pthread_mutex_t mutex;
+    OSAPI_Mutex_T *mutex;
     const PGW_ReaderListener *listener;
-    atomic_uint read_calls;
-    atomic_bool notify_stopping;
+    PGW_ATOMIC(RTI_UINT32) read_calls;
+    PGW_ATOMIC(RTI_UINT32) notify_stopping;
 } ReaderState;
 
 static PGW_Status read_empty(void *opaque, PGW_SampleSeq *samples, size_t budget)
@@ -38,7 +37,7 @@ static PGW_Status read_empty(void *opaque, PGW_SampleSeq *samples, size_t budget
     ReaderState *reader = opaque;
     (void)samples;
     (void)budget;
-    atomic_fetch_add_explicit(&reader->read_calls, 1, memory_order_relaxed);
+    PGW_ATOMIC_ADD(&reader->read_calls, 1, OSAPI_ATOMIC_MEMORY_ORDER_RELAXED);
     return PGW_NO_DATA;
 }
 
@@ -54,26 +53,24 @@ static PGW_Status register_listener(void *opaque,
 {
     ReaderState *reader = opaque;
     if (!listener || !listener->on_data_available ||
-        pthread_mutex_lock(&reader->mutex)) return PGW_INVALID;
+        !OSAPI_Mutex_take(reader->mutex)) return PGW_INVALID;
     if (reader->listener) {
-        pthread_mutex_unlock(&reader->mutex);
-        return PGW_INVALID;
+        return OSAPI_Mutex_give(reader->mutex) ? PGW_INVALID : PGW_IO_ERROR;
     }
     reader->listener = listener;
-    return pthread_mutex_unlock(&reader->mutex) ? PGW_IO_ERROR : PGW_OK;
+    return OSAPI_Mutex_give(reader->mutex) ? PGW_OK : PGW_IO_ERROR;
 }
 
 static PGW_Status unregister_listener(void *opaque,
                                       const PGW_ReaderListener *listener)
 {
     ReaderState *reader = opaque;
-    if (!listener || pthread_mutex_lock(&reader->mutex)) return PGW_INVALID;
+    if (!listener || !OSAPI_Mutex_take(reader->mutex)) return PGW_INVALID;
     if (reader->listener != listener) {
-        pthread_mutex_unlock(&reader->mutex);
-        return PGW_INVALID;
+        return OSAPI_Mutex_give(reader->mutex) ? PGW_INVALID : PGW_IO_ERROR;
     }
     reader->listener = NULL;
-    return pthread_mutex_unlock(&reader->mutex) ? PGW_IO_ERROR : PGW_OK;
+    return OSAPI_Mutex_give(reader->mutex) ? PGW_OK : PGW_IO_ERROR;
 }
 
 static PGW_Status bind_empty(void *context,
@@ -96,18 +93,27 @@ static PGW_Status write_empty(void *context, const PGW_SampleSeq *samples,
     return PGW_OK;
 }
 
-static void *notify_until_stopped(void *opaque)
+static RTI_BOOL notify_until_stopped(struct OSAPI_ThreadInfo *info)
 {
-    ReaderState *reader = opaque;
-    while (!atomic_load_explicit(&reader->notify_stopping,
-                                 memory_order_acquire)) {
-        if (pthread_mutex_lock(&reader->mutex)) return NULL;
+    ReaderState *reader = info->user_data;
+    while (!info->stop_thread &&
+           !PGW_ATOMIC_LOAD(&reader->notify_stopping,
+                                 OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE)) {
+        if (!OSAPI_Mutex_take(reader->mutex)) return RTI_FALSE;
         const PGW_ReaderListener *listener = reader->listener;
         if (listener) listener->on_data_available(listener->context);
-        if (pthread_mutex_unlock(&reader->mutex)) return NULL;
+        if (!OSAPI_Mutex_give(reader->mutex)) return RTI_FALSE;
         OSAPI_Thread_sleep(1);
     }
-    return NULL;
+    return RTI_TRUE;
+}
+
+static RTI_BOOL notify_wakeup(struct OSAPI_ThreadInfo *info)
+{
+    ReaderState *reader = info->user_data;
+    PGW_ATOMIC_STORE(&reader->notify_stopping, true,
+                          OSAPI_ATOMIC_MEMORY_ORDER_RELEASE);
+    return RTI_TRUE;
 }
 
 int main(void)
@@ -124,9 +130,10 @@ int main(void)
     CHECK(after > before);
 
     ReaderState reader = {0};
-    CHECK(pthread_mutex_init(&reader.mutex, NULL) == 0);
-    atomic_init(&reader.read_calls, 0);
-    atomic_init(&reader.notify_stopping, false);
+    reader.mutex = OSAPI_Mutex_new();
+    CHECK(reader.mutex != NULL);
+    PGW_ATOMIC_INIT(&reader.read_calls, 0);
+    PGW_ATOMIC_INIT(&reader.notify_stopping, false);
     const PGW_TypeInfo schema = {"runtime-test", 1, "runtime-test-v1"};
     const PGW_SampleRepresentation representation = {
         &schema, "runtime-test", sizeof(int), _Alignof(int), NULL, NULL
@@ -181,21 +188,26 @@ int main(void)
     CHECK(PGW_Service_initialize(&service) == PGW_OK);
     CHECK(PGW_Service_start(&service) == PGW_OK);
     OSAPI_Thread_sleep(10);
-    CHECK(atomic_load_explicit(&reader.read_calls, memory_order_relaxed) == 0);
+    CHECK(PGW_ATOMIC_LOAD(&reader.read_calls, OSAPI_ATOMIC_MEMORY_ORDER_RELAXED) == 0);
 
-    pthread_t notifier;
-    CHECK(pthread_create(&notifier, NULL, notify_until_stopped, &reader) == 0);
+    struct OSAPI_ThreadProperty property = OSAPI_ThreadProperty_INITIALIZER;
+    struct OSAPI_Thread *notifier = OSAPI_Thread_create(
+        "pgw-runtime-test-notifier", &property, notify_until_stopped, &reader,
+        notify_wakeup);
+    CHECK(notifier != NULL);
+    CHECK(OSAPI_Thread_start(notifier));
 #ifdef PGW_TEST_ALLOCATION_PROBE
     PGW_allocation_monitor(true);
 #endif
     for (unsigned i = 0; i < 100 &&
-         atomic_load_explicit(&reader.read_calls, memory_order_relaxed) < 1; ++i)
+         PGW_ATOMIC_LOAD(&reader.read_calls, OSAPI_ATOMIC_MEMORY_ORDER_RELAXED) < 1; ++i)
         OSAPI_Thread_sleep(1);
-    CHECK(atomic_load_explicit(&reader.read_calls, memory_order_relaxed) > 0);
+    CHECK(PGW_ATOMIC_LOAD(&reader.read_calls, OSAPI_ATOMIC_MEMORY_ORDER_RELAXED) > 0);
     CHECK(PGW_Service_stop(&service) == PGW_OK);
-    CHECK(service.lifecycle == PGW_STOPPED);
-    atomic_store_explicit(&reader.notify_stopping, true, memory_order_release);
-    CHECK(pthread_join(notifier, NULL) == 0);
+    CHECK(PGW_ATOMIC_LOAD(&service.lifecycle,
+                          OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) == PGW_STOPPED);
+    PGW_ATOMIC_STORE(&reader.notify_stopping, true, OSAPI_ATOMIC_MEMORY_ORDER_RELEASE);
+    CHECK(OSAPI_Thread_destroy(notifier));
     CHECK(PGW_Service_finalize(&service) == PGW_OK);
 #ifdef PGW_TEST_ALLOCATION_PROBE
     uint64_t runtime_allocations = PGW_allocation_calls();
@@ -204,14 +216,14 @@ int main(void)
     CHECK(runtime_allocations == 0);
     CHECK(runtime_osapi_allocations == 0);
 #endif
-    CHECK(pthread_mutex_lock(&reader.mutex) == 0);
+    CHECK(OSAPI_Mutex_take(reader.mutex));
     CHECK(reader.listener == NULL);
-    CHECK(pthread_mutex_unlock(&reader.mutex) == 0);
+    CHECK(OSAPI_Mutex_give(reader.mutex));
     CHECK(PGW_SampleSeq_unloan(&sample_storage));
     CHECK(PGW_SampleSeq_finalize(&sample_storage));
     CHECK(PGW_WriteResultSeq_unloan(&result_storage));
     CHECK(PGW_WriteResultSeq_finalize(&result_storage));
-    CHECK(pthread_mutex_destroy(&reader.mutex) == 0);
+    CHECK(OSAPI_Mutex_delete(reader.mutex));
     CHECK(OSAPI_System_finalize());
     return 0;
 }

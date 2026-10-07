@@ -11,6 +11,7 @@
  */
 
 #define _POSIX_C_SOURCE 200809L
+#include "pgw/atomic.h"
 #include "pgw/dds/connext_micro.h"
 #include "pgw/can_memory.h"
 #include "pgw/runtime.h"
@@ -28,34 +29,35 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
-#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
-#include <time.h>
 #include <unistd.h>
 
 extern const PGW_DDSConfig pgw_config_gateway, pgw_config_companion;
 typedef struct { uint64_t buckets[64], count, minimum, maximum, sum; } Histogram;
 typedef struct { PGW_Signal value; } SignalSample;
 typedef struct { PGW_ProbeValue value; PGW_Timestamp timestamp; } ProbeSample;
-static atomic_bool frozen;
-static atomic_uint_fast64_t runtime_arena_calls;
+static PGW_ATOMIC(RTI_UINT32) frozen;
+static PGW_ATOMIC(RTI_UINT64) runtime_arena_calls;
 PGW_Status __real_PGW_Arena_allocate(PGW_Arena *, size_t, size_t, void **);
 PGW_Status __wrap_PGW_Arena_allocate(PGW_Arena *arena, size_t bytes,
                                     size_t alignment, void **out)
 {
-    if (atomic_load(&frozen)) atomic_fetch_add(&runtime_arena_calls, 1);
+    if (PGW_ATOMIC_LOAD_SEQ(&frozen)) PGW_ATOMIC_ADD_SEQ(&runtime_arena_calls, 1);
     return __real_PGW_Arena_allocate(arena, bytes, alignment, out);
 }
 static uint64_t now_ns(void)
 {
-    struct timespec time;
-    assert(!clock_gettime(CLOCK_MONOTONIC, &time));
-    return (uint64_t)time.tv_sec * UINT64_C(1000000000) + (uint64_t)time.tv_nsec;
+    uint64_t now;
+    if (!PGW_Runtime_monotonic_time_ns(&now)) {
+        fprintf(stderr, "OSAPI monotonic clock unavailable\n");
+        exit(2);
+    }
+    return now;
 }
 static void observe(Histogram *histogram, uint64_t duration)
 {
@@ -148,11 +150,11 @@ static void allocation_controls(void)
     PGW_allocation_monitor(false);
     unsigned char storage[16];
     PGW_Arena arena = {storage, sizeof(storage), 0};
-    atomic_store(&frozen, true);
+    PGW_ATOMIC_STORE_SEQ(&frozen, true);
     assert(PGW_Arena_allocate(&arena, 1, 1, &pointer) == PGW_OK);
-    assert(atomic_load(&runtime_arena_calls) == 1);
-    atomic_store(&runtime_arena_calls, 0);
-    atomic_store(&frozen, false);
+    assert(PGW_ATOMIC_LOAD_SEQ(&runtime_arena_calls) == 1);
+    PGW_ATOMIC_STORE_SEQ(&runtime_arena_calls, 0);
+    PGW_ATOMIC_STORE_SEQ(&frozen, false);
 }
 /* This lock is shared with the DDS test harness across all project build trees. */
 static int reserve_domain(void)
@@ -188,8 +190,8 @@ static bool wait_session_dispatches(const PGW_Session *session,
                                    uint64_t expected)
 {
     for (unsigned attempt = 0; attempt < 2000; ++attempt) {
-        if (atomic_load_explicit(&session->dispatched_routes,
-                                 memory_order_acquire) >= expected)
+        if (PGW_ATOMIC_LOAD(&session->dispatched_routes,
+                                 OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) >= expected)
             return true;
         OSAPI_Thread_sleep(1);
     }
@@ -393,7 +395,7 @@ int main(int argc, char **argv)
     Histogram local = {.minimum = UINT64_MAX}, roundtrip = {.minimum = UINT64_MAX};
     uint64_t peer_states = 0, peer_probes = 0, peer_diagnostics = 0, exports = 0;
     uint64_t sent_frames = 0, blocked = 0, polls = 0;
-    atomic_store(&frozen, true);
+    PGW_ATOMIC_STORE_SEQ(&frozen, true);
     PGW_allocation_monitor(true);
     uint64_t matching_start = now_ns();
     wait_matches(gateway, companion);
@@ -408,8 +410,8 @@ int main(int argc, char **argv)
         uint16_t raw = (uint16_t)(1000 + batch % 1000);
         PGW_CANFrame baseline = {.id = 256, .length = 8,
             .data = {(uint8_t)raw, (uint8_t)(raw >> 8), 0, 0, 1, 1, 0xab, 0xcd}};
-        uint64_t target_dispatch = atomic_load_explicit(
-            &session.dispatched_routes, memory_order_acquire) + 1;
+        uint64_t target_dispatch = PGW_ATOMIC_LOAD(
+            &session.dispatched_routes, OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) + 1;
         uint64_t before = timing ? now_ns() : 0;
         assert(PGW_CANMemory_inject(&memory, &baseline) == PGW_OK);
         assert(wait_session_dispatches(&session, target_dispatch));
@@ -441,8 +443,8 @@ int main(int argc, char **argv)
             ++blocked;
         }
         SignalSample command = {{1001, {.kind = PGW_VALUE_DOUBLE, .data.real = (raw + 100) * 0.1}}};
-        target_dispatch = atomic_load_explicit(&session.dispatched_routes,
-                                                memory_order_acquire) + 1;
+        target_dispatch = PGW_ATOMIC_LOAD(&session.dispatched_routes,
+                                                OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) + 1;
         write_one(&command_writer, &command_sequence, &command_ref, &command, &write_results);
         assert(wait_session_dispatches(&session, target_dispatch));
         observed = false;
@@ -549,9 +551,9 @@ int main(int argc, char **argv)
         assert(!counter(&routes[i], PGW_COUNT_LOANS) && !counter(&routes[i], PGW_COUNT_FATAL));
     assert(PGW_Service_stop(&service) == PGW_OK);
     uint64_t libc_calls = PGW_allocation_calls(), osapi_calls = PGW_osapi_allocation_calls();
-    assert(arena.used == ready_bytes && !atomic_load(&runtime_arena_calls));
+    assert(arena.used == ready_bytes && !PGW_ATOMIC_LOAD_SEQ(&runtime_arena_calls));
     PGW_allocation_monitor(false);
-    atomic_store(&frozen, false);
+    PGW_ATOMIC_STORE_SEQ(&frozen, false);
     uint64_t local_states = counter(&routes[0], PGW_COUNT_ACCEPTED);
     uint64_t invalid = counter(&routes[2], PGW_COUNT_INVALID);
     assert(PGW_Service_finalize(&service) == PGW_OK);
@@ -617,11 +619,11 @@ int main(int argc, char **argv)
         "\"instances\":%d,\"samples\":%d,\"per_instance\":%d,\"history_depth\":%d,"
         "\"writer_blocking_seconds\":%d,\"writer_blocking_nanoseconds\":%u,"
         "\"memory\":\"entity limits are actual getters; exact middleware bytes not inferred\"},"
-        "\"dispatch_latency_ns\":{\"boundary\":\"POSIX CLOCK_MONOTONIC CAN injection to bounded session dispatch, local DDS acceptance, and loan return; not wire latency\","
+        "\"dispatch_latency_ns\":{\"boundary\":\"RTI OSAPI monotonic ticktime CAN injection to bounded session dispatch, local DDS acceptance, and loan return; not wire latency\","
         "\"count\":%" PRIu64 ",\"min\":%" PRIu64 ",\"max\":%" PRIu64 ",\"mean\":%.3f,"
         "\"p50_upper\":%" PRIu64 ",\"p95_upper\":%" PRIu64 ",\"p99_upper\":%" PRIu64 ","
         "\"histogram\":\"64 power-of-two buckets; upper-bound percentiles\"},"
-        "\"roundtrip_latency_ns\":{\"boundary\":\"same-process POSIX CLOCK_MONOTONIC CAN injection through the asynchronous DDS-to-CAN route; blocked batches end at explicit backpressure, not delivery\","
+        "\"roundtrip_latency_ns\":{\"boundary\":\"same-process RTI OSAPI monotonic ticktime CAN injection through the asynchronous DDS-to-CAN route; blocked batches end at explicit backpressure, not delivery\","
         "\"count\":%" PRIu64 ",\"min\":%" PRIu64 ",\"max\":%" PRIu64 ",\"mean\":%.3f,"
         "\"p50_upper\":%" PRIu64 ",\"p95_upper\":%" PRIu64 ",\"p99_upper\":%" PRIu64 ","
         "\"histogram\":\"64 power-of-two buckets; upper-bound percentiles\"}",

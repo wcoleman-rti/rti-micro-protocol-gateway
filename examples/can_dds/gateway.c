@@ -122,6 +122,7 @@ int main(int argc, char **argv)
     PGW_WriteResult results[4][8];
     PGW_Service service = {.sample_budget = 8,
                           .clock_ns = PGW_Runtime_monotonic_clock};
+    PGW_EntityState service_state;
     unsigned long duration_ms = 10000;
 #if PGW_DDS_DIAGNOSTICS
     PGW_StreamWriter exporter;
@@ -354,7 +355,9 @@ int main(int argc, char **argv)
     }
     failed = 0;
 stopped:
-    if ((service.lifecycle == PGW_ENABLED || service.lifecycle == PGW_STARTED) &&
+    service_state = (PGW_EntityState)PGW_ATOMIC_LOAD(
+        &service.lifecycle, OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE);
+    if ((service_state == PGW_ENABLED || service_state == PGW_STARTED) &&
         PGW_Service_stop(&service) != PGW_OK) {
         closed = false;
         goto done;
@@ -418,13 +421,15 @@ stopped:
         }
     }
 done:
-    if (service.lifecycle == PGW_ENABLED || service.lifecycle == PGW_STARTED) {
+    service_state = (PGW_EntityState)PGW_ATOMIC_LOAD(
+        &service.lifecycle, OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE);
+    if (service_state == PGW_ENABLED || service_state == PGW_STARTED) {
         if (PGW_Service_stop(&service) != PGW_OK ||
             PGW_Service_finalize(&service) != PGW_OK) closed = false;
-    } else if (service.lifecycle == PGW_STOPPED &&
+    } else if (service_state == PGW_STOPPED &&
                PGW_Service_finalize(&service) != PGW_OK) {
         closed = false;
-    } else if (service.lifecycle == PGW_UNINITIALIZED &&
+    } else if (service_state == PGW_UNINITIALIZED &&
                service.sessions_initialized &&
                PGW_Service_finalize(&service) != PGW_OK) {
         closed = false;

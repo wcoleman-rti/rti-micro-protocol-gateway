@@ -35,11 +35,12 @@ bounded typed category storage and notify the affected readers. Producer,
 consumer, queue, and listener operations are synchronized; CAN does not insert
 a second sample queue.
 
-Conditions are coalescing readiness signals, not sample counts. Before
-dispatching an active route, the worker clears its route condition and consumes
-the coalesced pending flag. A racing notification re-triggers the condition
-for the next wait. Adapters must re-notify before returning from a read if they
-know input remains. CAN checks its queue occupancy; the DDS adapter
+Conditions are coalescing readiness signals, not sample counts. Each
+notification advances an OSAPI-atomic generation; before dispatching an active
+route, the worker snapshots the generation after clearing its route condition.
+A racing notification advances it again and re-triggers the condition for the
+next wait. Adapters must re-notify before returning from a read if they know
+input remains. CAN checks its queue occupancy; the DDS adapter
 conservatively re-notifies when a typed take fills its bound, which can cause
 one harmless empty read when the history was exactly drained. The core does
 not infer unread transport data from a full batch. This protocol prevents data

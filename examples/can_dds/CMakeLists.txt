@@ -164,7 +164,7 @@ if(TARGET pgw_can_socketcan)
     target_link_libraries(pgw_can_dds_gateway PRIVATE pgw_example_dds_model
         PGW::can_socketcan PGW::can_memory PGW::core PGW::build_options)
 endif()
-if(PGW_BUILD_TESTS)
+if(PGW_BUILD_TESTS AND PGW_ALLOCATION_INTERPOSITION_SUPPORTED)
     add_executable(pgw_dds_test test_dds.c)
     target_link_libraries(pgw_dds_test PRIVATE pgw_example_dds_model
         PGW::can_memory pgw_allocation_probe PGW::build_options)

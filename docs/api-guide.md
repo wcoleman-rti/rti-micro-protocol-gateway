@@ -49,7 +49,7 @@ reader loan is active.
 
 The [diagnostics and local export API](reference/group__pgw__diagnostics__api.html)
 provides counters, snapshots, bounded event collection, JSON formatting, and a
-nonblocking local sink. Start with `PGW_Counters_initialize` and
+POSIX nonblocking local sink. Start with `PGW_Counters_initialize` and
 `PGW_Counters_snapshot` for counters or `PGW_Diagnostics_initialize`,
 `PGW_Diagnostics_emit`, and `PGW_Diagnostics_drain` for events. For the optional
 DDS control and telemetry endpoints, see the [remote-control guide](docs/remote-control.md).
@@ -62,7 +62,7 @@ DDS control and telemetry endpoints, see the [remote-control guide](docs/remote-
 | CAN adapter and transports | `pgw/can.h`, `pgw/can_memory.h`, `pgw/can_socketcan.h` | [CAN API](reference/group__pgw__can__api.html) |
 | RTI Connext Micro adapter | `pgw/dds/connext_micro.h` | [DDS API](reference/group__pgw__dds__api.html) |
 | Signal representation | `pgw/signal.h` | [Signal API](reference/group__pgw__signal__api.html) |
-| Diagnostics and local export | `pgw/diagnostics.h`, `pgw/local_sink.h` | [Diagnostics API](reference/group__pgw__diagnostics__api.html) |
+| Diagnostics and local export | `pgw/diagnostics.h`, POSIX-only `pgw/local_sink.h` | [Diagnostics API](reference/group__pgw__diagnostics__api.html) |
 
 The reference keeps symbol-level search and alphabetical lookup available
 alongside these groups.

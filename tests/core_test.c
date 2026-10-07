@@ -10,12 +10,12 @@
  * the software.
  */
 
-#define _POSIX_C_SOURCE 200809L
+#include "pgw/atomic.h"
 #include "support/fake.h"
 #include "support/allocation.h"
 #include "pgw/runtime.h"
 #include <assert.h>
-#include <pthread.h>
+
 #include <stdlib.h>
 #include <string.h>
 #include "osapi/osapi_heap.h"
@@ -29,8 +29,8 @@ static void routing(void)
         {.values = {{7, 3}}, .available = 1}
     };
     PGW_TestWriter writers[2] = {{.outcome = PGW_WRITE_BACKPRESSURE}, {0}};
-    atomic_uint write_order;
-    atomic_init(&write_order, 0);
+    PGW_ATOMIC(RTI_UINT32) write_order;
+    PGW_ATOMIC_INIT(&write_order, 0);
     writers[0].order_clock = &write_order;
     writers[1].order_clock = &write_order;
     PGW_SampleRef refs[2][4];
@@ -46,14 +46,16 @@ static void routing(void)
     assert(PGW_test_service_set_routes(&service, &session, routes, 2) == PGW_OK);
     assert(PGW_Service_initialize(&service) == PGW_OK);
     assert(PGW_Service_start(&service) == PGW_OK);
+#if PGW_ALLOCATION_INTERPOSITION_SUPPORTED
     PGW_allocation_monitor(true);
+#endif
     assert(PGW_test_notify_routes(&service) == PGW_OK);
     PGW_test_wait_dispatches(&session, 3);
     assert(readers[0].borrows == 2 && readers[0].returns == 2);
     assert(readers[1].borrows == 1 && readers[1].returns == 1);
     assert(writers[1].sum == 7);
-    assert(atomic_load_explicit(&readers[0].notifications,
-                                memory_order_relaxed) >= 3);
+    assert(PGW_ATOMIC_LOAD(&readers[0].notifications,
+                                OSAPI_ATOMIC_MEMORY_ORDER_RELAXED) >= 3);
     assert(writers[0].writes == 2 && writers[1].writes == 1);
     assert(writers[0].order[0] == 1 && writers[1].order[0] == 2 &&
            writers[0].order[1] == 3);
@@ -96,7 +98,8 @@ static void routing(void)
     readers[0].available = 2;
     writers[0].status = PGW_FATAL;
     assert(PGW_test_notify_routes(&service) == PGW_FATAL);
-    assert(routes[0].lifecycle == PGW_FAULTED);
+    assert(PGW_ATOMIC_LOAD(&routes[0].lifecycle,
+                           OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) == PGW_FAULTED);
     assert(PGW_Route_pause(&routes[0]) == PGW_FATAL);
     assert(PGW_Route_resume(&routes[0]) == PGW_FATAL);
     PGW_Counters_snapshot(&routes[0].counters, 1, 3, 0, &snapshot);
@@ -105,8 +108,10 @@ static void routing(void)
     readers[1].available = 1;
     assert(PGW_test_notify_routes(&service) == PGW_OK);
     assert(writers[1].sum == 14);
+#if PGW_ALLOCATION_INTERPOSITION_SUPPORTED
     assert(PGW_allocation_calls() == 0 && PGW_osapi_allocation_calls() == 0);
     PGW_allocation_monitor(false);
+#endif
     assert(PGW_Service_stop(&service) == PGW_OK);
     assert(PGW_Service_finalize(&service) == PGW_OK);
     assert(PGW_EventSeq_unloan(&drained_seq));
@@ -165,26 +170,32 @@ static void route_pause_resume(void)
     assert(PGW_Service_initialize(&service) == PGW_OK);
     assert(PGW_Route_resume(&route) == PGW_NO_CHANGE);
     assert(PGW_Route_pause(&route) == PGW_OK);
-    assert(route.lifecycle == PGW_PAUSED);
+    assert(PGW_ATOMIC_LOAD(&route.lifecycle,
+                           OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) == PGW_PAUSED);
     assert(PGW_Route_pause(&route) == PGW_NO_CHANGE);
     assert(PGW_Service_start(&service) == PGW_OK);
     PGW_test_wait_wakeups(&session, 1);
+#if PGW_ALLOCATION_INTERPOSITION_SUPPORTED
     size_t allocation_calls = PGW_allocation_calls();
     uint64_t osapi_allocation_calls = PGW_osapi_allocation_calls();
     PGW_allocation_monitor(true);
+#endif
     assert(PGW_test_notify_routes(&service) == PGW_OK);
     assert(reader.borrows == 0 && writer.writes == 0);
     assert(PGW_Route_resume(&route) == PGW_OK);
-    assert(route.lifecycle == PGW_ENABLED);
+    assert(PGW_ATOMIC_LOAD(&route.lifecycle,
+                           OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) == PGW_ENABLED);
     assert(PGW_Route_resume(&route) == PGW_NO_CHANGE);
     assert(PGW_test_notify_routes(&service) == PGW_OK);
     assert(reader.borrows == 1 && reader.returns == 1 && writer.writes == 1);
     assert(PGW_Route_pause(&route) == PGW_OK);
     assert(PGW_test_notify_routes(&service) == PGW_OK);
     assert(reader.borrows == 1 && writer.writes == 1);
+#if PGW_ALLOCATION_INTERPOSITION_SUPPORTED
     assert(PGW_allocation_calls() == allocation_calls);
     assert(PGW_osapi_allocation_calls() == osapi_allocation_calls);
     PGW_allocation_monitor(false);
+#endif
     assert(PGW_Service_stop(&service) == PGW_OK);
     assert(PGW_Route_resume(&route) == PGW_INVALID);
     assert(PGW_Service_finalize(&service) == PGW_OK);
@@ -351,16 +362,16 @@ typedef struct {
     PGW_ControlCorrelation correlations[8];
     PGW_ControlState states[8];
     PGW_ControlResult results[8];
-    atomic_size_t command_count;
-    atomic_size_t command_cursor;
+    PGW_ATOMIC(size_t) command_count;
+    PGW_ATOMIC(size_t) command_cursor;
     size_t state_attempts;
     size_t state_writes;
     size_t result_attempts;
-    atomic_size_t result_writes;
+    PGW_ATOMIC(size_t) result_writes;
     size_t fail_state_writes;
     size_t fail_result_writes;
     size_t telemetry_reads;
-    atomic_size_t telemetry_attempts;
+    PGW_ATOMIC(size_t) telemetry_attempts;
     size_t telemetry_writes;
     size_t fail_telemetry_writes;
     uint64_t clock_ns;
@@ -373,14 +384,14 @@ static PGW_Status control_take(void *state, PGW_ControlCommand *command,
                                PGW_ControlCorrelation *correlation)
 {
     ControlHarness *harness = state;
-    size_t cursor = atomic_load_explicit(&harness->command_cursor,
-                                         memory_order_acquire);
-    size_t count = atomic_load_explicit(&harness->command_count,
-                                        memory_order_acquire);
+    size_t cursor = PGW_ATOMIC_LOAD(&harness->command_cursor,
+                                         OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE);
+    size_t count = PGW_ATOMIC_LOAD(&harness->command_count,
+                                        OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE);
     if (cursor == count) return PGW_NO_DATA;
     size_t index = cursor;
-    atomic_store_explicit(&harness->command_cursor, cursor + 1,
-                          memory_order_release);
+    PGW_ATOMIC_STORE(&harness->command_cursor, cursor + 1,
+                          OSAPI_ATOMIC_MEMORY_ORDER_RELEASE);
     *command = harness->commands[index];
     *correlation = harness->correlations[index];
     return PGW_OK;
@@ -394,8 +405,8 @@ static PGW_Status control_register_listener(
         (harness->listener && harness->listener != listener))
         return PGW_INVALID;
     harness->listener = listener;
-    if (atomic_load_explicit(&harness->command_cursor, memory_order_acquire) <
-        atomic_load_explicit(&harness->command_count, memory_order_acquire))
+    if (PGW_ATOMIC_LOAD(&harness->command_cursor, OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) <
+        PGW_ATOMIC_LOAD(&harness->command_count, OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE))
         listener->on_data_available(listener->context);
     return PGW_OK;
 }
@@ -413,8 +424,8 @@ static PGW_Status control_rearm_commands(void *state)
 {
     ControlHarness *harness = state;
     if (!harness) return PGW_INVALID;
-    if (atomic_load_explicit(&harness->command_cursor, memory_order_acquire) <
-            atomic_load_explicit(&harness->command_count, memory_order_acquire) &&
+    if (PGW_ATOMIC_LOAD(&harness->command_cursor, OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) <
+            PGW_ATOMIC_LOAD(&harness->command_count, OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) &&
         harness->listener)
         harness->listener->on_data_available(harness->listener->context);
     return PGW_OK;
@@ -429,13 +440,13 @@ static void control_signal(ControlHarness *harness)
 static void wait_for_commands(ControlHarness *harness, size_t count)
 {
     for (size_t i = 0; i < 2000 &&
-         atomic_load_explicit(&harness->result_writes,
-                              memory_order_acquire) < count; ++i)
+         PGW_ATOMIC_LOAD(&harness->result_writes,
+                              OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) < count; ++i)
         OSAPI_Thread_sleep(1);
-    assert(atomic_load_explicit(&harness->command_cursor,
-                                memory_order_acquire) >= count);
-    assert(atomic_load_explicit(&harness->result_writes,
-                                memory_order_acquire) >= count);
+    assert(PGW_ATOMIC_LOAD(&harness->command_cursor,
+                                OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) >= count);
+    assert(PGW_ATOMIC_LOAD(&harness->result_writes,
+                                OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) >= count);
 }
 
 static PGW_Status control_write_state(void *state, const PGW_ControlState *snapshot)
@@ -455,12 +466,12 @@ static PGW_Status control_write_result(void *state, const PGW_ControlResult *res
 {
     ControlHarness *harness = state;
     ++harness->result_attempts;
-    size_t index = atomic_load_explicit(&harness->result_writes,
-                                        memory_order_relaxed);
+    size_t index = PGW_ATOMIC_LOAD(&harness->result_writes,
+                                        OSAPI_ATOMIC_MEMORY_ORDER_RELAXED);
     assert(index < 8);
     harness->results[index] = *result;
-    atomic_store_explicit(&harness->result_writes, index + 1,
-                          memory_order_release);
+    PGW_ATOMIC_STORE(&harness->result_writes, index + 1,
+                          OSAPI_ATOMIC_MEMORY_ORDER_RELEASE);
     if (harness->fail_result_writes) {
         --harness->fail_result_writes;
         return PGW_BACKPRESSURE;
@@ -472,8 +483,8 @@ static PGW_Status control_write_telemetry(void *state,
                                           const PGW_ControlTelemetry *sample)
 {
     ControlHarness *harness = state;
-    atomic_fetch_add_explicit(&harness->telemetry_attempts, 1,
-                              memory_order_release);
+    PGW_ATOMIC_ADD(&harness->telemetry_attempts, 1,
+                              OSAPI_ATOMIC_MEMORY_ORDER_RELEASE);
     assert(sample->metric_id == 0 && sample->resource_id == 0 &&
            sample->telemetry_kind == 0 && sample->scalar.type == PGW_CONTROL_SCALAR_UINT64 &&
            !strcmp(sample->unit, "frames"));
@@ -602,7 +613,9 @@ static void remote_control_routes_are_bounded_and_allocation_free(void)
     assert(harness.state_writes == 1);
     assert(harness.states[0].resource_id == 42 &&
            harness.states[0].status == PGW_CONTROL_STATUS_UP);
+#if PGW_ALLOCATION_INTERPOSITION_SUPPORTED
     PGW_allocation_monitor(true);
+#endif
     control_signal(&harness);
     wait_for_commands(&harness, 4);
     PGW_test_wait_dispatches(&session, 1);
@@ -621,7 +634,8 @@ static void remote_control_routes_are_bounded_and_allocation_free(void)
     harness.command_count = 5;
     control_signal(&harness);
     wait_for_commands(&harness, 5);
-    assert(route.lifecycle == PGW_PAUSED);
+    assert(PGW_ATOMIC_LOAD(&route.lifecycle,
+                           OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) == PGW_PAUSED);
     assert(harness.state_attempts == 4 && harness.state_writes == 3);
 
     queue_control(&harness, 5, 42, PGW_CONTROL_ROUTE_RESUME);
@@ -630,7 +644,8 @@ static void remote_control_routes_are_bounded_and_allocation_free(void)
     harness.command_count = 8;
     control_signal(&harness);
     wait_for_commands(&harness, 8);
-    assert(route.lifecycle == PGW_ENABLED);
+    assert(PGW_ATOMIC_LOAD(&route.lifecycle,
+                           OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) == PGW_ENABLED);
     assert(reader.borrows == 1 && writer.writes == 1);
     assert(harness.states[3].status == PGW_CONTROL_STATUS_PAUSED);
     assert(harness.states[4].status == PGW_CONTROL_STATUS_UP);
@@ -643,8 +658,10 @@ static void remote_control_routes_are_bounded_and_allocation_free(void)
     assert(counters.state_write_failures == 1 && counters.state_retries == 1);
     assert(counters.result_write_failures == 1);
     assert(harness.result_attempts == 8 && harness.result_writes == 8);
+#if PGW_ALLOCATION_INTERPOSITION_SUPPORTED
     assert(PGW_allocation_calls() == 0 && PGW_osapi_allocation_calls() == 0);
     PGW_allocation_monitor(false);
+#endif
     assert(PGW_Service_stop(&service) == PGW_OK);
     assert(PGW_Service_finalize(&service) == PGW_OK);
 }
@@ -736,7 +753,9 @@ static void remote_control_telemetry_is_periodic_and_failure_bounded(void)
     assert(PGW_Service_set_telemetry(&service, &metric, 1, 100, 100) == PGW_OK);
     assert(PGW_Service_initialize(&service) == PGW_OK);
     assert(PGW_Service_start(&service) == PGW_OK);
+#if PGW_ALLOCATION_INTERPOSITION_SUPPORTED
     PGW_allocation_monitor(true);
+#endif
     PGW_ControlCounters counters = {0};
     for (unsigned i = 0; i < 200; ++i) {
         assert(PGW_Service_control_counters(&service, &counters) == PGW_OK);
@@ -745,14 +764,16 @@ static void remote_control_telemetry_is_periodic_and_failure_bounded(void)
         OSAPI_Thread_sleep(5);
     }
     assert(PGW_Service_control_counters(&service, &counters) == PGW_OK);
-    assert(atomic_load_explicit(&harness.telemetry_attempts,
-                                memory_order_acquire) == 2);
+    assert(PGW_ATOMIC_LOAD(&harness.telemetry_attempts,
+                                OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) == 2);
     assert(harness.telemetry_reads == 2);
     assert(harness.telemetry_writes == 1);
     assert(counters.telemetry_write_failures == 1 &&
            counters.telemetry_samples == 1 && counters.telemetry_read_failures == 0);
+#if PGW_ALLOCATION_INTERPOSITION_SUPPORTED
     assert(PGW_allocation_calls() == 0 && PGW_osapi_allocation_calls() == 0);
     PGW_allocation_monitor(false);
+#endif
     assert(PGW_Service_stop(&service) == PGW_OK);
     assert(PGW_Service_finalize(&service) == PGW_OK);
 }
@@ -877,7 +898,9 @@ static void second_schema_and_loan_errors(void)
     assert(PGW_Service_initialize(&s) == PGW_OK);
     assert(PGW_Service_start(&s) == PGW_OK);
     assert(PGW_test_notify_routes(&s) == PGW_LOAN_ERROR);
-    assert(bad_reader.returns == 1 && route.lifecycle == PGW_FAULTED);
+    assert(bad_reader.returns == 1 &&
+           PGW_ATOMIC_LOAD(&route.lifecycle,
+                           OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) == PGW_FAULTED);
     assert(!strcmp(route.error.operation, "return_loan"));
     assert(PGW_Service_stop(&s) == PGW_OK);
     assert(PGW_Service_finalize(&s) == PGW_OK);
@@ -1037,12 +1060,14 @@ static void bounds_and_schema(void)
     PGW_Service s = {.sample_budget = 4};
     assert(PGW_test_service_set_routes(&s, &session, &route, 1) == PGW_OK);
     assert(PGW_Service_initialize(&s) == PGW_UNSUPPORTED);
-    assert(s.lifecycle == PGW_FAULTED);
+    assert(PGW_ATOMIC_LOAD(&s.lifecycle,
+                           OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) == PGW_FAULTED);
     other = (PGW_TypeInfo){"test.counter", 1, "different-layout-same-name"};
     PGW_test_route(&route, 1, &r, &w, refs, results, 4);
     route.writer.representation = &second;
     w.target_schema = second.schema;
-    s.lifecycle = PGW_UNINITIALIZED;
+    PGW_ATOMIC_STORE(&s.lifecycle, PGW_UNINITIALIZED,
+                     OSAPI_ATOMIC_MEMORY_ORDER_RELEASE);
     assert(PGW_test_service_set_routes(&s, &session, &route, 1) == PGW_OK);
     assert(PGW_Service_initialize(&s) == PGW_UNSUPPORTED);
     assert(!strcmp(route.error.operation, "bind"));
@@ -1058,23 +1083,23 @@ static void bounds_and_schema(void)
 
 static PGW_Counters concurrent_counters;
 static PGW_Diagnostics concurrent_events;
-static atomic_bool producers_done;
+static PGW_ATOMIC(RTI_UINT32) producers_done;
 static size_t observed_events;
-static void *producer(void *unused)
+static RTI_BOOL producer(struct OSAPI_ThreadInfo *info)
 {
-    (void)unused;
+    (void)info;
     for (size_t i = 0; i < 10000; ++i) {
         PGW_Counters_add(&concurrent_counters, PGW_COUNT_RECEIVED, 1);
         PGW_Event e = {.time_ns = i, .time_valid = true,
                        .entity_id = 1, .code = 1, .severity = 2, .count = 1};
         (void)PGW_Diagnostics_emit(&concurrent_events, &e);
     }
-    return NULL;
+    return RTI_TRUE;
 }
 
-static void *observer(void *unused)
+static RTI_BOOL observer(struct OSAPI_ThreadInfo *info)
 {
-    (void)unused;
+    (void)info;
     uint64_t previous = 0;
     PGW_Event events[8];
     PGW_EventSeq output;
@@ -1092,10 +1117,10 @@ static void *observer(void *unused)
                        events[i].count == 1 && events[i].time_ns < 10000);
             observed_events += count;
         }
-    } while (!atomic_load(&producers_done));
+    } while (!PGW_ATOMIC_LOAD_SEQ(&producers_done));
     assert(PGW_EventSeq_unloan(&output));
     assert(PGW_EventSeq_finalize(&output));
-    return NULL;
+    return RTI_TRUE;
 }
 
 static void concurrent_capture(void)
@@ -1104,13 +1129,21 @@ static void concurrent_capture(void)
     assert(PGW_Counters_initialize(&concurrent_counters));
     assert(!PGW_Counters_add(&concurrent_counters, (PGW_CounterId)-1, 1));
     assert(PGW_test_diagnostics_initialize(&concurrent_events, storage, 8));
-    atomic_init(&producers_done, false);
-    pthread_t threads[4], observer_thread;
-    assert(!pthread_create(&observer_thread, NULL, observer, NULL));
-    for (size_t i = 0; i < 4; ++i) assert(!pthread_create(&threads[i], NULL, producer, NULL));
-    for (size_t i = 0; i < 4; ++i) assert(!pthread_join(threads[i], NULL));
-    atomic_store(&producers_done, true);
-    assert(!pthread_join(observer_thread, NULL));
+    PGW_ATOMIC_INIT(&producers_done, false);
+    struct OSAPI_ThreadProperty property = OSAPI_ThreadProperty_INITIALIZER;
+    struct OSAPI_Thread *threads[4];
+    struct OSAPI_Thread *observer_thread = OSAPI_Thread_create(
+        "pgw-test-observer", &property, observer, NULL, NULL);
+    assert(observer_thread && OSAPI_Thread_start(observer_thread));
+    for (size_t i = 0; i < 4; ++i) {
+        threads[i] = OSAPI_Thread_create("pgw-test-producer", &property,
+                                         producer, NULL, NULL);
+        assert(threads[i] && OSAPI_Thread_start(threads[i]));
+    }
+    for (size_t i = 0; i < 4; ++i)
+        assert(OSAPI_Thread_destroy(threads[i]));
+    PGW_ATOMIC_STORE_SEQ(&producers_done, true);
+    assert(OSAPI_Thread_destroy(observer_thread));
     PGW_CounterSnapshot s;
     PGW_Counters_snapshot(&concurrent_counters, 1, 0, 0, &s);
     assert(s.values[PGW_COUNT_RECEIVED] == 40000);
@@ -1121,8 +1154,8 @@ static void concurrent_capture(void)
     assert(PGW_EventSeq_loan_contiguous(&output, out, 0, 8));
     assert(PGW_Diagnostics_drain(&concurrent_events, &output));
     count = PGW_EventSeq_get_length(&output);
-    assert(count + observed_events + atomic_load(&concurrent_events.overflow) +
-           atomic_load(&concurrent_events.contention) == 40000);
+    assert(count + observed_events + PGW_ATOMIC_LOAD_SEQ(&concurrent_events.overflow) +
+           PGW_ATOMIC_LOAD_SEQ(&concurrent_events.contention) == 40000);
     PGW_Counters_add(&concurrent_counters, PGW_COUNT_RECEIVED, UINT64_MAX - 39999);
     PGW_Counters_snapshot(&concurrent_counters, 1, 0, 0, &s);
     assert(s.values[PGW_COUNT_RECEIVED] == 0);
@@ -1137,7 +1170,7 @@ static void concurrent_capture(void)
     assert(!PGW_Diagnostics_emit(&concurrent_events, &event));
     event.time_ns = 10;
     assert(PGW_Diagnostics_emit(&concurrent_events, &event));
-    assert(atomic_load(&concurrent_events.rate_limited) == 1);
+    assert(PGW_ATOMIC_LOAD_SEQ(&concurrent_events.rate_limited) == 1);
     PGW_DiagnosticSnapshot diagnostic_snapshot;
     assert(PGW_Diagnostics_snapshot(&concurrent_events, 99, &diagnostic_snapshot));
     assert(diagnostic_snapshot.version == 1 && diagnostic_snapshot.collected_ns == 99);
@@ -1151,6 +1184,7 @@ int main(void)
 {
     assert(PGW_Runtime_initialize());
     assert(DDS_DomainParticipantFactory_get_instance());
+#if PGW_ALLOCATION_INTERPOSITION_SUPPORTED
     PGW_allocation_monitor(true);
     void *volatile p = malloc(32);
     assert(p);
@@ -1183,6 +1217,7 @@ int main(void)
     assert(PGW_allocation_calls() >= 5);
     assert(PGW_osapi_allocation_calls() > osapi_calls);
     PGW_allocation_monitor(false);
+#endif
     bounds_and_schema();
     routing();
     async_waitset_dispatches_each_ready_route_condition();

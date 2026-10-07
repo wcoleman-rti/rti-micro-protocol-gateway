@@ -111,8 +111,8 @@ reinitialization explicitly adopts storage again.
 fixed pointer/result arrays and optional diagnostics storage with checked
 arithmetic. Separately supplied allocations must each satisfy their type's
 alignment; a combined arena also accounts for alignment gaps. Adapter sample/
-metadata pools, constant codec tables, middleware memory and thread stacks are
-separate resources, not concealed in this core report.
+metadata pools, OSAPI mutex/thread handles, middleware memory and thread stacks
+are separate resources, not concealed in this core report.
 For typed opaque-object construction, arena backing should be a fixed
 initialization-time allocation with no declared type, or a properly typed pool.
 A declared byte array is useful for byte storage/address sizing but is not a
@@ -141,7 +141,7 @@ Truncated JSON returns false with the required length; never publish its
 partial output as a valid record. Local file/console consumers belong outside
 the routing thread. Regular files may block despite `O_NONBLOCK`.
 
-`PGW::diagnostics_local` provides a caller-buffer JSON Lines snapshot sink.
+On POSIX builds, `PGW::diagnostics_local` provides a caller-buffer JSON Lines snapshot sink.
 Initialize it with an already opened descriptor before `PGW_STARTED`; ownership stays
 with the caller. A full nonblocking descriptor drops the new record with explicit
 backpressure. Truncation, short writes and I/O errors return failure and update

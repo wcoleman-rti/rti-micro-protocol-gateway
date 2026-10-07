@@ -10,20 +10,21 @@
  * the software.
  */
 
+#include "pgw/atomic.h"
 #include "fake.h"
 #include "osapi/osapi_thread.h"
 #include <string.h>
 #include <stdlib.h>
 
 #if defined(PGW_ENABLE_ROUTE_LATENCY_METRICS)
-static atomic_uint_fast64_t test_clock_value;
+static PGW_ATOMIC(RTI_UINT64) test_clock_value;
 
 static bool test_clock(void *state, uint64_t *nanoseconds)
 {
     (void)state;
     if (!nanoseconds) return false;
-    *nanoseconds = atomic_fetch_add_explicit(&test_clock_value, 1000,
-                                             memory_order_relaxed) + 1000;
+    *nanoseconds = PGW_ATOMIC_ADD(&test_clock_value, 1000,
+                                             OSAPI_ATOMIC_MEMORY_ORDER_RELAXED) + 1000;
     return true;
 }
 #endif
@@ -47,7 +48,8 @@ const PGW_SampleRepresentation PGW_test_representation = {
 static PGW_Status read_samples(void *state, PGW_SampleSeq *seq, size_t budget)
 {
     PGW_TestReader *r = state;
-    atomic_fetch_add_explicit(&r->read_calls, 1, memory_order_release);
+    PGW_ATOMIC_ADD(&r->read_calls, 1,
+                   OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE_RELEASE);
     if (r->loaned) return PGW_LOAN_ERROR;
     if (r->read_status != PGW_OK) return r->read_status;
     if (!r->available && !r->empty_ok) return PGW_NO_DATA;
@@ -59,7 +61,7 @@ static PGW_Status read_samples(void *state, PGW_SampleSeq *seq, size_t budget)
     ++r->borrows;
     r->available -= count;
     if (r->available && r->listener) {
-        atomic_fetch_add_explicit(&r->notifications, 1, memory_order_relaxed);
+        PGW_ATOMIC_ADD(&r->notifications, 1, OSAPI_ATOMIC_MEMORY_ORDER_RELAXED);
         r->listener->on_data_available(r->listener->context);
     }
     return PGW_OK;
@@ -86,8 +88,8 @@ static PGW_Status register_listener(void *state,
         (reader->empty_ok || reader->read_status != PGW_OK ? 1 : 0);
     reader->listener = listener;
     for (size_t i = 0; i < notifications; ++i) {
-        atomic_fetch_add_explicit(&reader->notifications, 1,
-                                  memory_order_relaxed);
+        PGW_ATOMIC_ADD(&reader->notifications, 1,
+                                  OSAPI_ATOMIC_MEMORY_ORDER_RELAXED);
         listener->on_data_available(listener->context);
     }
     return PGW_OK;
@@ -120,8 +122,8 @@ static PGW_Status write_samples(void *state, const PGW_SampleSeq *seq,
     size_t count = PGW_SampleSeq_get_length(seq);
     if (count != (size_t)PGW_WriteResultSeq_get_length(results)) return PGW_INVALID;
     if (w->order_clock && w->writes < sizeof(w->order) / sizeof(w->order[0]))
-        w->order[w->writes] = atomic_fetch_add_explicit(
-            w->order_clock, 1, memory_order_relaxed) + 1;
+        w->order[w->writes] = PGW_ATOMIC_ADD(
+            w->order_clock, 1, OSAPI_ATOMIC_MEMORY_ORDER_RELAXED) + 1;
     for (size_t i = 0; i < count; ++i) {
         PGW_TestValue value;
         PGW_WriteResult *result = PGW_WriteResultSeq_get_reference(results, i);
@@ -153,8 +155,8 @@ void PGW_test_route(PGW_Route *route, uint32_t id, PGW_TestReader *reader,
                     PGW_TestWriter *writer, PGW_SampleRef *refs,
                     PGW_WriteResult *results, size_t capacity)
 {
-    atomic_init(&reader->read_calls, 0);
-    atomic_init(&reader->notifications, 0);
+    PGW_ATOMIC_INIT(&reader->read_calls, 0);
+    PGW_ATOMIC_INIT(&reader->notifications, 0);
     *route = (PGW_Route){
         .id = id,
         .reader = {reader, &PGW_test_reader_iface, &PGW_test_representation},
@@ -242,8 +244,8 @@ PGW_Status PGW_test_service_set_routes(PGW_Service *service,
 void PGW_test_wait_dispatches(PGW_Session *session, uint64_t expected)
 {
     for (size_t i = 0; i < 2000; ++i) {
-        if (atomic_load_explicit(&session->dispatched_routes,
-                                 memory_order_acquire) >= expected) return;
+        if (PGW_ATOMIC_LOAD(&session->dispatched_routes,
+                                 OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) >= expected) return;
         OSAPI_Thread_sleep(1);
     }
     abort();
@@ -252,8 +254,8 @@ void PGW_test_wait_dispatches(PGW_Session *session, uint64_t expected)
 void PGW_test_wait_wakeups(PGW_Session *session, uint64_t expected)
 {
     for (size_t i = 0; i < 2000; ++i) {
-        if (atomic_load_explicit(&session->wakeups,
-                                 memory_order_acquire) >= expected) return;
+        if (PGW_ATOMIC_LOAD(&session->wakeups,
+                                 OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) >= expected) return;
         OSAPI_Thread_sleep(1);
     }
     abort();
@@ -272,14 +274,15 @@ PGW_Status PGW_test_notify_routes(PGW_Service *service)
         {
             PGW_Route *route =
                 PGW_RouteSeq_get_reference(&session->routes, j);
-            was_faulted[j] = route->lifecycle == PGW_FAULTED;
-            if (route->lifecycle != PGW_FAULTED &&
-                route->lifecycle != PGW_PAUSED)
+            PGW_EntityState state = (PGW_EntityState)PGW_ATOMIC_LOAD(
+                &route->lifecycle, OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE);
+            was_faulted[j] = state == PGW_FAULTED;
+            if (state != PGW_FAULTED && state != PGW_PAUSED)
                 ++active_count;
         }
-        atomic_store_explicit(&session->error, PGW_OK, memory_order_release);
-        uint64_t target = atomic_load_explicit(&session->dispatched_routes,
-                                               memory_order_acquire) +
+        PGW_ATOMIC_STORE(&session->error, PGW_OK, OSAPI_ATOMIC_MEMORY_ORDER_RELEASE);
+        uint64_t target = PGW_ATOMIC_LOAD(&session->dispatched_routes,
+                                               OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) +
                           active_count;
         for (RTI_INT32 j = 0; j < count; ++j) {
             PGW_Route *route =
@@ -291,12 +294,14 @@ PGW_Status PGW_test_notify_routes(PGW_Service *service)
         for (RTI_INT32 j = 0; j < count; ++j) {
             PGW_Route *route =
                 PGW_RouteSeq_get_reference(&session->routes, j);
-            if (!was_faulted[j] && route->lifecycle == PGW_FAULTED &&
+            if (!was_faulted[j] &&
+                PGW_ATOMIC_LOAD(&route->lifecycle,
+                    OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) == PGW_FAULTED &&
                 status == PGW_OK)
                 status = route->error.status;
         }
-        PGW_Status session_status = atomic_load_explicit(
-            &session->error, memory_order_acquire);
+        PGW_Status session_status = PGW_ATOMIC_LOAD(
+            &session->error, OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE);
         if (status == PGW_OK && session_status != PGW_OK)
             status = session_status;
     }

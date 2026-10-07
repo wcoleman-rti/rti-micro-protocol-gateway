@@ -20,7 +20,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <stdatomic.h>
+#include "pgw/atomic.h"
 #include "pgw/sequence.h"
 
 /** @brief Counter slots maintained by the core and adapters.
@@ -42,12 +42,11 @@ typedef enum {
     PGW_COUNT_TOTAL           /**< Number of counter slots; not a counter ID. */
 } PGW_CounterId;
 
-/** @brief Lock-free atomic counter collection.
- * Initialization fails if 64-bit counter operations are not lock-free on the
- * target. After initialization, increments and snapshots may be concurrent.
+/** @brief Atomic counter collection.
+ * After initialization, increments and snapshots may be concurrent.
  */
 typedef struct {
-    atomic_uint_fast64_t values[PGW_COUNT_TOTAL];
+    PGW_ATOMIC(RTI_UINT64) values[PGW_COUNT_TOTAL];
 } PGW_Counters;
 
 /** @brief Versioned copy of all counter values at one collection point.
@@ -99,18 +98,18 @@ typedef struct PGW_EventSeq PGW_EventSeq;
 /** @brief Bounded, thread-safe diagnostic event ring.
  *
  * The sequence storage is borrowed from the empty source sequence provided to
- * initialize. Emitters serialize on an internal atomic flag; contention,
+ * initialize. Emitters serialize on an internal OSAPI atomic try-lock; contention,
  * rate-limiting, and overflow are counted rather than blocking.
  */
 typedef struct {
     PGW_EventSeq events;                /**< Ring sequence over borrowed storage. */
     size_t head;                        /**< Internal oldest-event index. */
     size_t count;                       /**< Internal queued-event count. */
-    atomic_flag lock;                   /**< Internal nonblocking ring lock. */
-    atomic_uint_fast64_t overflow;      /**< Events rejected because ring was full. */
-    atomic_uint_fast64_t contention;    /**< Emit attempts rejected on lock contention. */
-    atomic_uint_fast64_t drain_contention; /**< Drain/finalize lock-contention count. */
-    atomic_uint_fast64_t rate_limited;  /**< Events rejected by the rate limit. */
+    PGW_AtomicLock lock;                /**< Internal nonblocking ring lock. */
+    PGW_ATOMIC(RTI_UINT64) overflow;     /**< Events rejected because ring was full. */
+    PGW_ATOMIC(RTI_UINT64) contention;  /**< Emit attempts rejected on lock contention. */
+    PGW_ATOMIC(RTI_UINT64) drain_contention; /**< Drain/finalize lock-contention count. */
+    PGW_ATOMIC(RTI_UINT64) rate_limited; /**< Events rejected by the rate limit. */
     uint32_t minimum_severity;          /**< Events below this threshold are filtered. */
     uint64_t rate_interval_ns;          /**< Configured rate-limit interval. */
     size_t rate_max_events;             /**< Maximum accepted events per interval. */
@@ -133,8 +132,7 @@ typedef struct {
 
 /** @brief Initialize counters to zero.
  * @c counters points to storage to initialize.
- * @return True if the pointer is valid and required atomic operations are
- *         lock-free; false otherwise.
+ * @return True on success, false for a null pointer.
  */
 bool PGW_Counters_initialize(PGW_Counters *);
 /** @brief Atomically add to one counter.

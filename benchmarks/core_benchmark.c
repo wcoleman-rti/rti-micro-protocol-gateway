@@ -10,7 +10,6 @@
  * the software.
  */
 
-#define _POSIX_C_SOURCE 200809L
 #include "fake.h"
 #include "allocation.h"
 #include "pgw/runtime.h"
@@ -18,17 +17,21 @@
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <time.h>
+#if defined(__unix__) || defined(__APPLE__)
 #include <sys/resource.h>
+#define PGW_HAS_GETRUSAGE 1
+#else
+#define PGW_HAS_GETRUSAGE 0
+#endif
 
 static uint64_t now_ns(void)
 {
-    struct timespec t;
-    if (clock_gettime(CLOCK_MONOTONIC, &t)) {
-        perror("clock_gettime");
+    uint64_t now;
+    if (!PGW_Runtime_monotonic_time_ns(&now)) {
+        fprintf(stderr, "OSAPI monotonic clock unavailable\n");
         exit(2);
     }
-    return (uint64_t)t.tv_sec * UINT64_C(1000000000) + (uint64_t)t.tv_nsec;
+    return now;
 }
 
 static uint64_t percentile(const uint64_t *histogram, uint64_t count, uint64_t percent)
@@ -111,15 +114,22 @@ int main(int argc, char **argv)
         writer.sum != 10 * batches)
         return 6;
     if (PGW_Service_stop(&service) != PGW_OK || PGW_Service_finalize(&service) != PGW_OK) return 7;
+    long max_rss_kib = 0, cpu_user_us = 0, cpu_system_us = 0;
+#if PGW_HAS_GETRUSAGE
     struct rusage usage;
     if (getrusage(RUSAGE_SELF, &usage)) return 8;
+    max_rss_kib = usage.ru_maxrss;
+    cpu_user_us = usage.ru_utime.tv_sec * 1000000 + usage.ru_utime.tv_usec;
+    cpu_system_us = usage.ru_stime.tv_sec * 1000000 + usage.ru_stime.tv_usec;
+#endif
     printf("{\"format_version\":1,\"workload\":\"opaque-core-four-samples\","
            "\"batches\":%" PRIu64 ",\"samples\":%" PRIu64 ",\"timing\":%s,"
            "\"elapsed_ns\":%" PRIu64 ",\"initialization_ns\":%" PRIu64 ","
            "\"samples_per_second\":%.3f,\"gateway_runtime_allocations\":%" PRIu64 ","
            "\"osapi_runtime_allocations\":%" PRIu64 ","
            "\"allocation_coverage\":\"wrapped libc malloc/calloc/realloc/aligned_alloc/posix_memalign and OSAPI allocate/realloc/allocate_buffer; core-only\","
-           "\"gateway_static_fixture_bytes\":%zu,\"getrusage_maxrss_kib\":%ld,"
+           "\"gateway_static_fixture_bytes\":%zu,\"process_usage_available\":%s,"
+           "\"getrusage_maxrss_kib\":%ld,"
            "\"cpu_user_us\":%ld,\"cpu_system_us\":%ld,"
            "\"dispatch_latency_ns\":{\"boundary\":\"reader notification to completed bounded session dispatch; not wire latency\","
            "\"count\":%" PRIu64 ",\"min\":%" PRIu64 ",\"max\":%" PRIu64 ","
@@ -129,8 +139,12 @@ int main(int argc, char **argv)
            elapsed ? batches * 4.0 * 1e9 / elapsed : 0.0, allocations, osapi_allocations,
            sizeof(service) + sizeof(route) + sizeof(reader) + sizeof(writer) +
                sizeof(references) + sizeof(outcomes) + sizeof(histogram),
-           usage.ru_maxrss, usage.ru_utime.tv_sec * 1000000 + usage.ru_utime.tv_usec,
-           usage.ru_stime.tv_sec * 1000000 + usage.ru_stime.tv_usec,
+#if PGW_HAS_GETRUSAGE
+           "true",
+#else
+           "false",
+#endif
+           max_rss_kib, cpu_user_us, cpu_system_us,
            timing ? batches : 0, timing ? minimum : 0, maximum,
            timing ? (double)sum / batches : 0.0,
            timing ? percentile(histogram, batches, 50) : 0,

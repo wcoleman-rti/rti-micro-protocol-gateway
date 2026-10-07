@@ -10,17 +10,15 @@
  * the software.
  */
 
-#define _POSIX_C_SOURCE 200809L
+#include "pgw/atomic.h"
 #include "pgw/can.h"
 #if defined(PGW_ENABLE_REMOTE_CONTROL)
 #include "control_manifest.h"
 #endif
-#include <errno.h>
 #include <math.h>
-#include <pthread.h>
-#include <stdatomic.h>
 #include <string.h>
-#include <time.h>
+#include "osapi/osapi_mutex.h"
+#include "osapi/osapi_thread.h"
 
 typedef struct PGW_CANSample {
     PGW_Signal signal;
@@ -106,10 +104,10 @@ struct PGW_CANConnection {
     bool closing;
     bool closed;
     bool control_enabled;
-    pthread_mutex_t mutex;
-    pthread_t receiver;
-    atomic_bool receiver_stopping;
-    atomic_int receiver_status;
+    OSAPI_Mutex_T *mutex;
+    struct OSAPI_Thread *receiver;
+    PGW_ATOMIC(RTI_UINT32) receiver_stopping;
+    PGW_ATOMIC(RTI_INT32) receiver_status;
     bool mutex_initialized;
     bool receiver_started;
     uint32_t sequence_initialization;
@@ -117,6 +115,24 @@ struct PGW_CANConnection {
 #if defined(PGW_ENABLE_REMOTE_CONTROL)
 static const PGW_ControlAdapterI can_control;
 #endif
+
+static bool connection_lock(PGW_CANConnection *connection)
+{
+    return connection && connection->mutex &&
+           OSAPI_Mutex_take(connection->mutex);
+}
+
+static bool connection_unlock(PGW_CANConnection *connection)
+{
+    return connection && connection->mutex &&
+           OSAPI_Mutex_give(connection->mutex);
+}
+
+static PGW_Status connection_unlock_status(PGW_CANConnection *connection,
+                                           PGW_Status status)
+{
+    return connection_unlock(connection) ? status : PGW_IO_ERROR;
+}
 
 #include "osapi/osapi_log.h"
 #include "osapi/osapi_log_impl.h"
@@ -352,14 +368,12 @@ static PGW_Status receive_batch(PGW_CANConnection *c, size_t budget,
     PGW_Status result = PGW_OK;
     if (!c || !received) return PGW_INVALID;
     *received = false;
-    if (pthread_mutex_lock(&c->mutex)) return PGW_IO_ERROR;
+    if (!connection_lock(c)) return PGW_IO_ERROR;
     if (c->closed || c->closing) {
-        pthread_mutex_unlock(&c->mutex);
-        return PGW_NO_DATA;
+        return connection_unlock_status(c, PGW_NO_DATA);
     }
     if (!c->control_enabled) {
-        pthread_mutex_unlock(&c->mutex);
-        return PGW_OK;
+        return connection_unlock_status(c, PGW_OK);
     }
     before = c->stats.receive_drops;
     if (budget > c->config.receive_budget) budget = c->config.receive_budget;
@@ -465,16 +479,16 @@ static PGW_Status receive_batch(PGW_CANConnection *c, size_t budget,
     }
     if (c->stats.receive_drops != before)
         event(c, 1003, c->stats.receive_drops - before);
-    if (pthread_mutex_unlock(&c->mutex)) return PGW_IO_ERROR;
+    if (!connection_unlock(c)) return PGW_IO_ERROR;
     return result;
 }
 
 static void report_receiver_error(PGW_CANConnection *connection,
                                   PGW_Status status)
 {
-    atomic_store_explicit(&connection->receiver_status, status,
-                          memory_order_release);
-    if (pthread_mutex_lock(&connection->mutex)) return;
+    PGW_ATOMIC_STORE(&connection->receiver_status, status,
+                          OSAPI_ATOMIC_MEMORY_ORDER_RELEASE);
+    if (!connection_lock(connection)) return;
     ++connection->stats.io_errors;
     PGW_Counters_add(&connection->counters, PGW_COUNT_FATAL, 1);
     event(connection, 1001, 1);
@@ -485,39 +499,37 @@ static void report_receiver_error(PGW_CANConnection *connection,
         if (category->listener)
             category->listener->on_data_available(category->listener->context);
     }
-    if (pthread_mutex_unlock(&connection->mutex))
-        atomic_store_explicit(&connection->receiver_status, PGW_IO_ERROR,
-                              memory_order_release);
+    if (!connection_unlock(connection))
+        PGW_ATOMIC_STORE(&connection->receiver_status, PGW_IO_ERROR,
+                              OSAPI_ATOMIC_MEMORY_ORDER_RELEASE);
 }
 
-static void *receiver_entry(void *opaque)
+static RTI_BOOL receiver_wakeup(struct OSAPI_ThreadInfo *info)
 {
-    PGW_CANConnection *connection = opaque;
-    const struct timespec idle = {0, 1000000};
-    while (!atomic_load_explicit(&connection->receiver_stopping,
-                                 memory_order_acquire)) {
+    PGW_CANConnection *connection = info->user_data;
+    PGW_ATOMIC_STORE(&connection->receiver_stopping, true,
+                          OSAPI_ATOMIC_MEMORY_ORDER_RELEASE);
+    return RTI_TRUE;
+}
+
+static RTI_BOOL receiver_entry(struct OSAPI_ThreadInfo *info)
+{
+    PGW_CANConnection *connection = info->user_data;
+    while (!PGW_ATOMIC_LOAD(&connection->receiver_stopping,
+                                 OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE)) {
         bool received = false;
         PGW_Status status = receive_batch(connection,
             connection->config.receive_budget, &received);
         if (status != PGW_OK) {
             report_receiver_error(connection, status);
-            break;
+            return RTI_FALSE;
         }
         if (!received &&
-            !atomic_load_explicit(&connection->receiver_stopping,
-                                  memory_order_acquire)) {
-            struct timespec remaining = idle;
-            int sleep_status;
-            do {
-                sleep_status = nanosleep(&remaining, &remaining);
-            } while (sleep_status && errno == EINTR);
-            if (sleep_status) {
-                report_receiver_error(connection, PGW_IO_ERROR);
-                break;
-            }
-        }
+            !PGW_ATOMIC_LOAD(&connection->receiver_stopping,
+                                  OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE))
+            OSAPI_Thread_sleep(1);
     }
-    return NULL;
+    return RTI_TRUE;
 }
 
 static PGW_Status read_samples(void *state, PGW_SampleSeq *seq, size_t budget)
@@ -528,41 +540,35 @@ static PGW_Status read_samples(void *state, PGW_SampleSeq *seq, size_t budget)
     RTI_INT32 i;
     PGW_Status status;
     if (!seq || !PGW_SampleSeq_get_contiguous_buffer(seq)) return PGW_INVALID;
-    if (pthread_mutex_lock(&connection->mutex)) return PGW_IO_ERROR;
+    if (!connection_lock(connection)) return PGW_IO_ERROR;
     if (connection->closed || connection->closing) {
-        pthread_mutex_unlock(&connection->mutex);
-        return PGW_INVALID;
+        return connection_unlock_status(connection, PGW_INVALID);
     }
     if (!connection->control_enabled || !cat->input_enabled) {
-        pthread_mutex_unlock(&connection->mutex);
-        return PGW_NO_DATA;
+        return connection_unlock_status(connection, PGW_NO_DATA);
     }
-    status = atomic_load_explicit(&connection->receiver_status,
-                                  memory_order_acquire);
+    status = PGW_ATOMIC_LOAD(&connection->receiver_status,
+                                  OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE);
     if (status != PGW_OK) {
-        pthread_mutex_unlock(&connection->mutex);
-        return status;
+        return connection_unlock_status(connection, status);
     }
     if (cat->borrowed) {
         PGW_Counters_add(&connection->counters, PGW_COUNT_LOAN_ERRORS, 1);
-        pthread_mutex_unlock(&connection->mutex);
-        return PGW_LOAN_ERROR;
+        return connection_unlock_status(connection, PGW_LOAN_ERROR);
     }
     n = cat->count;
     if (n > budget) n = budget;
     if (n > (size_t)PGW_SampleSeq_get_maximum(seq))
         n = (size_t)PGW_SampleSeq_get_maximum(seq);
     if (!n) {
-        pthread_mutex_unlock(&connection->mutex);
-        return PGW_NO_DATA;
+        return connection_unlock_status(connection, PGW_NO_DATA);
     }
     if (n > (size_t)INT32_MAX ||
         !PGW_SampleSeq_set_length(seq, (RTI_INT32)n) ||
         !PGW_CANLoanSeq_set_length(&cat->loan, (RTI_INT32)n)) {
         PGW_SampleSeq_set_length(seq, 0);
         PGW_Counters_add(&connection->counters, PGW_COUNT_LOAN_ERRORS, 1);
-        pthread_mutex_unlock(&connection->mutex);
-        return PGW_LOAN_ERROR;
+        return connection_unlock_status(connection, PGW_LOAN_ERROR);
     }
     cat->loan_borrowed = true;
     for (i = 0; i < (RTI_INT32)n; ++i) {
@@ -576,7 +582,7 @@ static PGW_Status read_samples(void *state, PGW_SampleSeq *seq, size_t budget)
     PGW_Counters_add(&connection->counters, PGW_COUNT_LOANS, 1);
     if (cat->count && cat->listener)
         cat->listener->on_data_available(cat->listener->context);
-    if (pthread_mutex_unlock(&connection->mutex)) return PGW_IO_ERROR;
+    if (!connection_unlock(connection)) return PGW_IO_ERROR;
     return PGW_OK;
 }
 
@@ -584,50 +590,44 @@ static PGW_Status return_loan(void *state, PGW_SampleSeq *seq)
 {
     PGW_CANCategoryState *cat = state;
     PGW_CANConnection *connection = cat->connection;
-    if (pthread_mutex_lock(&connection->mutex)) return PGW_IO_ERROR;
+    if (!connection_lock(connection)) return PGW_IO_ERROR;
     if (!seq || cat->borrowed != seq) {
         PGW_Counters_add(&connection->counters, PGW_COUNT_LOAN_ERRORS, 1);
-        pthread_mutex_unlock(&connection->mutex);
-        return PGW_LOAN_ERROR;
+        return connection_unlock_status(connection, PGW_LOAN_ERROR);
     }
     if (!PGW_SampleSeq_set_length(seq, 0) || !PGW_CANLoanSeq_set_length(&cat->loan, 0)) {
         PGW_Counters_add(&connection->counters, PGW_COUNT_LOAN_ERRORS, 1);
-        pthread_mutex_unlock(&connection->mutex);
-        return PGW_LOAN_ERROR;
+        return connection_unlock_status(connection, PGW_LOAN_ERROR);
     }
     cat->borrowed = NULL;
     PGW_Counters_add(&connection->counters, PGW_COUNT_LOANS, UINT64_MAX);
-    return pthread_mutex_unlock(&connection->mutex) ? PGW_IO_ERROR : PGW_OK;
+    return connection_unlock(connection) ? PGW_OK : PGW_IO_ERROR;
 }
 
 static PGW_Status bind_source(void *state, const PGW_SampleRepresentation *source)
 {
     PGW_CANCategoryState *cat = state;
-    if (pthread_mutex_lock(&cat->connection->mutex)) return PGW_IO_ERROR;
+    if (!connection_lock(cat->connection)) return PGW_IO_ERROR;
     if (!source || !PGW_type_info_equal(source->schema, cat->representation.schema) ||
         !source->access || source->access->version != PGW_ABI_VERSION ||
         source->access->size != sizeof(PGW_SampleAccessI) ||
         (!source->access->copy_value && !source->access->view)) {
-        pthread_mutex_unlock(&cat->connection->mutex);
-        return PGW_UNSUPPORTED;
+        return connection_unlock_status(cat->connection, PGW_UNSUPPORTED);
     }
     if (source->access->view && !source->view_contract) {
-        pthread_mutex_unlock(&cat->connection->mutex);
-        return PGW_UNSUPPORTED;
+        return connection_unlock_status(cat->connection, PGW_UNSUPPORTED);
     }
     if (!source->access->copy_value &&
         (source->view_contract->kind != PGW_SAMPLE_VIEW_CANONICAL ||
          source->view_contract->value_size != sizeof(PGW_Signal) ||
          source->view_contract->type_identity != &PGW_CAN_SIGNAL_VALUE_IDENTITY)) {
-        pthread_mutex_unlock(&cat->connection->mutex);
-        return PGW_UNSUPPORTED;
+        return connection_unlock_status(cat->connection, PGW_UNSUPPORTED);
     }
     if (cat->source && cat->source != source) {
-        pthread_mutex_unlock(&cat->connection->mutex);
-        return PGW_UNSUPPORTED;
+        return connection_unlock_status(cat->connection, PGW_UNSUPPORTED);
     }
     cat->source = source;
-    return pthread_mutex_unlock(&cat->connection->mutex) ? PGW_IO_ERROR : PGW_OK;
+    return connection_unlock(cat->connection) ? PGW_OK : PGW_IO_ERROR;
 }
 
 static PGW_Status register_listener(void *state,
@@ -636,19 +636,18 @@ static PGW_Status register_listener(void *state,
     PGW_CANCategoryState *cat = state;
     PGW_CANConnection *connection = cat->connection;
     if (!listener || !listener->on_data_available ||
-        pthread_mutex_lock(&connection->mutex))
+        !connection_lock(connection))
         return PGW_INVALID;
     if (cat->listener && cat->listener != listener) {
-        pthread_mutex_unlock(&connection->mutex);
-        return PGW_INVALID;
+        return connection_unlock_status(connection, PGW_INVALID);
     }
     cat->listener = listener;
     bool pending = (cat->count && cat->input_enabled &&
                     connection->control_enabled) ||
-        atomic_load_explicit(&connection->receiver_status,
-                             memory_order_acquire) != PGW_OK;
+        PGW_ATOMIC_LOAD(&connection->receiver_status,
+                             OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) != PGW_OK;
     if (pending) listener->on_data_available(listener->context);
-    return pthread_mutex_unlock(&connection->mutex) ? PGW_IO_ERROR : PGW_OK;
+    return connection_unlock(connection) ? PGW_OK : PGW_IO_ERROR;
 }
 
 static PGW_Status unregister_listener(void *state,
@@ -656,14 +655,13 @@ static PGW_Status unregister_listener(void *state,
 {
     PGW_CANCategoryState *cat = state;
     PGW_CANConnection *connection = cat->connection;
-    if (!listener || pthread_mutex_lock(&connection->mutex))
+    if (!listener || !connection_lock(connection))
         return PGW_INVALID;
     if (cat->listener != listener) {
-        pthread_mutex_unlock(&connection->mutex);
-        return PGW_INVALID;
+        return connection_unlock_status(connection, PGW_INVALID);
     }
     cat->listener = NULL;
-    return pthread_mutex_unlock(&connection->mutex) ? PGW_IO_ERROR : PGW_OK;
+    return connection_unlock(connection) ? PGW_OK : PGW_IO_ERROR;
 }
 
 static PGW_Status sample_signal(const PGW_SampleRepresentation *source,
@@ -714,18 +712,16 @@ static PGW_Status write_samples(void *state, const PGW_SampleSeq *seq,
         !PGW_WriteResultSeq_get_contiguous_buffer(results)) return PGW_INVALID;
     c = cat->connection;
     if (!c) return PGW_INVALID;
-    if (pthread_mutex_lock(&c->mutex)) return PGW_IO_ERROR;
+    if (!connection_lock(c)) return PGW_IO_ERROR;
     if (!cat->source || c->closed || c->closing) {
-        pthread_mutex_unlock(&c->mutex);
-        return PGW_INVALID;
+        return connection_unlock_status(c, PGW_INVALID);
     }
     invalid_before = c->stats.invalid_commands;
     backpressure_before = c->stats.backpressure_commands;
     n = (size_t)PGW_SampleSeq_get_length(seq);
     if ((size_t)PGW_WriteResultSeq_get_length(results) != n ||
         n > (size_t)INT32_MAX) {
-        pthread_mutex_unlock(&c->mutex);
-        return PGW_INVALID;
+        return connection_unlock_status(c, PGW_INVALID);
     }
     if (!c->control_enabled || !cat->output_enabled) {
         for (i = 0; i < (RTI_INT32)n; ++i) {
@@ -733,11 +729,10 @@ static PGW_Status write_samples(void *state, const PGW_SampleSeq *seq,
             ++c->stats.backpressure_commands;
             PGW_Counters_add(&c->counters, PGW_COUNT_BACKPRESSURE, 1);
         }
-        return pthread_mutex_unlock(&c->mutex) ? PGW_IO_ERROR : PGW_OK;
+        return connection_unlock(c) ? PGW_OK : PGW_IO_ERROR;
     }
     if (!PGW_CANIndexSeq_set_length(&c->write_messages, (RTI_INT32)n)) {
-        pthread_mutex_unlock(&c->mutex);
-        return PGW_CAPACITY;
+        return connection_unlock_status(c, PGW_CAPACITY);
     }
     for (m = 0; m < PGW_CANMessageSeq_get_length(&c->messages); ++m)
         PGW_CANMessageSeq_get_reference(&c->messages, m)->staged = false;
@@ -809,7 +804,7 @@ invalid:
         event(c, 1004, c->stats.invalid_commands - invalid_before);
     if (c->stats.backpressure_commands != backpressure_before)
         event(c, 1005, c->stats.backpressure_commands - backpressure_before);
-    if (pthread_mutex_unlock(&c->mutex)) return PGW_IO_ERROR;
+    if (!connection_unlock(c)) return PGW_IO_ERROR;
     return overall;
 }
 
@@ -926,37 +921,41 @@ static PGW_Status close_connection(PGW_Connection *connection)
     PGW_CANConnection *c = (PGW_CANConnection *)connection;
     RTI_INT32 i;
     if (!c) return PGW_INVALID;
-    if (!c->mutex_initialized || pthread_mutex_lock(&c->mutex))
+    if (!c->mutex_initialized || !connection_lock(c))
         return PGW_IO_ERROR;
     if (c->closed) {
-        if (pthread_mutex_unlock(&c->mutex)) return PGW_IO_ERROR;
+        if (!connection_unlock(c)) return PGW_IO_ERROR;
         return PGW_OK;
     }
     for (i = 0; i < PGW_CANCategoryStateSeq_get_length(&c->categories); ++i)
         if (PGW_CANCategoryStateSeq_get_reference(&c->categories, i)->borrowed) {
             PGW_Counters_add(&c->counters, PGW_COUNT_LOAN_ERRORS, 1);
-            if (pthread_mutex_unlock(&c->mutex)) return PGW_IO_ERROR;
+            if (!connection_unlock(c)) return PGW_IO_ERROR;
             return PGW_LOAN_ERROR;
         }
     c->closing = true;
-    if (pthread_mutex_unlock(&c->mutex)) return PGW_IO_ERROR;
+    if (!connection_unlock(c)) return PGW_IO_ERROR;
     if (c->receiver_started) {
-        atomic_store_explicit(&c->receiver_stopping, true, memory_order_release);
-        if (pthread_join(c->receiver, NULL)) return PGW_IO_ERROR;
+        PGW_ATOMIC_STORE(&c->receiver_stopping, true, OSAPI_ATOMIC_MEMORY_ORDER_RELEASE);
+        if (!OSAPI_Thread_destroy(c->receiver)) return PGW_IO_ERROR;
+        c->receiver = NULL;
         c->receiver_started = false;
     }
-    if (pthread_mutex_lock(&c->mutex))
+    if (!connection_lock(c))
         return PGW_IO_ERROR;
     c->closed = true;
     c->closing = false;
-    if (pthread_mutex_unlock(&c->mutex)) return PGW_IO_ERROR;
+    if (!connection_unlock(c)) return PGW_IO_ERROR;
     PGW_Status status = c->config.transport.iface->close ?
         c->config.transport.iface->close(c->config.transport.state) : PGW_OK;
     PGW_Status released = release_sequences(c);
     PGW_Status mutex_status = PGW_OK;
     if (c->mutex_initialized) {
-        if (pthread_mutex_destroy(&c->mutex)) mutex_status = PGW_IO_ERROR;
-        else c->mutex_initialized = false;
+        if (!OSAPI_Mutex_delete(c->mutex)) mutex_status = PGW_IO_ERROR;
+        else {
+            c->mutex = NULL;
+            c->mutex_initialized = false;
+        }
     }
     return status != PGW_OK ? status :
         (released != PGW_OK ? released : mutex_status);
@@ -969,14 +968,13 @@ static PGW_Status control_apply(void *state, PGW_ControlAction action)
     if (action == PGW_CONTROL_CONNECTION_UP ||
         action == PGW_CONTROL_CONNECTION_DOWN) {
         PGW_CANConnection *connection = state;
-        if (pthread_mutex_lock(&connection->mutex)) return PGW_IO_ERROR;
+        if (!connection_lock(connection)) return PGW_IO_ERROR;
         if (connection->closed || connection->closing) {
-            pthread_mutex_unlock(&connection->mutex);
-            return PGW_INVALID;
+            return connection_unlock_status(connection, PGW_INVALID);
         }
         bool desired = action == PGW_CONTROL_CONNECTION_UP;
         if (connection->control_enabled == desired) {
-            if (pthread_mutex_unlock(&connection->mutex)) return PGW_IO_ERROR;
+            if (!connection_unlock(connection)) return PGW_IO_ERROR;
             return PGW_NO_CHANGE;
         }
         connection->control_enabled = desired;
@@ -989,7 +987,7 @@ static PGW_Status control_apply(void *state, PGW_ControlAction action)
                 category->listener->on_data_available(
                     category->listener->context);
         }
-        return pthread_mutex_unlock(&connection->mutex) ? PGW_IO_ERROR : PGW_OK;
+        return connection_unlock(connection) ? PGW_OK : PGW_IO_ERROR;
     }
     if (action == PGW_CONTROL_INPUT_ENABLE ||
         action == PGW_CONTROL_INPUT_DISABLE ||
@@ -998,10 +996,9 @@ static PGW_Status control_apply(void *state, PGW_ControlAction action)
         PGW_CANCategoryState *category = state;
         if (!category->connection) return PGW_INVALID;
         PGW_CANConnection *connection = category->connection;
-        if (pthread_mutex_lock(&connection->mutex)) return PGW_IO_ERROR;
+        if (!connection_lock(connection)) return PGW_IO_ERROR;
         if (connection->closed || connection->closing) {
-            pthread_mutex_unlock(&connection->mutex);
-            return PGW_INVALID;
+            return connection_unlock_status(connection, PGW_INVALID);
         }
         bool input = action == PGW_CONTROL_INPUT_ENABLE ||
                      action == PGW_CONTROL_INPUT_DISABLE;
@@ -1009,7 +1006,7 @@ static PGW_Status control_apply(void *state, PGW_ControlAction action)
                        action == PGW_CONTROL_OUTPUT_ENABLE;
         bool *enabled = input ? &category->input_enabled : &category->output_enabled;
         if (*enabled == desired) {
-            if (pthread_mutex_unlock(&connection->mutex)) return PGW_IO_ERROR;
+            if (!connection_unlock(connection)) return PGW_IO_ERROR;
             return PGW_NO_CHANGE;
         }
         *enabled = desired;
@@ -1022,7 +1019,7 @@ static PGW_Status control_apply(void *state, PGW_ControlAction action)
                 category->listener->on_data_available(
                     category->listener->context);
         }
-        return pthread_mutex_unlock(&connection->mutex) ? PGW_IO_ERROR : PGW_OK;
+        return connection_unlock(connection) ? PGW_OK : PGW_IO_ERROR;
     }
     return PGW_UNSUPPORTED;
 }
@@ -1104,6 +1101,8 @@ PGW_Status PGW_CAN_storage_size(const PGW_CANConfig *cfg, size_t *bytes)
 static PGW_Status create(const void *configuration, PGW_Arena *arena,
                          PGW_Connection **out)
 {
+    struct OSAPI_ThreadProperty thread_property =
+        OSAPI_ThreadProperty_INITIALIZER;
     const PGW_CANConfig *cfg = configuration;
     PGW_CANConnection *c = NULL;
     size_t start;
@@ -1179,13 +1178,14 @@ static PGW_Status create(const void *configuration, PGW_Arena *arena,
     c->sequence_initialization |= UINT32_C(1) << ((id) + 4); \
 } while (0)
     ALLOC(c, 1, PGW_CANConnection);
-    if (pthread_mutex_init(&c->mutex, NULL)) {
+    c->mutex = OSAPI_Mutex_new();
+    if (!c->mutex) {
         status = PGW_FATAL;
         goto fail;
     }
     c->mutex_initialized = true;
-    atomic_init(&c->receiver_stopping, false);
-    atomic_init(&c->receiver_status, PGW_OK);
+    PGW_ATOMIC_INIT(&c->receiver_stopping, false);
+    PGW_ATOMIC_INIT(&c->receiver_status, PGW_OK);
     c->control_enabled = true;
     c->config.entity_id = cfg->entity_id;
     c->config.transport = cfg->transport;
@@ -1247,7 +1247,9 @@ static PGW_Status create(const void *configuration, PGW_Arena *arena,
         goto fail;
     }
     c->stats.mutable_bytes = arena->used - start;
-    if (pthread_create(&c->receiver, NULL, receiver_entry, c)) {
+    c->receiver = OSAPI_Thread_create("pgw-can-rx", &thread_property,
+        receiver_entry, c, receiver_wakeup);
+    if (!c->receiver || !OSAPI_Thread_start(c->receiver)) {
         status = PGW_FATAL;
         goto fail;
     }
@@ -1256,16 +1258,23 @@ static PGW_Status create(const void *configuration, PGW_Arena *arena,
     return PGW_OK;
 fail:
     if (c) {
-        if (c->receiver_started) {
-            atomic_store_explicit(&c->receiver_stopping, true,
-                                  memory_order_release);
-            if (!pthread_join(c->receiver, NULL)) c->receiver_started = false;
-            else status = PGW_IO_ERROR;
+        if (c->receiver) {
+            PGW_ATOMIC_STORE(&c->receiver_stopping, true,
+                                  OSAPI_ATOMIC_MEMORY_ORDER_RELEASE);
+            if (!OSAPI_Thread_destroy(c->receiver)) {
+                status = PGW_IO_ERROR;
+            } else {
+                c->receiver = NULL;
+                c->receiver_started = false;
+            }
         }
         release_sequences(c);
         if (c->mutex_initialized) {
-            if (pthread_mutex_destroy(&c->mutex)) status = PGW_IO_ERROR;
-            else c->mutex_initialized = false;
+            if (!OSAPI_Mutex_delete(c->mutex)) status = PGW_IO_ERROR;
+            else {
+                c->mutex = NULL;
+                c->mutex_initialized = false;
+            }
         }
     }
     arena->used = start;
@@ -1276,10 +1285,10 @@ PGW_Status PGW_CAN_stats(const PGW_Connection *c, PGW_CANStats *stats)
 {
     if (!c || !stats) return PGW_INVALID;
     PGW_CANConnection *mutable = (PGW_CANConnection *)c;
-    if (!mutable->mutex_initialized || pthread_mutex_lock(&mutable->mutex))
+    if (!mutable->mutex_initialized || !connection_lock(mutable))
         return PGW_IO_ERROR;
     *stats = mutable->stats;
-    return pthread_mutex_unlock(&mutable->mutex) ? PGW_IO_ERROR : PGW_OK;
+    return connection_unlock(mutable) ? PGW_OK : PGW_IO_ERROR;
 }
 
 PGW_Status PGW_CAN_baseline_timestamp(const PGW_Connection *connection,
@@ -1287,7 +1296,7 @@ PGW_Status PGW_CAN_baseline_timestamp(const PGW_Connection *connection,
 {
     const PGW_CANConnection *c = (const PGW_CANConnection *)connection;
     if (!c || !out || message > (size_t)INT32_MAX ||
-        !c->mutex_initialized || pthread_mutex_lock((pthread_mutex_t *)&c->mutex))
+        !c->mutex_initialized || !connection_lock((PGW_CANConnection *)c))
         return PGW_INVALID;
     if (c->closed ||
         (RTI_INT32)message >= PGW_CANMessageSeq_get_length(&c->messages))
@@ -1295,15 +1304,13 @@ PGW_Status PGW_CAN_baseline_timestamp(const PGW_Connection *connection,
     const PGW_CANMessage *baseline = PGW_CANMessageSeq_get_reference(
         &c->messages, (RTI_INT32)message);
     if (!baseline->baseline) {
-        pthread_mutex_unlock((pthread_mutex_t *)&c->mutex);
-        return PGW_NO_DATA;
+        return connection_unlock_status((PGW_CANConnection *)c, PGW_NO_DATA);
     }
     *out = baseline->received.timestamp;
-    if (pthread_mutex_unlock((pthread_mutex_t *)&c->mutex)) return PGW_IO_ERROR;
+    if (!connection_unlock((PGW_CANConnection *)c)) return PGW_IO_ERROR;
     return out->valid ? PGW_OK : PGW_NO_DATA;
 invalid_unlock:
-    pthread_mutex_unlock((pthread_mutex_t *)&c->mutex);
-    return PGW_INVALID;
+    return connection_unlock_status((PGW_CANConnection *)c, PGW_INVALID);
 }
 
 const PGW_Counters *PGW_CAN_counters(const PGW_Connection *c)

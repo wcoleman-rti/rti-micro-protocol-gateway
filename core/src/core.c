@@ -10,10 +10,62 @@
  * the software.
  */
 
+#include "pgw/atomic.h"
 #include "pgw/core.h"
 #include "osapi/osapi_thread.h"
 #include <limits.h>
 #include <string.h>
+
+static PGW_EntityState route_state(const PGW_Route *route)
+{
+    return (PGW_EntityState)PGW_ATOMIC_LOAD(
+        &route->lifecycle, OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE);
+}
+
+static void route_state_store(PGW_Route *route, PGW_EntityState state)
+{
+    PGW_ATOMIC_STORE(&route->lifecycle, state, OSAPI_ATOMIC_MEMORY_ORDER_RELEASE);
+}
+
+static PGW_EntityState session_state(const PGW_Session *session)
+{
+    return (PGW_EntityState)PGW_ATOMIC_LOAD(
+        &session->lifecycle, OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE);
+}
+
+static void session_state_store(PGW_Session *session, PGW_EntityState state)
+{
+    PGW_ATOMIC_STORE(&session->lifecycle, state, OSAPI_ATOMIC_MEMORY_ORDER_RELEASE);
+}
+
+static void session_fault(PGW_Session *session, PGW_Status status)
+{
+    PGW_ATOMIC_STORE(&session->error, status, OSAPI_ATOMIC_MEMORY_ORDER_RELEASE);
+    session_state_store(session, PGW_FAULTED);
+}
+
+static PGW_EntityState service_state(const PGW_Service *service)
+{
+    return (PGW_EntityState)PGW_ATOMIC_LOAD(
+        &service->lifecycle, OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE);
+}
+
+static void service_state_store(PGW_Service *service, PGW_EntityState state)
+{
+    PGW_ATOMIC_STORE(&service->lifecycle, state, OSAPI_ATOMIC_MEMORY_ORDER_RELEASE);
+}
+
+static bool service_state_take(PGW_Service *service)
+{
+    return service && service->state_mutex &&
+           OSAPI_Mutex_take(service->state_mutex);
+}
+
+static bool service_state_give(PGW_Service *service)
+{
+    return service && service->state_mutex &&
+           OSAPI_Mutex_give(service->state_mutex);
+}
 
 bool PGW_size_add(size_t a, size_t b, size_t *out)
 {
@@ -225,7 +277,7 @@ const PGW_SampleRepresentation *PGW_Registry_find_representation(const PGW_Regis
 PGW_Status PGW_Route_initialize_storage(PGW_Route *r, const PGW_SampleSeq *samples,
                                        const PGW_WriteResultSeq *results)
 {
-    if (!r || r->lifecycle != PGW_UNINITIALIZED || !samples || !results ||
+    if (!r || route_state(r) != PGW_UNINITIALIZED || !samples || !results ||
         r->storage_initialized) return PGW_INVALID;
     RTI_INT32 capacity = PGW_SampleSeq_get_maximum(samples);
     RTI_INT32 result_capacity = PGW_WriteResultSeq_get_maximum(results);
@@ -262,8 +314,21 @@ static PGW_Status session_signal_wake(PGW_Session *session)
     if (!session || !session->async_waitset.wake_condition) return PGW_OK;
     if (DDS_GuardCondition_set_trigger_value(session->async_waitset.wake_condition,
             DDS_BOOLEAN_TRUE) != DDS_RETCODE_OK) {
-        atomic_store_explicit(&session->error, PGW_IO_ERROR,
-                              memory_order_release);
+        PGW_ATOMIC_STORE(&session->error, PGW_IO_ERROR,
+                              OSAPI_ATOMIC_MEMORY_ORDER_RELEASE);
+        return PGW_IO_ERROR;
+    }
+    return PGW_OK;
+}
+
+static PGW_Status route_trigger_ready(PGW_Route *route)
+{
+    if (!route->ready_condition) return PGW_INVALID;
+    if (DDS_GuardCondition_set_trigger_value(route->ready_condition,
+            DDS_BOOLEAN_TRUE) != DDS_RETCODE_OK) {
+        if (route->session)
+            PGW_ATOMIC_STORE(&route->session->error, PGW_IO_ERROR,
+                             OSAPI_ATOMIC_MEMORY_ORDER_RELEASE);
         return PGW_IO_ERROR;
     }
     return PGW_OK;
@@ -272,18 +337,15 @@ static PGW_Status session_signal_wake(PGW_Session *session)
 static PGW_Status route_signal_ready(PGW_Route *route)
 {
     if (!route) return PGW_INVALID;
-    if (route->lifecycle == PGW_FAULTED) return PGW_OK;
-    atomic_store_explicit(&route->pending, true, memory_order_release);
-    if (route->lifecycle == PGW_PAUSED) return PGW_OK;
-    if (!route->ready_condition) return PGW_INVALID;
-    if (DDS_GuardCondition_set_trigger_value(route->ready_condition,
-            DDS_BOOLEAN_TRUE) != DDS_RETCODE_OK) {
-        if (route->session)
-            atomic_store_explicit(&route->session->error, PGW_IO_ERROR,
-                                  memory_order_release);
-        return PGW_IO_ERROR;
-    }
-    return PGW_OK;
+    if (PGW_ATOMIC_LOAD(&route->lifecycle,
+            OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) == PGW_FAULTED)
+        return PGW_OK;
+    PGW_ATOMIC_ADD(&route->ready_generation, 1,
+                   OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE_RELEASE);
+    if (PGW_ATOMIC_LOAD(&route->lifecycle,
+            OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) == PGW_PAUSED)
+        return PGW_OK;
+    return route_trigger_ready(route);
 }
 
 static void route_data_available(void *context)
@@ -298,8 +360,8 @@ static void control_data_available(void *context)
 {
     PGW_Service *service = context;
     if (!service || !service->control_session) return;
-    atomic_store_explicit(&service->control_pending, true,
-                          memory_order_release);
+    PGW_ATOMIC_ADD(&service->control_generation, 1,
+                   OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE_RELEASE);
     (void)session_signal_wake(service->control_session);
 }
 #endif
@@ -323,35 +385,70 @@ static PGW_Status notify_route_state(PGW_Route *route)
 PGW_Status PGW_Route_pause(PGW_Route *r)
 {
     if (!r || !r->storage_initialized) return PGW_INVALID;
-    if (r->lifecycle == PGW_FAULTED) return PGW_FATAL;
-    if (r->lifecycle == PGW_PAUSED) return PGW_NO_CHANGE;
-    if (r->lifecycle != PGW_ENABLED && r->lifecycle != PGW_STARTED)
+    PGW_EntityState state = route_state(r);
+    if (state == PGW_FAULTED) return PGW_FATAL;
+    if (state == PGW_PAUSED) return PGW_NO_CHANGE;
+    PGW_Service *service = r->session ? r->session->service : NULL;
+    if (!service) return PGW_INVALID;
+    if (!service_state_take(service)) return PGW_IO_ERROR;
+    PGW_EntityState lifecycle = (PGW_EntityState)PGW_ATOMIC_LOAD(
+        &r->lifecycle, OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE);
+    if (lifecycle == PGW_FAULTED) {
+        if (!service_state_give(service)) return PGW_IO_ERROR;
+        return PGW_FATAL;
+    }
+    if (lifecycle == PGW_PAUSED) {
+        if (!service_state_give(service)) return PGW_IO_ERROR;
+        return PGW_NO_CHANGE;
+    }
+    if (lifecycle != PGW_ENABLED && lifecycle != PGW_STARTED) {
+        if (!service_state_give(service)) return PGW_IO_ERROR;
         return PGW_INVALID;
-    r->lifecycle = PGW_PAUSED;
+    }
+    PGW_ATOMIC_STORE(&r->lifecycle, PGW_PAUSED,
+                     OSAPI_ATOMIC_MEMORY_ORDER_RELEASE);
+    if (!service_state_give(service)) return PGW_IO_ERROR;
     return notify_route_state(r);
 }
 
 PGW_Status PGW_Route_resume(PGW_Route *r)
 {
     if (!r || !r->storage_initialized) return PGW_INVALID;
-    if (r->lifecycle == PGW_FAULTED) return PGW_FATAL;
-    if (r->lifecycle == PGW_PAUSED) {
-        r->lifecycle = PGW_ENABLED;
-        if (atomic_load_explicit(&r->pending, memory_order_acquire)) {
-            PGW_Status status = route_signal_ready(r);
+    if (route_state(r) == PGW_FAULTED) return PGW_FATAL;
+    PGW_Service *service = r->session ? r->session->service : NULL;
+    if (!service) return PGW_INVALID;
+    if (!service_state_take(service)) return PGW_IO_ERROR;
+    PGW_EntityState lifecycle = (PGW_EntityState)PGW_ATOMIC_LOAD(
+        &r->lifecycle, OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE);
+    if (lifecycle == PGW_FAULTED) {
+        if (!service_state_give(service)) return PGW_IO_ERROR;
+        return PGW_FATAL;
+    }
+    if (lifecycle == PGW_PAUSED) {
+        PGW_ATOMIC_STORE(&r->lifecycle, PGW_ENABLED,
+                         OSAPI_ATOMIC_MEMORY_ORDER_RELEASE);
+        if (!service_state_give(service)) return PGW_IO_ERROR;
+        uint64_t generation = (uint64_t)PGW_ATOMIC_LOAD(
+            &r->ready_generation, OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE);
+        if (generation != (uint64_t)PGW_ATOMIC_LOAD(
+                &r->dispatched_generation, OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE)) {
+            PGW_Status status = route_trigger_ready(r);
             if (status != PGW_OK) return status;
         }
         return notify_route_state(r);
     }
-    if (r->lifecycle == PGW_ENABLED || r->lifecycle == PGW_STARTED)
+    if (lifecycle == PGW_ENABLED || lifecycle == PGW_STARTED) {
+        if (!service_state_give(service)) return PGW_IO_ERROR;
         return PGW_NO_CHANGE;
+    }
+    if (!service_state_give(service)) return PGW_IO_ERROR;
     return PGW_INVALID;
 }
 
 PGW_Status PGW_Session_set_routes(PGW_Session *session,
                                   const PGW_RouteSeq *routes)
 {
-    if (!session || session->lifecycle != PGW_UNINITIALIZED || !routes ||
+    if (!session || session_state(session) != PGW_UNINITIALIZED || !routes ||
         session->routes_initialized) return PGW_INVALID;
     RTI_INT32 count = PGW_RouteSeq_get_length(routes);
     RTI_INT32 capacity = PGW_RouteSeq_get_maximum(routes);
@@ -371,7 +468,7 @@ PGW_Status PGW_Session_set_routes(PGW_Session *session,
 PGW_Status PGW_Service_set_sessions(PGW_Service *service,
                                    const PGW_SessionSeq *sessions)
 {
-    if (!service || service->lifecycle != PGW_UNINITIALIZED || !sessions ||
+    if (!service || service_state(service) != PGW_UNINITIALIZED || !sessions ||
         service->sessions_initialized) return PGW_INVALID;
     RTI_INT32 count = PGW_SessionSeq_get_length(sessions);
     RTI_INT32 capacity = PGW_SessionSeq_get_maximum(sessions);
@@ -409,7 +506,8 @@ PGW_Status PGW_Service_set_control(PGW_Service *service,
                                   PGW_ControlResource *resources, size_t count)
 {
     const uint32_t action_bits = (UINT32_C(1) << 8) - 1;
-    if (!service || service->lifecycle != PGW_UNINITIALIZED ||
+    OSAPI_Mutex_T *control_mutex;
+    if (!service || service_state(service) != PGW_UNINITIALIZED ||
         !service->sessions_initialized || !control_session ||
         !resources || !count ||
         service->control_resources) return PGW_INVALID;
@@ -452,18 +550,20 @@ PGW_Status PGW_Service_set_control(PGW_Service *service,
                 return PGW_INVALID;
         }
     }
+    control_mutex = OSAPI_Mutex_new();
+    if (!control_mutex) return PGW_FATAL;
     service->control = endpoint;
     service->control_session = control_session;
     service->control_listener = (PGW_ReaderListener){
         control_data_available, service
     };
-    atomic_init(&service->control_pending, false);
+    service->control_mutex = control_mutex;
+    PGW_ATOMIC_INIT(&service->control_generation, 0);
     service->control_listener_registered = false;
     service->control_resources = resources;
     service->control_resource_count = count;
     service->control_state_retry_cursor = 0;
     service->control_counters = (PGW_ControlCounters){0};
-    atomic_flag_clear(&service->control_lock);
     return PGW_OK;
 }
 
@@ -471,11 +571,10 @@ PGW_Status PGW_Service_control_counters(PGW_Service *service,
                                        PGW_ControlCounters *out)
 {
     if (!service || !out || !service->control_resources) return PGW_INVALID;
-    while (atomic_flag_test_and_set_explicit(&service->control_lock,
-                                              memory_order_acquire)) {}
+    if (!service->control_mutex ||
+        !OSAPI_Mutex_take(service->control_mutex)) return PGW_IO_ERROR;
     *out = service->control_counters;
-    atomic_flag_clear_explicit(&service->control_lock, memory_order_release);
-    return PGW_OK;
+    return OSAPI_Mutex_give(service->control_mutex) ? PGW_OK : PGW_IO_ERROR;
 }
 
 PGW_Status PGW_Service_set_telemetry(PGW_Service *service,
@@ -483,7 +582,7 @@ PGW_Status PGW_Service_set_telemetry(PGW_Service *service,
                                     size_t count, uint32_t period_ms,
                                     uint32_t minimum_period_ms)
 {
-    if (!service || service->lifecycle != PGW_UNINITIALIZED ||
+    if (!service || service_state(service) != PGW_UNINITIALIZED ||
         !service->control_resources || service->control_telemetry_metrics ||
         !metrics || !count || !minimum_period_ms ||
         !service->control.iface->write_telemetry ||
@@ -520,9 +619,10 @@ PGW_Status PGW_Service_set_telemetry(PGW_Service *service,
 
 static PGW_ControlResourceStatus control_route_status(const PGW_Route *route)
 {
-    if (route->lifecycle == PGW_FAULTED) return PGW_CONTROL_STATUS_FAULTED;
-    if (route->lifecycle == PGW_PAUSED) return PGW_CONTROL_STATUS_PAUSED;
-    if (route->lifecycle == PGW_ENABLED || route->lifecycle == PGW_STARTED)
+    PGW_EntityState state = route_state(route);
+    if (state == PGW_FAULTED) return PGW_CONTROL_STATUS_FAULTED;
+    if (state == PGW_PAUSED) return PGW_CONTROL_STATUS_PAUSED;
+    if (state == PGW_ENABLED || state == PGW_STARTED)
         return PGW_CONTROL_STATUS_UP;
     return PGW_CONTROL_STATUS_UNKNOWN;
 }
@@ -773,7 +873,17 @@ static bool route_storage_finalize(PGW_Route *r)
 static PGW_Status fail(PGW_Route *r, PGW_Status status, const char *operation)
 {
     r->error = (PGW_Error){status, r->id, operation};
-    r->lifecycle = PGW_FAULTED;
+    PGW_Service *service = r->session ? r->session->service : NULL;
+    if (service && service->state_mutex &&
+        !OSAPI_Mutex_take(service->state_mutex)) {
+        route_state_store(r, PGW_FAULTED);
+        return PGW_IO_ERROR;
+    }
+    PGW_ATOMIC_STORE(&r->lifecycle, PGW_FAULTED,
+                     OSAPI_ATOMIC_MEMORY_ORDER_RELEASE);
+    if (service && service->state_mutex &&
+        !OSAPI_Mutex_give(service->state_mutex))
+        return PGW_IO_ERROR;
     PGW_Counters_add(&r->counters, PGW_COUNT_ROUTE_FAULTS, 1);
     (void)notify_route_state(r);
     return status;
@@ -799,51 +909,29 @@ static PGW_Status event(PGW_Service *s, PGW_Route *r, uint32_t code, uint64_t co
 #if defined(PGW_ENABLE_ROUTE_LATENCY_METRICS)
 static bool route_latency_initialize(PGW_RouteLatencyStats *stats)
 {
-    atomic_init(&stats->batches, 0);
-    atomic_init(&stats->timed_batches, 0);
-    atomic_init(&stats->samples, 0);
-    atomic_init(&stats->accepted, 0);
-    atomic_init(&stats->backpressure, 0);
-    atomic_init(&stats->invalid, 0);
-    atomic_init(&stats->fatal, 0);
-    atomic_init(&stats->clock_failures, 0);
-    atomic_init(&stats->total_ns, 0);
-    atomic_init(&stats->minimum_ns, UINT64_MAX);
-    atomic_init(&stats->maximum_ns, 0);
+    PGW_ATOMIC_INIT(&stats->batches, 0);
+    PGW_ATOMIC_INIT(&stats->timed_batches, 0);
+    PGW_ATOMIC_INIT(&stats->samples, 0);
+    PGW_ATOMIC_INIT(&stats->accepted, 0);
+    PGW_ATOMIC_INIT(&stats->backpressure, 0);
+    PGW_ATOMIC_INIT(&stats->invalid, 0);
+    PGW_ATOMIC_INIT(&stats->fatal, 0);
+    PGW_ATOMIC_INIT(&stats->clock_failures, 0);
+    PGW_ATOMIC_INIT(&stats->total_ns, 0);
+    PGW_ATOMIC_INIT(&stats->minimum_ns, UINT64_MAX);
+    PGW_ATOMIC_INIT(&stats->maximum_ns, 0);
     for (size_t i = 0; i < PGW_ROUTE_LATENCY_HISTOGRAM_BUCKETS; ++i)
-        atomic_init(&stats->histogram[i], 0);
-    if (!atomic_is_lock_free(&stats->batches) ||
-        !atomic_is_lock_free(&stats->total_ns) ||
-        !atomic_is_lock_free(&stats->histogram[0]))
-        return false;
+        PGW_ATOMIC_INIT(&stats->histogram[i], 0);
     return true;
 }
 
 static void route_latency_clock_failure(PGW_Route *route)
 {
-    atomic_fetch_add_explicit(&route->latency.clock_failures, 1,
-                              memory_order_relaxed);
+    PGW_ATOMIC_ADD(&route->latency.clock_failures, 1,
+                              OSAPI_ATOMIC_MEMORY_ORDER_RELAXED);
 }
 
-static void route_latency_minimum(PGW_RouteLatencyStats *stats, uint64_t value)
-{
-    uint_fast64_t current = atomic_load_explicit(&stats->minimum_ns,
-                                                memory_order_relaxed);
-    while (value < current &&
-           !atomic_compare_exchange_weak_explicit(&stats->minimum_ns, &current,
-               value, memory_order_relaxed, memory_order_relaxed)) {}
-}
-
-static void route_latency_maximum(PGW_RouteLatencyStats *stats, uint64_t value)
-{
-    uint_fast64_t current = atomic_load_explicit(&stats->maximum_ns,
-                                                memory_order_relaxed);
-    while (value > current &&
-           !atomic_compare_exchange_weak_explicit(&stats->maximum_ns, &current,
-               value, memory_order_relaxed, memory_order_relaxed)) {}
-}
-
-static void route_latency_observe(PGW_Route *route, uint64_t duration_ns)
+static PGW_Status route_latency_observe(PGW_Route *route, uint64_t duration_ns)
 {
     unsigned bucket = 0;
     uint64_t upper_bound = 1000;
@@ -853,11 +941,24 @@ static void route_latency_observe(PGW_Route *route, uint64_t duration_ns)
         ++bucket;
     }
     PGW_RouteLatencyStats *stats = &route->latency;
-    atomic_fetch_add_explicit(&stats->timed_batches, 1, memory_order_relaxed);
-    atomic_fetch_add_explicit(&stats->total_ns, duration_ns, memory_order_relaxed);
-    atomic_fetch_add_explicit(&stats->histogram[bucket], 1, memory_order_relaxed);
-    route_latency_minimum(stats, duration_ns);
-    route_latency_maximum(stats, duration_ns);
+    PGW_ATOMIC_ADD(&stats->timed_batches, 1, OSAPI_ATOMIC_MEMORY_ORDER_RELAXED);
+    PGW_ATOMIC_ADD(&stats->total_ns, duration_ns, OSAPI_ATOMIC_MEMORY_ORDER_RELAXED);
+    PGW_ATOMIC_ADD(&stats->histogram[bucket], 1, OSAPI_ATOMIC_MEMORY_ORDER_RELAXED);
+    PGW_Service *service = route->session ? route->session->service : NULL;
+    if (!service || !service->state_mutex ||
+        !OSAPI_Mutex_take(service->state_mutex))
+        return PGW_IO_ERROR;
+    uint64_t minimum = (uint64_t)PGW_ATOMIC_LOAD(
+        &stats->minimum_ns, OSAPI_ATOMIC_MEMORY_ORDER_RELAXED);
+    uint64_t maximum = (uint64_t)PGW_ATOMIC_LOAD(
+        &stats->maximum_ns, OSAPI_ATOMIC_MEMORY_ORDER_RELAXED);
+    if (duration_ns < minimum)
+        PGW_ATOMIC_STORE(&stats->minimum_ns, duration_ns,
+                         OSAPI_ATOMIC_MEMORY_ORDER_RELAXED);
+    if (duration_ns > maximum)
+        PGW_ATOMIC_STORE(&stats->maximum_ns, duration_ns,
+                         OSAPI_ATOMIC_MEMORY_ORDER_RELAXED);
+    return OSAPI_Mutex_give(service->state_mutex) ? PGW_OK : PGW_IO_ERROR;
 }
 
 static void route_latency_batch(PGW_Route *route, size_t samples,
@@ -865,12 +966,12 @@ static void route_latency_batch(PGW_Route *route, size_t samples,
                                 uint64_t invalid, uint64_t fatal)
 {
     PGW_RouteLatencyStats *stats = &route->latency;
-    atomic_fetch_add_explicit(&stats->batches, 1, memory_order_relaxed);
-    atomic_fetch_add_explicit(&stats->samples, samples, memory_order_relaxed);
-    atomic_fetch_add_explicit(&stats->accepted, accepted, memory_order_relaxed);
-    atomic_fetch_add_explicit(&stats->backpressure, backpressure, memory_order_relaxed);
-    atomic_fetch_add_explicit(&stats->invalid, invalid, memory_order_relaxed);
-    atomic_fetch_add_explicit(&stats->fatal, fatal, memory_order_relaxed);
+    PGW_ATOMIC_ADD(&stats->batches, 1, OSAPI_ATOMIC_MEMORY_ORDER_RELAXED);
+    PGW_ATOMIC_ADD(&stats->samples, samples, OSAPI_ATOMIC_MEMORY_ORDER_RELAXED);
+    PGW_ATOMIC_ADD(&stats->accepted, accepted, OSAPI_ATOMIC_MEMORY_ORDER_RELAXED);
+    PGW_ATOMIC_ADD(&stats->backpressure, backpressure, OSAPI_ATOMIC_MEMORY_ORDER_RELAXED);
+    PGW_ATOMIC_ADD(&stats->invalid, invalid, OSAPI_ATOMIC_MEMORY_ORDER_RELAXED);
+    PGW_ATOMIC_ADD(&stats->fatal, fatal, OSAPI_ATOMIC_MEMORY_ORDER_RELAXED);
 }
 
 PGW_Status PGW_Route_latency_snapshot(const PGW_Route *route,
@@ -878,23 +979,28 @@ PGW_Status PGW_Route_latency_snapshot(const PGW_Route *route,
 {
     if (!route || !out || !route->latency_initialized) return PGW_INVALID;
     const PGW_RouteLatencyStats *stats = &route->latency;
+    PGW_Service *service = route->session ? route->session->service : NULL;
+    if (!service || !service->state_mutex ||
+        !OSAPI_Mutex_take(service->state_mutex))
+        return PGW_IO_ERROR;
     PGW_RouteLatencySnapshot snapshot = {
-        .batches = atomic_load_explicit(&stats->batches, memory_order_relaxed),
-        .timed_batches = atomic_load_explicit(&stats->timed_batches, memory_order_relaxed),
-        .samples = atomic_load_explicit(&stats->samples, memory_order_relaxed),
-        .accepted = atomic_load_explicit(&stats->accepted, memory_order_relaxed),
-        .backpressure = atomic_load_explicit(&stats->backpressure, memory_order_relaxed),
-        .invalid = atomic_load_explicit(&stats->invalid, memory_order_relaxed),
-        .fatal = atomic_load_explicit(&stats->fatal, memory_order_relaxed),
-        .clock_failures = atomic_load_explicit(&stats->clock_failures, memory_order_relaxed),
-        .total_ns = atomic_load_explicit(&stats->total_ns, memory_order_relaxed),
-        .minimum_ns = atomic_load_explicit(&stats->minimum_ns, memory_order_relaxed),
-        .maximum_ns = atomic_load_explicit(&stats->maximum_ns, memory_order_relaxed)
+        .batches = PGW_ATOMIC_LOAD(&stats->batches, OSAPI_ATOMIC_MEMORY_ORDER_RELAXED),
+        .timed_batches = PGW_ATOMIC_LOAD(&stats->timed_batches, OSAPI_ATOMIC_MEMORY_ORDER_RELAXED),
+        .samples = PGW_ATOMIC_LOAD(&stats->samples, OSAPI_ATOMIC_MEMORY_ORDER_RELAXED),
+        .accepted = PGW_ATOMIC_LOAD(&stats->accepted, OSAPI_ATOMIC_MEMORY_ORDER_RELAXED),
+        .backpressure = PGW_ATOMIC_LOAD(&stats->backpressure, OSAPI_ATOMIC_MEMORY_ORDER_RELAXED),
+        .invalid = PGW_ATOMIC_LOAD(&stats->invalid, OSAPI_ATOMIC_MEMORY_ORDER_RELAXED),
+        .fatal = PGW_ATOMIC_LOAD(&stats->fatal, OSAPI_ATOMIC_MEMORY_ORDER_RELAXED),
+        .clock_failures = PGW_ATOMIC_LOAD(&stats->clock_failures, OSAPI_ATOMIC_MEMORY_ORDER_RELAXED),
+        .total_ns = PGW_ATOMIC_LOAD(&stats->total_ns, OSAPI_ATOMIC_MEMORY_ORDER_RELAXED),
+        .minimum_ns = PGW_ATOMIC_LOAD(&stats->minimum_ns, OSAPI_ATOMIC_MEMORY_ORDER_RELAXED),
+        .maximum_ns = PGW_ATOMIC_LOAD(&stats->maximum_ns, OSAPI_ATOMIC_MEMORY_ORDER_RELAXED)
     };
     for (size_t i = 0; i < PGW_ROUTE_LATENCY_HISTOGRAM_BUCKETS; ++i)
-        snapshot.histogram[i] = atomic_load_explicit(&stats->histogram[i],
-                                                     memory_order_relaxed);
+        snapshot.histogram[i] = PGW_ATOMIC_LOAD(&stats->histogram[i],
+                                                     OSAPI_ATOMIC_MEMORY_ORDER_RELAXED);
     if (!snapshot.timed_batches) snapshot.minimum_ns = 0;
+    if (!OSAPI_Mutex_give(service->state_mutex)) return PGW_IO_ERROR;
     *out = snapshot;
     return PGW_OK;
 }
@@ -902,9 +1008,16 @@ PGW_Status PGW_Route_latency_snapshot(const PGW_Route *route,
 
 static PGW_Status route_step(PGW_Service *s, PGW_Route *r)
 {
-    if (r->lifecycle == PGW_FAULTED || r->lifecycle == PGW_PAUSED)
-        return PGW_OK;
-    r->lifecycle = PGW_STARTED;
+    if (!service_state_take(s)) return PGW_IO_ERROR;
+    PGW_EntityState lifecycle = (PGW_EntityState)PGW_ATOMIC_LOAD(
+        &r->lifecycle, OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE);
+    if (lifecycle == PGW_FAULTED || lifecycle == PGW_PAUSED) {
+        (void)service_state_give(s);
+        return PGW_NO_CHANGE;
+    }
+    PGW_ATOMIC_STORE(&r->lifecycle, PGW_STARTED,
+                     OSAPI_ATOMIC_MEMORY_ORDER_RELEASE);
+    if (!service_state_give(s)) return PGW_IO_ERROR;
     size_t maximum = PGW_SampleSeq_get_maximum(&r->samples);
     size_t budget = s->sample_budget < maximum ? s->sample_budget : maximum;
 #if defined(PGW_ENABLE_ROUTE_LATENCY_METRICS)
@@ -926,14 +1039,15 @@ static PGW_Status route_step(PGW_Service *s, PGW_Route *r)
     }
     PGW_Counters_add(&r->counters, PGW_COUNT_LOANS, 1);
     PGW_Counters_add(&r->counters, PGW_COUNT_RECEIVED, count);
-    if (count > atomic_load_explicit(&r->counters.values[PGW_COUNT_HIGH_WATER], memory_order_relaxed))
-        atomic_store_explicit(&r->counters.values[PGW_COUNT_HIGH_WATER], count, memory_order_relaxed);
+    if (count > PGW_ATOMIC_LOAD(&r->counters.values[PGW_COUNT_HIGH_WATER], OSAPI_ATOMIC_MEMORY_ORDER_RELAXED))
+        PGW_ATOMIC_STORE(&r->counters.values[PGW_COUNT_HIGH_WATER], count, OSAPI_ATOMIC_MEMORY_ORDER_RELAXED);
     bool outcomes_ready = count <= budget && PGW_WriteResultSeq_set_length(&r->results, count);
     bool fatal = !outcomes_ready;
 #if defined(PGW_ENABLE_ROUTE_LATENCY_METRICS)
     bool writer_called = false;
     bool latency_finish_valid = false;
     uint64_t latency_finish = 0;
+    PGW_Status latency_status = PGW_OK;
 #endif
     if (outcomes_ready)
         for (size_t i = 0; i < count; ++i) {
@@ -969,7 +1083,8 @@ static PGW_Status route_step(PGW_Service *s, PGW_Route *r)
         if (!latency_finish_valid) route_latency_clock_failure(r);
         if (latency_start_valid && latency_finish_valid) {
             if (latency_finish >= latency_start)
-                route_latency_observe(r, latency_finish - latency_start);
+                latency_status = route_latency_observe(
+                    r, latency_finish - latency_start);
             else
                 route_latency_clock_failure(r);
         }
@@ -986,6 +1101,10 @@ static PGW_Status route_step(PGW_Service *s, PGW_Route *r)
         (void)event(s, r, PGW_LOAN_ERROR, 1);
         return fail(r, returned, "return_loan");
     }
+#if defined(PGW_ENABLE_ROUTE_LATENCY_METRICS)
+    if (latency_status != PGW_OK)
+        return fail(r, latency_status, "latency statistics lock");
+#endif
     if (fatal) {
         (void)event(s, r, PGW_FATAL, 1);
         return fail(r, PGW_FATAL, "write or batch bounds");
@@ -1002,26 +1121,24 @@ static PGW_Status route_ready_handler(void *context)
     if (DDS_GuardCondition_set_trigger_value(route->ready_condition,
             DDS_BOOLEAN_FALSE) != DDS_RETCODE_OK)
         return PGW_IO_ERROR;
-    if (route->lifecycle == PGW_FAULTED) {
-        atomic_store_explicit(&route->pending, false, memory_order_release);
+    PGW_EntityState lifecycle = (PGW_EntityState)PGW_ATOMIC_LOAD(
+        &route->lifecycle, OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE);
+    if (lifecycle == PGW_FAULTED || lifecycle == PGW_PAUSED)
         return PGW_OK;
-    }
-    if (route->lifecycle == PGW_PAUSED) {
-        atomic_store_explicit(&route->pending, true, memory_order_release);
-        return PGW_OK;
-    }
-    if (!atomic_exchange_explicit(&route->pending, false, memory_order_acq_rel))
+    uint64_t generation = (uint64_t)PGW_ATOMIC_LOAD(
+        &route->ready_generation, OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE);
+    if (generation == (uint64_t)PGW_ATOMIC_LOAD(&route->dispatched_generation,
+            OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE))
         return PGW_OK;
 
     PGW_Status status = route_step(session->service, route);
+    if (status == PGW_NO_CHANGE) return PGW_OK;
+    PGW_ATOMIC_STORE(&route->dispatched_generation, generation,
+                     OSAPI_ATOMIC_MEMORY_ORDER_RELEASE);
     if (status != PGW_OK)
-        atomic_store_explicit(&session->error, status, memory_order_release);
-    if (route->lifecycle == PGW_PAUSED)
-        atomic_store_explicit(&route->pending, true, memory_order_release);
-    else if (route->lifecycle == PGW_FAULTED)
-        atomic_store_explicit(&route->pending, false, memory_order_release);
-    atomic_fetch_add_explicit(&session->dispatched_routes, 1,
-                              memory_order_release);
+        PGW_ATOMIC_STORE(&session->error, status, OSAPI_ATOMIC_MEMORY_ORDER_RELEASE);
+    PGW_ATOMIC_ADD(&session->dispatched_routes, 1,
+                   OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE_RELEASE);
     return status;
 }
 
@@ -1067,10 +1184,10 @@ static PGW_Status session_initialize(PGW_Service *service, PGW_Session *session)
     session->service = service;
     session->cursor = 0;
     session->async_waitset.attached_conditions = 0;
-    atomic_init(&session->wakeups, 0);
-    atomic_init(&session->dispatched_routes, 0);
-    atomic_init(&session->stopping, false);
-    atomic_init(&session->error, PGW_OK);
+    PGW_ATOMIC_INIT(&session->wakeups, 0);
+    PGW_ATOMIC_INIT(&session->dispatched_routes, 0);
+    PGW_ATOMIC_INIT(&session->stopping, false);
+    PGW_ATOMIC_INIT(&session->error, PGW_OK);
     session->async_waitset.waitset = DDS_WaitSet_new();
     if (!session->async_waitset.waitset) return PGW_FATAL;
     session->async_waitset.wake_condition = DDS_GuardCondition_new();
@@ -1097,7 +1214,8 @@ static PGW_Status session_initialize(PGW_Service *service, PGW_Session *session)
             service->control.state, &service->control_listener);
         if (status != PGW_OK) return status;
         service->control_listener_registered = true;
-        if (atomic_load_explicit(&service->control_pending, memory_order_acquire))
+        if (PGW_ATOMIC_LOAD(&service->control_generation,
+                            OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) != 0)
             session_signal_wake(session);
     }
 #endif
@@ -1105,18 +1223,19 @@ static PGW_Status session_initialize(PGW_Service *service, PGW_Session *session)
     for (size_t i = 0; i < route_count; ++i) {
         PGW_Route *route =
             PGW_RouteSeq_get_reference(&session->routes, (RTI_INT32)i);
-        atomic_init(&route->pending, false);
+        PGW_ATOMIC_INIT(&route->ready_generation, 0);
+        PGW_ATOMIC_INIT(&route->dispatched_generation, 0);
         if (!PGW_Counters_initialize(&route->counters)) {
             route->error = (PGW_Error){PGW_UNSUPPORTED, route->id,
                                        "counter backend"};
-            route->lifecycle = PGW_FAULTED;
+            route_state_store(route, PGW_FAULTED);
             return PGW_UNSUPPORTED;
         }
 #if defined(PGW_ENABLE_ROUTE_LATENCY_METRICS)
         if (!route_latency_initialize(&route->latency)) {
             route->error = (PGW_Error){PGW_UNSUPPORTED, route->id,
                                        "latency counter backend"};
-            route->lifecycle = PGW_FAULTED;
+            route_state_store(route, PGW_FAULTED);
             return PGW_UNSUPPORTED;
         }
         route->latency_initialized = true;
@@ -1127,7 +1246,7 @@ static PGW_Status session_initialize(PGW_Service *service, PGW_Session *session)
             PGW_SampleSeq_get_length(&route->samples) != 0 ||
             PGW_WriteResultSeq_get_maximum(&route->results) <
                 PGW_SampleSeq_get_maximum(&route->samples) ||
-            route->lifecycle != PGW_UNINITIALIZED ||
+            route_state(route) != PGW_UNINITIALIZED ||
             !route->reader.iface || !route->writer.iface ||
             route->reader.iface->version != PGW_ABI_VERSION ||
             route->writer.iface->version != PGW_ABI_VERSION ||
@@ -1182,9 +1301,9 @@ static PGW_Status session_initialize(PGW_Service *service, PGW_Session *session)
             route->reader.state, &route->listener);
         if (status != PGW_OK) return fail(route, status, "register listener");
         route->listener_registered = true;
-        route->lifecycle = PGW_ENABLED;
+        route_state_store(route, PGW_ENABLED);
     }
-    session->lifecycle = PGW_ENABLED;
+    session_state_store(session, PGW_ENABLED);
     return PGW_OK;
 }
 
@@ -1241,8 +1360,8 @@ static PGW_Status session_release(PGW_Session *session, bool release_routes)
         if (!release_routes) continue;
         if (route->storage_initialized && !route_storage_finalize(route))
             return PGW_LOAN_ERROR;
-        if (route->lifecycle != PGW_FAULTED)
-            route->lifecycle = PGW_UNINITIALIZED;
+        if (route_state(route) != PGW_FAULTED)
+            route_state_store(route, PGW_UNINITIALIZED);
 #if defined(PGW_ENABLE_ROUTE_LATENCY_METRICS)
         route->latency_initialized = false;
 #endif
@@ -1262,7 +1381,7 @@ static PGW_Status session_release(PGW_Session *session, bool release_routes)
 
 PGW_Status PGW_Service_initialize(PGW_Service *service)
 {
-    if (!service || service->lifecycle != PGW_UNINITIALIZED ||
+    if (!service || service_state(service) != PGW_UNINITIALIZED ||
         !service->sessions_initialized ||
         !PGW_SessionSeq_get_length(&service->sessions) ||
         !service->sample_budget
@@ -1271,14 +1390,17 @@ PGW_Status PGW_Service_initialize(PGW_Service *service)
 #endif
         ) return PGW_INVALID;
     if (!DDS_DomainParticipantFactory_get_instance()) return PGW_FATAL;
-    service->lifecycle = PGW_INITIALIZING;
+    if (service->state_mutex) return PGW_INVALID;
+    service->state_mutex = OSAPI_Mutex_new();
+    if (!service->state_mutex) return PGW_FATAL;
+    service_state_store(service, PGW_INITIALIZING);
     PGW_Status status = PGW_OK;
     for (RTI_INT32 i = 0; i < PGW_SessionSeq_get_length(&service->sessions); ++i) {
         PGW_Session *session =
             PGW_SessionSeq_get_reference(&service->sessions, i);
         if (!session->name || !session->name[0] || !session->routes_initialized ||
             !PGW_RouteSeq_get_length(&session->routes) || session->async_waitset.initialized ||
-            session->lifecycle != PGW_UNINITIALIZED) {
+            session_state(session) != PGW_UNINITIALIZED) {
             status = PGW_INVALID;
             break;
         }
@@ -1293,7 +1415,7 @@ PGW_Status PGW_Service_initialize(PGW_Service *service)
         if (status != PGW_OK) break;
         status = session_initialize(service, session);
         if (status != PGW_OK) {
-            session->lifecycle = PGW_FAULTED;
+            session_state_store(session, PGW_FAULTED);
             break;
         }
     }
@@ -1316,11 +1438,25 @@ PGW_Status PGW_Service_initialize(PGW_Service *service)
             if (released != PGW_OK) {
                 status = released;
                 cleanup_complete = false;
-                session->lifecycle = PGW_FAULTED;
+                session_state_store(session, PGW_FAULTED);
             } else {
-                session->lifecycle = PGW_UNINITIALIZED;
+                session_state_store(session, PGW_UNINITIALIZED);
             }
         }
+        if (cleanup_complete && service->state_mutex) {
+            if (!OSAPI_Mutex_delete(service->state_mutex)) {
+                status = PGW_FATAL;
+                cleanup_complete = false;
+            } else service->state_mutex = NULL;
+        }
+#if defined(PGW_ENABLE_REMOTE_CONTROL)
+        if (cleanup_complete && service->control_mutex) {
+            if (!OSAPI_Mutex_delete(service->control_mutex)) {
+                status = PGW_FATAL;
+                cleanup_complete = false;
+            } else service->control_mutex = NULL;
+        }
+#endif
         if (cleanup_complete && service->sessions_borrowed) {
             if (!PGW_SessionSeq_unloan(&service->sessions)) {
                 status = PGW_LOAN_ERROR;
@@ -1333,13 +1469,13 @@ PGW_Status PGW_Service_initialize(PGW_Service *service)
             cleanup_complete = false;
         }
         if (cleanup_complete) service->sessions_initialized = false;
-        service->lifecycle = cleanup_complete ? PGW_FAULTED : PGW_STOPPED;
+        service_state_store(service,
+            cleanup_complete ? PGW_FAULTED : PGW_STOPPED);
         return status;
     }
-    service->lifecycle = PGW_ENABLED;
+    service_state_store(service, PGW_ENABLED);
 #if defined(PGW_ENABLE_REMOTE_CONTROL)
     if (service->control_resources) {
-        atomic_flag_clear(&service->control_lock);
         control_initialize(service);
     }
 #endif
@@ -1347,15 +1483,16 @@ PGW_Status PGW_Service_initialize(PGW_Service *service)
 }
 
 #if defined(PGW_ENABLE_REMOTE_CONTROL)
-static void control_lock(PGW_Service *service)
+static bool control_lock(PGW_Service *service)
 {
-    while (atomic_flag_test_and_set_explicit(&service->control_lock,
-                                              memory_order_acquire)) {}
+    return service->control_mutex &&
+           OSAPI_Mutex_take(service->control_mutex);
 }
 
-static void control_unlock(PGW_Service *service)
+static bool control_unlock(PGW_Service *service)
 {
-    atomic_flag_clear_explicit(&service->control_lock, memory_order_release);
+    return service->control_mutex &&
+           OSAPI_Mutex_give(service->control_mutex);
 }
 
 static const struct DDS_Duration_t *control_timeout(PGW_Service *service,
@@ -1423,77 +1560,94 @@ static RTI_BOOL session_thread_entry(struct OSAPI_ThreadInfo *info)
     PGW_Session *session = info->user_data;
 #if defined(PGW_ENABLE_REMOTE_CONTROL)
     PGW_Service *service = session->service;
+    uint64_t seen_control_generation = 0;
 #endif
-    while (!atomic_load_explicit(&session->stopping, memory_order_acquire)) {
+    while (!PGW_ATOMIC_LOAD(&session->stopping, OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE)) {
 #if defined(PGW_ENABLE_REMOTE_CONTROL)
         struct DDS_Duration_t timeout_storage;
         const struct DDS_Duration_t *timeout = &DDS_DURATION_INFINITE;
         bool control_session = service->control_resources &&
                               service->control_session == session;
         if (control_session) {
-            control_lock(service);
+            if (!control_lock(service)) {
+                session_fault(session, PGW_IO_ERROR);
+                return RTI_FALSE;
+            }
             timeout = control_timeout(service, &timeout_storage);
-            control_unlock(service);
+            if (!control_unlock(service)) {
+                session_fault(session, PGW_IO_ERROR);
+                return RTI_FALSE;
+            }
         }
 #else
         const struct DDS_Duration_t *timeout = &DDS_DURATION_INFINITE;
 #endif
         if (!DDS_ConditionSeq_set_length(&session->async_waitset.active_conditions, 0)) {
-            atomic_store_explicit(&session->error, PGW_FATAL,
-                                  memory_order_release);
-            session->lifecycle = PGW_FAULTED;
+            session_fault(session, PGW_FATAL);
             return RTI_FALSE;
         }
         DDS_ReturnCode_t waited = DDS_WaitSet_wait(
             session->async_waitset.waitset, &session->async_waitset.active_conditions, timeout);
-        if (atomic_load_explicit(&session->stopping, memory_order_acquire))
+        if (PGW_ATOMIC_LOAD(&session->stopping, OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE))
             break;
         if (waited == DDS_RETCODE_TIMEOUT) {
 #if defined(PGW_ENABLE_REMOTE_CONTROL)
             if (control_session) {
-                control_lock(service);
+                if (!control_lock(service)) {
+                    session_fault(session, PGW_IO_ERROR);
+                    return RTI_FALSE;
+                }
                 control_retry_one_state(service);
                 control_publish_telemetry(service);
-                control_unlock(service);
+                if (!control_unlock(service)) {
+                    session_fault(session, PGW_IO_ERROR);
+                    return RTI_FALSE;
+                }
             }
 #endif
             continue;
         }
         if (waited != DDS_RETCODE_OK) {
-            atomic_store_explicit(&session->error, PGW_IO_ERROR,
-                                  memory_order_release);
-            session->lifecycle = PGW_FAULTED;
+            session_fault(session, PGW_IO_ERROR);
             return RTI_FALSE;
         }
-        atomic_fetch_add_explicit(&session->wakeups, 1, memory_order_release);
+        PGW_ATOMIC_ADD(&session->wakeups, 1,
+                       OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE_RELEASE);
         if (DDS_GuardCondition_set_trigger_value(session->async_waitset.wake_condition,
                 DDS_BOOLEAN_FALSE) != DDS_RETCODE_OK) {
-            atomic_store_explicit(&session->error, PGW_IO_ERROR,
-                                  memory_order_release);
-            session->lifecycle = PGW_FAULTED;
+            session_fault(session, PGW_IO_ERROR);
             return RTI_FALSE;
         }
 #if defined(PGW_ENABLE_REMOTE_CONTROL)
         if (control_session) {
             size_t processed = 0;
             bool rearm_failed = false;
-            control_lock(service);
-            if (atomic_exchange_explicit(&service->control_pending, false,
-                                         memory_order_acq_rel)) {
+            if (!control_lock(service)) {
+                session_fault(session, PGW_IO_ERROR);
+                return RTI_FALSE;
+            }
+            uint64_t control_generation = (uint64_t)PGW_ATOMIC_LOAD(
+                &service->control_generation,
+                OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE);
+            if (control_generation != seen_control_generation) {
+                seen_control_generation = control_generation;
                 control_retry_one_state(service);
                 processed = control_process_commands(service);
                 if (processed == PGW_CONTROL_MAX_COMMANDS_PER_BATCH &&
                     service->control.iface->rearm_commands(
                         service->control.state) != PGW_OK) {
-                    atomic_store_explicit(&session->error, PGW_IO_ERROR,
-                                          memory_order_release);
+                    PGW_ATOMIC_STORE(&session->error, PGW_IO_ERROR,
+                                     OSAPI_ATOMIC_MEMORY_ORDER_RELEASE);
                     rearm_failed = true;
                 }
             }
             control_sync_all_routes(service);
-            control_unlock(service);
+            if (!control_unlock(service)) {
+                session_fault(session, PGW_IO_ERROR);
+                return RTI_FALSE;
+            }
             if (rearm_failed) {
-                session->lifecycle = PGW_FAULTED;
+                session_state_store(session, PGW_FAULTED);
                 return RTI_FALSE;
             }
         }
@@ -1508,16 +1662,14 @@ static RTI_BOOL session_thread_entry(struct OSAPI_ThreadInfo *info)
                     DDS_GuardCondition_as_condition(route->ready_condition)))
                 continue;
             if (!route->ready_handler) {
-                atomic_store_explicit(&session->error, PGW_INVALID,
-                                      memory_order_release);
-                session->lifecycle = PGW_FAULTED;
+                session_fault(session, PGW_INVALID);
                 return RTI_FALSE;
             }
             PGW_Status handler_status =
                 route->ready_handler(route->ready_context);
             if (handler_status != PGW_OK)
-                atomic_store_explicit(&session->error, handler_status,
-                                      memory_order_release);
+                PGW_ATOMIC_STORE(&session->error, handler_status,
+                                      OSAPI_ATOMIC_MEMORY_ORDER_RELEASE);
         }
         session->cursor = (start + 1) % count;
     }
@@ -1526,14 +1678,15 @@ static RTI_BOOL session_thread_entry(struct OSAPI_ThreadInfo *info)
 
 PGW_Status PGW_Service_start(PGW_Service *service)
 {
-    if (!service || service->lifecycle != PGW_ENABLED ||
+    if (!service || service_state(service) != PGW_ENABLED ||
         !service->sessions_initialized) return PGW_INVALID;
     struct OSAPI_ThreadProperty property = OSAPI_ThreadProperty_INITIALIZER;
     RTI_INT32 count = PGW_SessionSeq_get_length(&service->sessions);
     for (RTI_INT32 i = 0; i < count; ++i) {
         PGW_Session *session =
             PGW_SessionSeq_get_reference(&service->sessions, i);
-        atomic_store_explicit(&session->stopping, false, memory_order_release);
+        PGW_ATOMIC_STORE(&session->stopping, false, OSAPI_ATOMIC_MEMORY_ORDER_RELEASE);
+        session_state_store(session, PGW_STARTED);
         session->async_waitset.worker = OSAPI_Thread_create("pgw-session", &property,
             session_thread_entry, session, session_thread_wakeup);
         if (!session->async_waitset.worker || !OSAPI_Thread_start(session->async_waitset.worker)) {
@@ -1545,23 +1698,22 @@ PGW_Status PGW_Service_start(PGW_Service *service)
             return stopped == PGW_OK ? PGW_FATAL : stopped;
         }
         session->async_waitset.started = true;
-        session->lifecycle = PGW_STARTED;
     }
-    service->lifecycle = PGW_STARTED;
+    service_state_store(service, PGW_STARTED);
     return PGW_OK;
 }
 
 PGW_Status PGW_Service_stop(PGW_Service *service)
 {
-    if (!service || (service->lifecycle != PGW_ENABLED &&
-                     service->lifecycle != PGW_STARTED))
+    if (!service || (service_state(service) != PGW_ENABLED &&
+                     service_state(service) != PGW_STARTED))
         return PGW_INVALID;
     PGW_Status result = PGW_OK;
     RTI_INT32 count = PGW_SessionSeq_get_length(&service->sessions);
     for (RTI_INT32 i = 0; i < count; ++i) {
         PGW_Session *session =
             PGW_SessionSeq_get_reference(&service->sessions, i);
-        atomic_store_explicit(&session->stopping, true, memory_order_release);
+        PGW_ATOMIC_STORE(&session->stopping, true, OSAPI_ATOMIC_MEMORY_ORDER_RELEASE);
         if (session->async_waitset.started &&
             DDS_GuardCondition_set_trigger_value(session->async_waitset.wake_condition,
                 DDS_BOOLEAN_TRUE) != DDS_RETCODE_OK)
@@ -1587,37 +1739,47 @@ PGW_Status PGW_Service_stop(PGW_Service *service)
     for (RTI_INT32 i = 0; i < count; ++i) {
         PGW_Session *session =
             PGW_SessionSeq_get_reference(&service->sessions, i);
-        if (session->lifecycle != PGW_FAULTED)
-            session->lifecycle = PGW_STOPPED;
+        if (session_state(session) != PGW_FAULTED)
+            session_state_store(session, PGW_STOPPED);
         for (RTI_INT32 j = 0; j < PGW_RouteSeq_get_length(&session->routes); ++j) {
             PGW_Route *route =
                 PGW_RouteSeq_get_reference(&session->routes, j);
-            if (route->lifecycle != PGW_FAULTED)
-                route->lifecycle = PGW_STOPPED;
+            if (route_state(route) != PGW_FAULTED)
+                route_state_store(route, PGW_STOPPED);
         }
     }
-    service->lifecycle = PGW_STOPPED;
+    service_state_store(service, PGW_STOPPED);
     return result;
 }
 
 PGW_Status PGW_Service_finalize(PGW_Service *service)
 {
     if (!service || !service->sessions_initialized ||
-        (service->lifecycle != PGW_STOPPED &&
-         service->lifecycle != PGW_UNINITIALIZED)) return PGW_INVALID;
-    bool configured_only = service->lifecycle == PGW_UNINITIALIZED;
+        (service_state(service) != PGW_STOPPED &&
+         service_state(service) != PGW_UNINITIALIZED)) return PGW_INVALID;
+    bool configured_only = service_state(service) == PGW_UNINITIALIZED;
     for (RTI_INT32 i = 0; i < PGW_SessionSeq_get_length(&service->sessions); ++i) {
         PGW_Status unsubscribed = session_unsubscribe(
             PGW_SessionSeq_get_reference(&service->sessions, i));
         if (unsubscribed != PGW_OK) return unsubscribed;
     }
+    if (service->state_mutex) {
+        if (!OSAPI_Mutex_delete(service->state_mutex)) return PGW_FATAL;
+        service->state_mutex = NULL;
+    }
+#if defined(PGW_ENABLE_REMOTE_CONTROL)
+    if (service->control_mutex) {
+        if (!OSAPI_Mutex_delete(service->control_mutex)) return PGW_FATAL;
+        service->control_mutex = NULL;
+    }
+#endif
     for (RTI_INT32 i = 0; i < PGW_SessionSeq_get_length(&service->sessions); ++i) {
         PGW_Session *session =
             PGW_SessionSeq_get_reference(&service->sessions, i);
         if (configured_only && session->async_waitset.initialized) return PGW_INVALID;
         PGW_Status released = session_release(session, true);
         if (released != PGW_OK) return released;
-        session->lifecycle = PGW_UNINITIALIZED;
+        session_state_store(session, PGW_UNINITIALIZED);
     }
     if (service->sessions_borrowed) {
         if (!PGW_SessionSeq_unloan(&service->sessions)) return PGW_LOAN_ERROR;
@@ -1637,7 +1799,7 @@ PGW_Status PGW_Service_finalize(PGW_Service *service)
     service->control_telemetry_last_ns = 0;
     service->control_telemetry_clock_initialized = false;
 #endif
-    service->lifecycle = PGW_UNINITIALIZED;
+    service_state_store(service, PGW_UNINITIALIZED);
     return PGW_OK;
 }
 

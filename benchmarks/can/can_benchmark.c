@@ -10,7 +10,7 @@
  * the software.
  */
 
-#define _POSIX_C_SOURCE 200809L
+#include "pgw/atomic.h"
 #include "pgw/can_memory.h"
 #include "pgw/runtime.h"
 #include "pgw_codec.h"
@@ -23,7 +23,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 enum { CAN_ARENA_BYTES = 16384 };
 
@@ -34,17 +33,18 @@ typedef struct {
 
 static uint64_t now_ns(void)
 {
-    struct timespec t;
-    if (clock_gettime(CLOCK_MONOTONIC, &t)) return 0;
-    return (uint64_t)t.tv_sec * UINT64_C(1000000000) + (uint64_t)t.tv_nsec;
+    uint64_t now;
+    if (!PGW_Runtime_monotonic_time_ns(&now)) {
+        fprintf(stderr, "OSAPI monotonic clock unavailable\n");
+        exit(2);
+    }
+    return now;
 }
 
 static bool service_clock(void *context, uint64_t *nanoseconds)
 {
     (void)context;
-    if (!nanoseconds) return false;
-    *nanoseconds = now_ns();
-    return *nanoseconds != 0;
+    return PGW_Runtime_monotonic_time_ns(nanoseconds);
 }
 
 static void observe(Histogram *h, uint64_t duration)
@@ -150,7 +150,6 @@ int main(int argc, char **argv)
     assert(PGW_Runtime_initialize());
     assert(DDS_DomainParticipantFactory_get_instance());
     uint64_t init_start = now_ns();
-    assert(init_start);
     const size_t initialization_heap_bytes = (size_t)CAN_ARENA_BYTES * 2;
     void *storage = malloc(initialization_heap_bytes);
     if (!storage) return 3;
@@ -231,7 +230,6 @@ int main(int argc, char **argv)
     expected = baseline;
     PGW_allocation_monitor(true);
     uint64_t start = now_ns();
-    assert(start);
     /* The first received baseline and the first routed traffic are monitored. */
     assert(PGW_CANMemory_inject(&memory[1], &baseline) == PGW_OK);
     PGW_Status baseline_status = PGW_NO_DATA;
@@ -266,19 +264,23 @@ int main(int argc, char **argv)
                                            (uint32_t)(i % 1000000000)};
         want.data[2] = 0xff; want.data[3] = 0xea;
         want.data[4] = 0xa4; want.data[5] = (uint8_t)(i % 4);
-        uint64_t target_dispatch = atomic_load_explicit(
-            &session.dispatched_routes, memory_order_acquire) + 1;
+        uint64_t target_dispatch = PGW_ATOMIC_LOAD(
+            &session.dispatched_routes, OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) + 1;
         uint64_t before = timing ? now_ns() : 0;
         assert(PGW_CANMemory_inject(&memory[0], &ingress) == PGW_OK);
         for (unsigned attempt = 0; attempt < 2000 &&
-             atomic_load_explicit(&session.dispatched_routes,
-                                  memory_order_acquire) < target_dispatch;
+             PGW_ATOMIC_LOAD(&session.dispatched_routes,
+                                  OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) < target_dispatch;
              ++attempt) OSAPI_Thread_sleep(1);
-        assert(atomic_load_explicit(&session.dispatched_routes,
-                                    memory_order_acquire) >= target_dispatch);
+        assert(PGW_ATOMIC_LOAD(&session.dispatched_routes,
+                                    OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) >= target_dispatch);
         uint64_t after = timing ? now_ns() : 0;
         if (timing) {
-            assert(before && after >= before);
+            if (after < before) {
+                fprintf(stderr, "OSAPI monotonic clock moved backwards: "
+                        "%" PRIu64 " -> %" PRIu64 "\n", before, after);
+                return 4;
+            }
             observe(&histogram, after - before);
         }
         bool blocked = i % 8 == 7;

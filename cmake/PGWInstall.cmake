@@ -44,11 +44,24 @@ install(TARGETS ${_pgw_install_targets} EXPORT PGWTargets
     RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 foreach(_headers IN ITEMS core/include)
     install(DIRECTORY "${PROJECT_SOURCE_DIR}/${_headers}/"
-        DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}" FILES_MATCHING PATTERN "*.h")
+        DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}" FILES_MATCHING PATTERN "*.h"
+        PATTERN "local_sink.h" EXCLUDE)
 endforeach()
+if(TARGET pgw_diagnostics_local)
+    install(FILES "${PROJECT_SOURCE_DIR}/core/include/pgw/local_sink.h"
+        DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/pgw")
+    set(PGW_INSTALL_HAS_DIAGNOSTICS_LOCAL ON)
+else()
+    set(PGW_INSTALL_HAS_DIAGNOSTICS_LOCAL OFF)
+endif()
 if(TARGET pgw_adapter_can)
     install(DIRECTORY "${PROJECT_SOURCE_DIR}/adapters/can/include/"
-        DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}" FILES_MATCHING PATTERN "*.h")
+        DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}" FILES_MATCHING PATTERN "*.h"
+        PATTERN "can_socketcan.h" EXCLUDE)
+    if(TARGET pgw_can_socketcan)
+        install(FILES "${PROJECT_SOURCE_DIR}/adapters/can/include/pgw/can_socketcan.h"
+            DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/pgw")
+    endif()
     install(FILES "${PROJECT_SOURCE_DIR}/adapters/can/adapter.xml"
         DESTINATION "${CMAKE_INSTALL_DATADIR}/pgw/adapters/can")
     if(PGW_ENABLE_REMOTE_CONTROL)

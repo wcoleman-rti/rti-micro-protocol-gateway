@@ -10,15 +10,16 @@
  * the software.
  */
 
-#define _POSIX_C_SOURCE 200809L
+#include "pgw/atomic.h"
 #include "pgw/can_memory.h"
+#include "pgw/runtime.h"
 #include "pgw_codec.h"
+#include "osapi/osapi_system.h"
+#include "osapi/osapi_thread.h"
 #include <assert.h>
-#include <errno.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 #ifdef PGW_CAN_WRAP_ALLOCATIONS
 static bool frozen;
@@ -121,62 +122,45 @@ static PGW_Signal get_signal(PGW_StreamReader *reader, PGW_SampleSeq *seq,
 }
 
 typedef struct {
-    atomic_size_t calls;
+    PGW_ATOMIC(size_t) calls;
 } NotificationCounter;
 
 static void reader_available(void *context)
 {
     NotificationCounter *counter = context;
-    atomic_fetch_add_explicit(&counter->calls, 1, memory_order_release);
+    PGW_ATOMIC_ADD(&counter->calls, 1,
+                   OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE_RELEASE);
 }
 
 static void wait_for_notifications(const NotificationCounter *counter,
                                    size_t expected)
 {
-    struct timespec delay = {0, 1000000};
     for (size_t i = 0; i < 2000; ++i) {
-        if (atomic_load_explicit(&counter->calls, memory_order_acquire) >=
+        if (PGW_ATOMIC_LOAD(&counter->calls, OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) >=
             expected) return;
-        int result;
-        do {
-            result = nanosleep(&delay, &delay);
-        } while (result && errno == EINTR);
-        assert(!result);
-        delay = (struct timespec){0, 1000000};
+        OSAPI_Thread_sleep(1);
     }
     assert(!"timed out waiting for reader notification");
 }
 
 static void wait_for_received(PGW_Connection *connection, uint64_t expected)
 {
-    struct timespec delay = {0, 1000000};
     for (size_t i = 0; i < 2000; ++i) {
         PGW_CANStats stats;
         assert(PGW_CAN_stats(connection, &stats) == PGW_OK);
         if (stats.received_frames >= expected) return;
-        int result;
-        do {
-            result = nanosleep(&delay, &delay);
-        } while (result && errno == EINTR);
-        assert(!result);
-        delay = (struct timespec){0, 1000000};
+        OSAPI_Thread_sleep(1);
     }
     assert(!"timed out waiting for CAN receiver");
 }
 
 static void wait_for_io_errors(PGW_Connection *connection, uint64_t expected)
 {
-    struct timespec delay = {0, 1000000};
     for (size_t i = 0; i < 2000; ++i) {
         PGW_CANStats stats;
         assert(PGW_CAN_stats(connection, &stats) == PGW_OK);
         if (stats.io_errors >= expected) return;
-        int result;
-        do {
-            result = nanosleep(&delay, &delay);
-        } while (result && errno == EINTR);
-        assert(!result);
-        delay = (struct timespec){0, 1000000};
+        OSAPI_Thread_sleep(1);
     }
     assert(!"timed out waiting for transport error");
 }
@@ -228,7 +212,7 @@ static void partial_messages(const PGW_TypeInfo *schema,
     assert(writer.iface->bind(writer.state, &native_source) == PGW_UNSUPPORTED);
     assert(writer.iface->bind(writer.state, source) == PGW_OK);
     assert(PGW_CANAdapter.connection->lookup_stream_reader(connection, "all", &reader) == PGW_OK);
-    atomic_init(&notifications.calls, 0);
+    PGW_ATOMIC_INIT(&notifications.calls, 0);
     assert(reader.iface->register_listener(reader.state, &listener) == PGW_OK);
     assert(PGW_SampleSeq_initialize(&input));
     assert(PGW_SampleSeq_initialize(&loan));
@@ -300,6 +284,7 @@ static void partial_messages(const PGW_TypeInfo *schema,
 
 int main(void)
 {
+    assert(PGW_Runtime_initialize());
     void *storage = malloc(32768);
     assert(storage);
     PGW_Arena arena = {storage, 32768, 0};
@@ -359,8 +344,8 @@ int main(void)
     assert(arena.used <= required);
     assert(PGW_CANAdapter.connection->lookup_stream_reader(connection, "powertrain", &reader) == PGW_OK);
     assert(PGW_CANAdapter.connection->lookup_stream_reader(connection, "auxiliary", &auxiliary) == PGW_OK);
-    atomic_init(&reader_notifications.calls, 0);
-    atomic_init(&auxiliary_notifications.calls, 0);
+    PGW_ATOMIC_INIT(&reader_notifications.calls, 0);
+    PGW_ATOMIC_INIT(&auxiliary_notifications.calls, 0);
     assert(reader.iface->register_listener(reader.state, &reader_listener) == PGW_OK);
     assert(auxiliary.iface->register_listener(
         auxiliary.state, &auxiliary_listener) == PGW_OK);
@@ -469,8 +454,8 @@ int main(void)
     assert(by_id[2].value.data.boolean);
     assert(by_id[3].value.data.integer == 2);
     assert(reader.iface->return_loan(reader.state, &loan) == PGW_OK);
-    assert(atomic_load_explicit(&reader_notifications.calls,
-                                memory_order_acquire) >= 2);
+    assert(PGW_ATOMIC_LOAD(&reader_notifications.calls,
+                                OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) >= 2);
     assert(reader.iface->return_loan(reader.state, &loan) == PGW_LOAN_ERROR);
     values[1] = (PGW_Signal){1002, {PGW_VALUE_INT64, {.integer = -2}}};
     values[2] = (PGW_Signal){1003, {PGW_VALUE_BOOLEAN, {.boolean = false}}};
@@ -578,7 +563,6 @@ int main(void)
     assert(timestamp.seconds == 42 && timestamp.nanoseconds == 123);
     memory.receive_failure = PGW_IO_ERROR;
     wait_for_io_errors(connection, 1);
-    memory.receive_failure = PGW_OK;
     for (size_t i = 0; i < 16; ++i)
         assert(PGW_CANMemory_inject(&memory, &engine) == PGW_OK);
     assert(PGW_CANMemory_inject(&memory, &engine) == PGW_BACKPRESSURE);
@@ -604,5 +588,6 @@ int main(void)
     assert(PGW_CANCategorySeq_unloan(&category_sequence));
     assert(PGW_CANCategorySeq_finalize(&category_sequence));
     free(storage);
+    assert(OSAPI_System_finalize());
     return 0;
 }

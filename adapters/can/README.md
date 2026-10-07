@@ -239,8 +239,8 @@ shutdown, dropping any remaining queued frames. `stats.mutable_bytes` records
 actual arena consumption. `queue_high_water`
 is the largest occupancy of any category queue, not aggregate occupancy.
 Immutable descriptor/string/choice tables, externally owned transport rings,
-SocketCAN kernel queues and SDK infrastructure are separate resources. Runtime
-paths perform no allocation, libc formatting or blocking I/O.
+SocketCAN kernel queues and OSAPI receiver-thread/mutex objects are separate
+resources. Runtime paths perform no allocation, libc formatting or blocking I/O.
 
 ## Resource and test details
 

@@ -12,6 +12,7 @@
 
 #ifndef PGW_TEST_FAKE_H
 #define PGW_TEST_FAKE_H
+#include "pgw/atomic.h"
 #include "pgw/core.h"
 
 typedef struct {
@@ -24,8 +25,8 @@ typedef struct {
     size_t available;
     size_t borrows;
     size_t returns;
-    atomic_uint_fast64_t read_calls;
-    atomic_uint_fast64_t notifications;
+    PGW_ATOMIC(RTI_UINT64) read_calls;
+    PGW_ATOMIC(RTI_UINT64) notifications;
     const PGW_ReaderListener *listener;
     bool loaned;
     bool empty_ok;
@@ -41,7 +42,7 @@ typedef struct {
     PGW_WriteResult outcome;
     bool partial;
     PGW_Status status;
-    atomic_uint *order_clock;
+    PGW_ATOMIC(RTI_UINT32) *order_clock;
     unsigned order[8];
 } PGW_TestWriter;
 
