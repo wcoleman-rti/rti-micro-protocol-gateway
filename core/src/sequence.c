@@ -52,8 +52,8 @@
 #undef REDA_SEQUENCE_API
 #undef concatenate
 
-#define T PGW_RepresentationRef
-#define TSeq PGW_RepresentationSeq
+#define T PGW_SampleRepresentationRef
+#define TSeq PGW_SampleRepresentationSeq
 #define REDA_SEQUENCE_API REDA_SEQUENCE_API_UNTYPED
 #define TSeq_initialize
 #define TSeq_finalize

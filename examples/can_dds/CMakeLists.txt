@@ -109,11 +109,11 @@ add_custom_command(OUTPUT "${gen}/gateway.xml" "${gen}/schema_fingerprints.h"
         "${PROJECT_SOURCE_DIR}/tools/config_codegen/gateway_input.py" VERBATIM)
 add_custom_command(OUTPUT "${gen}/dds_type_bindings.c" "${gen}/dds_type_bindings.h"
     COMMAND "${Python3_EXECUTABLE}"
-        "${PROJECT_SOURCE_DIR}/tools/config_codegen/dds_binding_codegen.py"
+        "${PROJECT_SOURCE_DIR}/tools/config_codegen/dds_type_binding_codegen.py"
         --types-xml "${PGW_MODEL_TYPES_XML}" --gateway "${gen}/gateway.xml"
         --output "${gen}/dds_type_bindings.c" --header "${gen}/dds_type_bindings.h"
     DEPENDS "${PGW_MODEL_TYPES_XML}" "${gen}/gateway.xml"
-        "${PROJECT_SOURCE_DIR}/tools/config_codegen/dds_binding_codegen.py"
+        "${PROJECT_SOURCE_DIR}/tools/config_codegen/dds_type_binding_codegen.py"
     VERBATIM)
 add_custom_command(OUTPUT "${gen}/dds.xml"
     COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/config_codegen/dds_workload.py"

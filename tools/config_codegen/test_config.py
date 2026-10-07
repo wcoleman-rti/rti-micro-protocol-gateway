@@ -18,9 +18,9 @@ import unittest
 from config_codegen import compile_config, ConfigError, emit, parse_adapter_manifest
 from adapter_codegen import generate as generate_adapter_idl
 from control_codegen import generate as generate_control_idl
-from dds_binding_codegen import (
+from dds_type_binding_codegen import (
     BindingGenerationError,
-    generate as generate_dds_bindings,
+    generate as generate_dds_type_bindings,
 )
 from combine_idl import FlattenError, flatten
 
@@ -40,10 +40,10 @@ DDS = """<dds><qos_library name="Q"><qos_profile name="Bounded">
 <subscriber name="sub"><data_reader name="r" topic_ref="topic"><datareader_qos base_name="Q::Bounded"/></data_reader></subscriber>
 </domain_participant></domain_participant_library></dds>"""
 GATEWAY = f"""<gateway dds="dds.xml" sample-budget="4">
-<binding id="b" symbol="binding" type="Test" schema="test" fingerprint="{FINGERPRINT}"/>
+<type-binding id="b" symbol="binding" type="Test" schema="test" fingerprint="{FINGERPRINT}"/>
 <connection id="c" participant="P::p" adapter="connext_micro">
-<stream name="r" endpoint="sub::r" binding="b" role="reader" capacity="4"/>
-<stream name="w" endpoint="pub::w" binding="b" role="writer" capacity="4"/>
+<stream name="r" endpoint="sub::r" type-binding="b" role="reader" capacity="4"/>
+<stream name="w" endpoint="pub::w" type-binding="b" role="writer" capacity="4"/>
 </connection><session name="s"><route id="route" input="c::r" output="c::w"/></session></gateway>"""
 
 
@@ -73,11 +73,28 @@ class ConfigurationRequirements(unittest.TestCase):
         self.assertIn('REDA_DEFINE_SEQUENCE_INITIALIZER_W_LOAN(pgw_routes, 1, 1', text)
         self.assertIn('REDA_DEFINE_SEQUENCE_INITIALIZER_W_LOAN(pgw_sessions, 1, 1', text)
         self.assertIn('const char *const pgw_config_control_session = NULL;', text)
-        self.assertIn('PGW_CompiledNativeStreamSeq pgw_config_native_streams', text)
+        self.assertIn('PGW_CompiledAdapterStreamSeq pgw_config_adapter_streams', text)
         self.assertNotIn('pgw_config_route_count', text)
         self.assertNotIn('pgw_config_native_stream_count', text)
         self.assertNotIn('create_datawriter', text)
         self.assertNotIn('remote_writer_allocation', text)
+
+    def test_adapter_connection_uses_common_connection_element(self):
+        xml = GATEWAY.replace(
+            '<connection id="c" participant="P::p" adapter="connext_micro">',
+            '<connection id="c" adapter="can" receive-budget="4" write-capacity="4">')
+        xml = xml.replace('endpoint="sub::r"', 'endpoint="reader"')
+        xml = xml.replace('endpoint="pub::w"', 'endpoint="writer"')
+        self.gateway.write_text(xml)
+        compiled = compile_config(self.gateway)
+        self.assertEqual(compiled[1], [])
+        self.assertEqual(compiled[4]["c_receive_budget"], 4)
+        self.assertEqual(compiled[4]["c_write_capacity"], 4)
+        self.assertEqual(len(compiled[5]), 2)
+        output = self.directory / "configuration.c"
+        emit(compiled, output)
+        self.assertIn("PGW_CompiledAdapterStreamSeq pgw_config_adapter_streams",
+                      output.read_text())
 
     def test_route_membership_is_explicit_and_consumers_are_unique(self):
         self.reject(GATEWAY.replace(' name="s"', ''))
@@ -100,7 +117,7 @@ class ConfigurationRequirements(unittest.TestCase):
         }])
 
     def test_unknown_elements_attributes_and_order(self):
-        for xml in (GATEWAY.replace("<binding ", "<binding bogus='1' "),
+        for xml in (GATEWAY.replace("<type-binding ", "<type-binding bogus='1' "),
                     GATEWAY.replace("</gateway>", "<unknown/></gateway>"),
                     GATEWAY.replace("<connection ", "<bogus ").replace("</connection>", "</bogus>")):
             self.reject(xml)
@@ -139,7 +156,7 @@ class ConfigurationRequirements(unittest.TestCase):
 
     def test_duplicate_missing_wrong_role(self):
         for xml in (GATEWAY.replace('name="w"', 'name="r"'),
-                    GATEWAY.replace('binding="b"', 'binding="unknown"'),
+                    GATEWAY.replace('type-binding="b"', 'type-binding="unknown"'),
                     GATEWAY.replace('participant="P::p"', 'participant="P::missing"'),
                     GATEWAY.replace('endpoint="sub::r"', 'endpoint="pub::w"'),
                     GATEWAY.replace('output="c::w"', 'output="c::r"')):
@@ -314,7 +331,7 @@ class ConfigurationRequirements(unittest.TestCase):
             with self.subTest(xml=xml), self.assertRaises(ConfigError):
                 parse_adapter_manifest(manifest)
 
-    def test_dds_bindings_are_generated_from_rti_type_xml(self):
+    def test_dds_type_bindings_are_generated_from_rti_type_xml(self):
         types_xml = self.directory / "types.xml"
         types_xml.write_text(
             '<dds><types><module name="Example"><struct name="Sample">'
@@ -333,21 +350,21 @@ class ConfigurationRequirements(unittest.TestCase):
             'bind-view="bind_example_sample_view" '
             'write-view="write_example_sample_view"')
         gateway_xml.write_text(
-            '<gateway><binding id="reader" symbol="reader_binding" '
+            '<gateway><type-binding id="reader" symbol="reader_binding" '
             'type="Example::Sample" ' + common +
             ' supports-timestamp="true" register-keys="register_reader_keys"/>'
-            '<binding id="writer" symbol="writer_binding" '
+            '<type-binding id="writer" symbol="writer_binding" '
             'type="Example::Sample" ' + common +
             ' register-keys="register_writer_keys"/></gateway>')
         output = self.directory / "generated_bindings.c"
-        generate_dds_bindings(types_xml, gateway_xml, output)
+        generate_dds_type_bindings(types_xml, gateway_xml, output)
         first = output.read_text()
-        generate_dds_bindings(types_xml, gateway_xml, output)
+        generate_dds_type_bindings(types_xml, gateway_xml, output)
         self.assertEqual(output.read_text(), first)
         self.assertIn("Example_SampleDataReader_take", first)
         self.assertIn("Example_SampleDataReader_return_loan", first)
         self.assertIn("Example_SampleDataWriter_write_w_timestamp", first)
-        self.assertIn("static const PGW_Representation pgw_representation_0", first)
+        self.assertIn("static const PGW_SampleRepresentation pgw_representation_0", first)
         self.assertIn("copy_example_sample(sample, out, size)", first)
         self.assertIn("&pgw_access_0", first)
         self.assertIn("Example_SampleTypePlugin_get", first)
@@ -358,24 +375,24 @@ class ConfigurationRequirements(unittest.TestCase):
         self.assertIn("write_native = pgw_binding_reader_write_native", first)
         self.assertIn("bind_view = bind_example_sample_view", first)
         self.assertIn("write_view = write_example_sample_view", first)
-        self.assertEqual(first.count("static const PGW_Representation "), 1)
-        self.assertIn("const PGW_DDSBinding reader_binding", first)
-        self.assertIn("const PGW_DDSBinding writer_binding", first)
+        self.assertEqual(first.count("static const PGW_SampleRepresentation "), 1)
+        self.assertIn("const PGW_DDSTypeBinding reader_binding", first)
+        self.assertIn("const PGW_DDSTypeBinding writer_binding", first)
 
         gateway_xml.write_text(
-            '<gateway><binding id="unknown" symbol="unknown_binding" '
+            '<gateway><type-binding id="unknown" symbol="unknown_binding" '
             'type="Example::Missing" ' + common + '/></gateway>')
         with self.assertRaises(BindingGenerationError):
-            generate_dds_bindings(types_xml, gateway_xml, output)
+            generate_dds_type_bindings(types_xml, gateway_xml, output)
         gateway_xml.write_text(
-            '<gateway><binding id="unpaired" symbol="unpaired_binding" '
+            '<gateway><type-binding id="unpaired" symbol="unpaired_binding" '
             'type="Example::Sample" ' +
             common.replace('bind-view="bind_example_sample_view" ', '') +
             '/></gateway>')
         with self.assertRaises(BindingGenerationError):
-            generate_dds_bindings(types_xml, gateway_xml, output)
+            generate_dds_type_bindings(types_xml, gateway_xml, output)
 
-    def test_fieldwise_dds_binding_conversion_is_generated_from_xml(self):
+    def test_fieldwise_dds_type_binding_conversion_is_generated_from_xml(self):
         types_xml = self.directory / "fieldwise-types.xml"
         types_xml.write_text(
             '<dds><types><module name="Example"><struct name="Probe">'
@@ -384,7 +401,7 @@ class ConfigurationRequirements(unittest.TestCase):
             '</struct></module></types></dds>')
         gateway_xml = self.directory / "fieldwise-bindings.xml"
         gateway_xml.write_text(
-            '<gateway><binding id="probe" symbol="probe_binding" '
+            '<gateway><type-binding id="probe" symbol="probe_binding" '
             'type="Example::Probe" schema="example.probe" schema-version="1" '
             f'fingerprint="{FINGERPRINT}" representation-name="example.probe.native" '
             'native-type="ExampleProbe" native-header="example_probe.h" '
@@ -394,7 +411,7 @@ class ConfigurationRequirements(unittest.TestCase):
             'bind-view="PGW_probe_bind_view" '
             'write-view="PGW_probe_write_view"/></gateway>')
         output = self.directory / "fieldwise_bindings.c"
-        generate_dds_bindings(types_xml, gateway_xml, output)
+        generate_dds_type_bindings(types_xml, gateway_xml, output)
         text = output.read_text()
         header = (self.directory / "dds_type_bindings.h").read_text()
         self.assertIn("ExampleProbe *value = out", text)
@@ -417,7 +434,7 @@ class ConfigurationRequirements(unittest.TestCase):
             '<member name="reading" type="int32" arrayDimensions="2"/>'
             '</struct></module></types></dds>')
         with self.assertRaises(BindingGenerationError):
-            generate_dds_bindings(types_xml, gateway_xml, output)
+            generate_dds_type_bindings(types_xml, gateway_xml, output)
 
     def test_control_name_normalization_collision_is_rejected(self):
         xml = GATEWAY.replace(

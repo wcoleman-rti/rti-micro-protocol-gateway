@@ -161,7 +161,7 @@ int main(int argc, char **argv)
     PGW_CANFrame rx[2][2], tx[2][1], baseline = {0}, expected = {0};
     PGW_CANMemory memory[2];
     PGW_Connection *connections[2];
-    PGW_Schema schema = {PGW_codec_schema.name, PGW_codec_schema.version,
+    PGW_TypeInfo schema = {PGW_codec_schema.name, PGW_codec_schema.version,
                          PGW_codec_schema.fingerprint};
     PGW_CANCategory categories[2] = {
         {"powertrain", 4, &schema}, {"auxiliary", 4, &schema}
@@ -192,9 +192,9 @@ int main(int argc, char **argv)
     PGW_WriteResultSeq route_result_storage;
     PGW_RouteSeq route_sequence;
     PGW_Route route = {.id = 1};
-    assert(PGW_CANAdapter.connection->reader(connections[0], "powertrain",
+    assert(PGW_CANAdapter.connection->lookup_stream_reader(connections[0], "powertrain",
                                              &route.reader) == PGW_OK);
-    assert(PGW_CANAdapter.connection->writer(connections[1], "powertrain",
+    assert(PGW_CANAdapter.connection->lookup_stream_writer(connections[1], "powertrain",
                                              &route.writer) == PGW_OK);
     assert(PGW_SampleSeq_initialize(&route_sample_storage));
     assert(PGW_SampleSeq_loan_contiguous(&route_sample_storage, references, 0, 4));
@@ -218,7 +218,7 @@ int main(int argc, char **argv)
     PGW_StreamReader baseline_reader;
     PGW_SampleSeq baseline_loan;
     PGW_SampleRef baseline_references[4];
-    assert(PGW_CANAdapter.connection->reader(connections[1], "powertrain",
+    assert(PGW_CANAdapter.connection->lookup_stream_reader(connections[1], "powertrain",
                                              &baseline_reader) == PGW_OK);
     assert(PGW_SampleSeq_initialize(&baseline_loan));
     assert(PGW_SampleSeq_loan_contiguous(&baseline_loan, baseline_references, 0, 4));

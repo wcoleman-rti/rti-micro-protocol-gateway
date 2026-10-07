@@ -39,7 +39,7 @@ root = ET.fromstring(text)
 if args.diagnostics == "0":
     for parent in root.iter():
         for child in list(parent):
-            if child.get("id") == "diagnostics" or child.get("binding") == "diagnostics":
+            if child.get("id") == "diagnostics" or child.get("type-binding") == "diagnostics":
                 parent.remove(child)
 if args.remote_control:
     if not 1 <= args.max_controller_peers <= 32:
@@ -55,7 +55,7 @@ if args.remote_control:
         control_attributes["minimum-telemetry-period-ms"] = "100"
     control = ET.SubElement(root, "control", control_attributes)
     controlled_connections = {"can", "gateway"}
-    for connection in root.findall("connection") + root.findall("native-connection"):
+    for connection in root.findall("connection"):
         connection_id = connection.get("id")
         if connection_id not in controlled_connections:
             continue

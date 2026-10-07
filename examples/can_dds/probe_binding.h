@@ -14,5 +14,5 @@
 #define PGW_PROBE_BINDING_H
 #include "pgw/dds/connext_micro.h"
 #include "dds_type_bindings.h"
-extern const PGW_DDSBinding PGW_probe_binding;
+extern const PGW_DDSTypeBinding PGW_probe_type_binding;
 #endif

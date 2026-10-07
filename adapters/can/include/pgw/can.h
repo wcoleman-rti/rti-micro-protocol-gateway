@@ -165,7 +165,7 @@ typedef struct {
 typedef struct {
     const char *name;           /**< Unique category name. */
     size_t capacity;            /**< Nonzero queued sample capacity. */
-    const PGW_Schema *schema;   /**< Schema advertised for category samples. */
+    const PGW_TypeInfo *schema;   /**< Schema advertised for category samples. */
 } PGW_CANCategory;
 /** @brief Category definition element alias used in sequences. */
 typedef PGW_CANCategory PGW_CANCategoryDefinition;

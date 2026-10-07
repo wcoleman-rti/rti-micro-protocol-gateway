@@ -26,7 +26,7 @@
 #include <string.h>
 
 typedef struct PGW_DDSSample {
-    const PGW_DDSBinding *binding;
+    const PGW_DDSTypeBinding *binding;
     const void *data;
     const void *type_identity;
     PGW_DDSMetadata info;
@@ -39,9 +39,9 @@ typedef struct PGW_DDSEndpoint {
     void *typed;
     void *scratch;
     PGW_DDSSample *samples;
-    PGW_Representation representation;
+    PGW_SampleRepresentation representation;
     PGW_SampleViewDescriptor view_contract;
-    const PGW_Representation *source;
+    const PGW_SampleRepresentation *source;
     const void *type_identity;
     bool direct_write_candidate;
     bool source_schema_compatible;
@@ -923,7 +923,7 @@ static bool view_matches_contract(const PGW_SampleView *view,
         ((view->context == NULL) == (view->context_identity == NULL));
 }
 
-PGW_Status PGW_DDS_metadata(const PGW_Representation *representation,
+PGW_Status PGW_DDS_metadata(const PGW_SampleRepresentation *representation,
                           const PGW_Sample *opaque, PGW_DDSMetadata *out)
 {
     const PGW_DDSSample *sample = (const PGW_DDSSample *)opaque;
@@ -935,7 +935,7 @@ PGW_Status PGW_DDS_metadata(const PGW_Representation *representation,
 static PGW_Status release_failed_read(PGW_DDSEndpoint *ep, PGW_SampleSeq *seq,
                                      PGW_Status status)
 {
-    if (ep->config->binding->return_loan(ep->typed, ep->reader) == DDS_RETCODE_OK)
+    if (ep->config->type_binding->return_loan(ep->typed, ep->reader) == DDS_RETCODE_OK)
         return status;
     ep->loaned = true;
     ep->loan = seq;
@@ -967,18 +967,18 @@ static PGW_Status read_samples_impl(void *state, PGW_SampleSeq *seq,
     limit = budget < ep->config->capacity ? budget : ep->config->capacity;
     RTI_INT32 maximum = PGW_SampleSeq_get_maximum(seq);
     if (maximum < 0 || (size_t)maximum < limit) return PGW_CAPACITY;
-    rc = ep->config->binding->take(ep->typed, ep->reader, limit);
+    rc = ep->config->type_binding->take(ep->typed, ep->reader, limit);
     if (rc == DDS_RETCODE_NO_DATA) return PGW_NO_DATA;
     if (rc != DDS_RETCODE_OK) return PGW_IO_ERROR;
-    count = ep->config->binding->length(ep->typed);
+    count = ep->config->type_binding->length(ep->typed);
     if (count > limit) return release_failed_read(ep, seq, PGW_CAPACITY);
     for (size_t i = 0; i < count; ++i) {
-        const struct DDS_SampleInfo *info = ep->config->binding->info(ep->typed, i);
+        const struct DDS_SampleInfo *info = ep->config->type_binding->info(ep->typed, i);
         if (!info) return release_failed_read(ep, seq, PGW_FATAL);
         /* Lifecycle-only samples are not application commands. */
         if (!info->valid_data) {++ep->statistics.lifecycle_samples; continue;}
-        ep->samples[valid].binding = ep->config->binding;
-        ep->samples[valid].data = ep->config->binding->data(ep->typed, i);
+        ep->samples[valid].binding = ep->config->type_binding;
+        ep->samples[valid].data = ep->config->type_binding->data(ep->typed, i);
         if (!ep->samples[valid].data) return release_failed_read(ep, seq, PGW_FATAL);
         ep->samples[valid].type_identity = ep->type_identity;
         ep->samples[valid].info = (PGW_DDSMetadata){info->source_timestamp,
@@ -1013,7 +1013,7 @@ static PGW_Status return_samples_impl(void *state, PGW_SampleSeq *seq)
         ++ep->statistics.loan_errors;
         return PGW_LOAN_ERROR;
     }
-    rc = ep->config->binding->return_loan(ep->typed, ep->reader);
+    rc = ep->config->type_binding->return_loan(ep->typed, ep->reader);
     if (rc != DDS_RETCODE_OK) {++ep->statistics.loan_errors; return PGW_LOAN_ERROR;}
     ep->loaned = false;
     ep->loan = NULL;
@@ -1089,7 +1089,7 @@ static PGW_Status unregister_listener(void *state,
     if (registered != listener) return PGW_INVALID;
     return clear_dds_reader_listener(endpoint);
 }
-static PGW_Status bind_writer(void *state, const PGW_Representation *source)
+static PGW_Status bind_writer(void *state, const PGW_SampleRepresentation *source)
 {
     PGW_DDSEndpoint *ep = state;
     ep->source = NULL;
@@ -1102,19 +1102,19 @@ static PGW_Status bind_writer(void *state, const PGW_Representation *source)
         (source->access->view && !source->view_contract) ||
         (ep->config->preserve_source_timestamp && !source->access->source_timestamp))
         return PGW_UNSUPPORTED;
-    bool schema_compatible = PGW_schema_equal(
+    bool schema_compatible = PGW_type_info_equal(
         source->schema, ep->representation.schema);
     bool direct_candidate = source->access->view && source->view_contract &&
         source->view_contract->kind == PGW_SAMPLE_VIEW_NATIVE &&
         source->view_contract->type_identity == ep->type_identity &&
-        ep->config->binding->direct_write_safe &&
-        ep->config->binding->write_native != NULL;
+        ep->config->type_binding->direct_write_safe &&
+        ep->config->type_binding->write_native != NULL;
     bool can_translate = source->access->view && source->view_contract &&
-        ep->config->binding->bind_view && ep->config->binding->write_view;
+        ep->config->type_binding->bind_view && ep->config->type_binding->write_view;
     if (!schema_compatible && !direct_candidate && !can_translate)
         return PGW_UNSUPPORTED;
     if (can_translate && !direct_candidate) {
-        PGW_Status status = ep->config->binding->bind_view(ep->typed, source);
+        PGW_Status status = ep->config->type_binding->bind_view(ep->typed, source);
         if (status == PGW_OK) {
             ep->view_writer_bound = true;
         } else if (status != PGW_UNSUPPORTED || !schema_compatible ||
@@ -1202,18 +1202,18 @@ static PGW_Status write_samples_impl(void *state, const PGW_SampleSeq *seq,
         if (ep->direct_write_candidate && have_view &&
             view.kind == PGW_SAMPLE_VIEW_NATIVE &&
             view.type_identity == ep->type_identity) {
-            if (ep->config->binding->validate_native &&
-                !ep->config->binding->validate_native(view.value)) {
+            if (ep->config->type_binding->validate_native &&
+                !ep->config->type_binding->validate_native(view.value)) {
                 ++ep->statistics.invalid;
                 continue;
             }
-            rc = ep->config->binding->write_native(
+            rc = ep->config->type_binding->write_native(
                 ep->typed, ep->writer, view.value, time_ptr);
             ++ep->statistics.direct_write_attempts;
         } else if (ep->view_writer_bound && have_view) {
             bool wrote_view = false;
             rc = DDS_RETCODE_ERROR;
-            PGW_Status view_status = ep->config->binding->write_view(
+            PGW_Status view_status = ep->config->type_binding->write_view(
                 ep->typed, ep->writer, &view, time_ptr, &rc);
             if (view_status == PGW_OK) {
                 wrote_view = true;
@@ -1234,12 +1234,12 @@ static PGW_Status write_samples_impl(void *state, const PGW_SampleSeq *seq,
                 const void *native = NULL;
                 if (ep->source_schema_compatible && have_view &&
                     view.kind == PGW_SAMPLE_VIEW_CANONICAL &&
-                    view.value_size == ep->config->binding->native_size) {
+                    view.value_size == ep->config->type_binding->native_size) {
                     native = view.value;
                 } else if (ep->source_schema_compatible &&
                            ep->source->access->copy_value) {
                     if (ep->source->access->copy_value(sample, ep->scratch,
-                            ep->config->binding->native_size) != PGW_OK) {
+                            ep->config->type_binding->native_size) != PGW_OK) {
                         ++ep->statistics.invalid;
                         continue;
                     }
@@ -1248,18 +1248,18 @@ static PGW_Status write_samples_impl(void *state, const PGW_SampleSeq *seq,
                     ++ep->statistics.invalid;
                     continue;
                 }
-                rc = ep->config->binding->write(
+                rc = ep->config->type_binding->write(
                     ep->typed, ep->writer, native, time_ptr);
             }
             ++ep->statistics.converted_write_attempts;
         } else if (ep->source_schema_compatible) {
             const void *native = NULL;
             if (have_view && view.kind == PGW_SAMPLE_VIEW_CANONICAL &&
-                view.value_size == ep->config->binding->native_size) {
+                view.value_size == ep->config->type_binding->native_size) {
                 native = view.value;
             } else if (ep->source->access->copy_value) {
                 if (ep->source->access->copy_value(sample, ep->scratch,
-                        ep->config->binding->native_size) != PGW_OK) {
+                        ep->config->type_binding->native_size) != PGW_OK) {
                     ++ep->statistics.invalid;
                     continue;
                 }
@@ -1268,7 +1268,7 @@ static PGW_Status write_samples_impl(void *state, const PGW_SampleSeq *seq,
                 ++ep->statistics.invalid;
                 continue;
             }
-            rc = ep->config->binding->write(
+            rc = ep->config->type_binding->write(
                 ep->typed, ep->writer, native, time_ptr);
             ++ep->statistics.converted_write_attempts;
         } else {
@@ -1309,7 +1309,7 @@ static const PGW_StreamReaderI reader_i = {
 static const PGW_StreamWriterI writer_i = {
     PGW_ABI_VERSION, sizeof(PGW_StreamWriterI), bind_writer, write_samples
 };
-static PGW_Status get_reader(PGW_Connection *opaque, const char *name,
+static PGW_Status lookup_stream_reader(PGW_Connection *opaque, const char *name,
                             PGW_StreamReader *out)
 {
     PGW_DDSConnection *connection = (PGW_DDSConnection *)opaque;
@@ -1322,7 +1322,7 @@ static PGW_Status get_reader(PGW_Connection *opaque, const char *name,
     }
     return PGW_INVALID;
 }
-static PGW_Status get_writer(PGW_Connection *opaque, const char *name,
+static PGW_Status lookup_stream_writer(PGW_Connection *opaque, const char *name,
                             PGW_StreamWriter *out)
 {
     PGW_DDSConnection *connection = (PGW_DDSConnection *)opaque;
@@ -1483,7 +1483,7 @@ static PGW_Status create_connection(const void *configuration, PGW_Arena *arena,
     for (RTI_INT32 i = 0; i < endpoint_count; ++i) {
         const PGW_DDSEndpointConfig *ec =
             PGW_DDSEndpointConfigSeq_get_reference(&config->endpoints, i);
-        const PGW_DDSBinding *binding = ec->binding;
+        const PGW_DDSTypeBinding *binding = ec->type_binding;
         if (!ec->name || !*ec->name || !ec->entity_name || !*ec->entity_name ||
             !binding || !binding->dds_type_name || !binding->representation ||
             !binding->representation->schema || !binding->representation->schema->name ||
@@ -1543,7 +1543,7 @@ static PGW_Status create_connection(const void *configuration, PGW_Arena *arena,
         PGW_DDSEndpoint *ep = PGW_DDSEndpointSeq_get_reference(&connection->endpoints, i);
         const PGW_DDSEndpointConfig *ec =
             PGW_DDSEndpointConfigSeq_get_reference(&config->endpoints, i);
-        const PGW_DDSBinding *binding = ec->binding;
+        const PGW_DDSTypeBinding *binding = ec->type_binding;
         ep->config = ec;
         ep->connection = connection;
         atomic_init(&ep->listener_target, NULL);
@@ -1616,7 +1616,7 @@ fail:
     return status;
 }
 const PGW_ConnectionI PGW_DDSConnextMicroConnection = {
-    PGW_ABI_VERSION, sizeof(PGW_ConnectionI), get_reader, get_writer, close_connection
+    PGW_ABI_VERSION, sizeof(PGW_ConnectionI), lookup_stream_reader, lookup_stream_writer, close_connection
 };
 const PGW_AdapterI PGW_DDSConnextMicroAdapter = {
     .version = PGW_ABI_VERSION,

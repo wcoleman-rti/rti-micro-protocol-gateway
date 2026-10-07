@@ -60,9 +60,9 @@ int main(void)
     ConsumerRecord records[1] = {{7, 42}};
     ConsumerRecordSeq records_seq;
     PGW_AdapterRef adapter_refs[2];
-    PGW_RepresentationRef representation_refs[1];
+    PGW_SampleRepresentationRef representation_refs[1];
     PGW_AdapterSeq adapter_sequence;
-    PGW_RepresentationSeq representation_sequence;
+    PGW_SampleRepresentationSeq representation_sequence;
     PGW_Registry registry = {0};
     PGW_CANMemory memory;
     PGW_CANFrame rx[1], tx[1];
@@ -111,8 +111,8 @@ int main(void)
         !ConsumerRecordSeq_finalize(&records_seq) ||
         !PGW_AdapterSeq_initialize(&adapter_sequence) ||
         !PGW_AdapterSeq_loan_contiguous(&adapter_sequence, adapter_refs, 0, 2) ||
-        !PGW_RepresentationSeq_initialize(&representation_sequence) ||
-        !PGW_RepresentationSeq_loan_contiguous(&representation_sequence,
+        !PGW_SampleRepresentationSeq_initialize(&representation_sequence) ||
+        !PGW_SampleRepresentationSeq_loan_contiguous(&representation_sequence,
                                                representation_refs, 0, 1) ||
         PGW_Registry_initialize(&registry, &adapter_sequence, &representation_sequence) != PGW_OK ||
         PGW_Registry_register_adapter(&registry, &PGW_CANAdapter) != PGW_OK ||
@@ -121,8 +121,8 @@ int main(void)
         PGW_Registry_finalize(&registry) != PGW_OK ||
         !PGW_AdapterSeq_unloan(&adapter_sequence) ||
         !PGW_AdapterSeq_finalize(&adapter_sequence) ||
-        !PGW_RepresentationSeq_unloan(&representation_sequence) ||
-        !PGW_RepresentationSeq_finalize(&representation_sequence)) {
+        !PGW_SampleRepresentationSeq_unloan(&representation_sequence) ||
+        !PGW_SampleRepresentationSeq_finalize(&representation_sequence)) {
         return 4;
     }
     if (PGW_CANMemory_initialize(&memory, rx, 1, tx, 1) != PGW_OK ||

@@ -71,7 +71,7 @@ The embedding application owns final process-global middleware shutdown.
 
 ## Typed plugins and loans
 
-`PGW_DDSBinding` is a compiled dispatch table, independent of CAN. The example
+`PGW_DDSTypeBinding` is a compiled dispatch table, independent of CAN. The example
 generates its per-type table and the repeated sequence, typed `take`,
 `return_loan`, and write wrappers from RTI type XML. Its bounded typed state and
 scratch are initialized from the caller's arena. The application declares the
@@ -131,10 +131,21 @@ time. Every requested timestamp must be valid, marked portable, have seconds
 in `0..INT32_MAX` and nanoseconds below one billion. Missing, monotonic-only,
 negative, oversized, or SDK-rejected values yield `PGW_WRITE_INVALID`, never
 silent clamping/regeneration. Accepted values use generated
-`write_w_timestamp`. Preserving bindings register known keys at epoch before
-RUNNING so preregistration's ordinary current time does not preclude an earlier
+`write_w_timestamp`. Timestamp-preserving type bindings register known keys at
+epoch before the service starts so preregistration's ordinary current time does not preclude an earlier
 portable source timestamp. DDS-native timestamps are wire-protocol timestamps;
 this is not a guarantee that remote clocks are synchronized.
+
+Connext Micro 4.3.0 exposes `DDS_DataWriter_write_w_params` and a
+`DDS_WriteParams_t` header layout containing identity, related identity, source
+timestamp, and instance handle. In the matching Micro 4.3.0 implementation,
+however, the write function consumes only `source_timestamp` and `handle`;
+identity and related-identity are not propagated. The generated
+`write_w_timestamp` path already delegates to `write_w_params`. Therefore this
+adapter preserves supported source timestamps and uses destination-writer
+instance handles, but cannot forward the input writer's sample identity through
+Micro 4.3.0. Do not confuse a source reader's instance/publication handle with
+a valid instance handle registered on the destination writer.
 
 Local DDS acceptance is not an acknowledgment. Timeout/resource exhaustion
 maps to per-sample backpressure, invalid arguments/preconditions to invalid

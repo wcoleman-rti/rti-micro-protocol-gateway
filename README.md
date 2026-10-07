@@ -15,8 +15,9 @@
 # RTI Micro Protocol Gateway
 
 A resource-bounded C11 gateway for routing data between protocol adapters. Its
-core uses opaque samples and statically registered bindings; adapters own
-connectivity and sample metadata. RTI Connext Micro DDS bindings support
+core routes opaque samples through statically registered sample
+representations; adapters own connectivity and sample metadata. RTI Connext
+Micro DDS type bindings support
 loan-scoped sample and context views for native writes or explicitly negotiated
 static cross-schema translation. Remote control is optional and off by default.
 
@@ -58,8 +59,8 @@ For more detail, start at the [hosted documentation site](https://wcoleman-rti.g
 
 ## Project map
 
-- **Core** — bounded synchronous routing, lifecycle, schemas, diagnostics, and
-  optional scheduler policy.
+- **Core** — bounded event-driven routing, lifecycle, type identities, and
+  diagnostics.
 - **Adapters** — CAN transports and the RTI Connext Micro DDS integration.
 - **Bindings and generators** — application value conversion, configuration
   validation, and build-time DBC code generation.

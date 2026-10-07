@@ -58,13 +58,13 @@ typedef struct PGW_CANConnection PGW_CANConnection;
 typedef struct PGW_CANCategoryState {
     PGW_CANConnection *connection;
     const char *name;
-    PGW_Representation representation;
+    PGW_SampleRepresentation representation;
     PGW_SampleViewDescriptor view_contract;
     PGW_CANSampleSeq queue;
     PGW_CANLoanSeq loan;
     size_t head, count;
     PGW_SampleSeq *borrowed;
-    const PGW_Representation *source;
+    const PGW_SampleRepresentation *source;
     bool queue_initialized;
     bool queue_borrowed;
     bool loan_initialized;
@@ -600,11 +600,11 @@ static PGW_Status return_loan(void *state, PGW_SampleSeq *seq)
     return pthread_mutex_unlock(&connection->mutex) ? PGW_IO_ERROR : PGW_OK;
 }
 
-static PGW_Status bind_source(void *state, const PGW_Representation *source)
+static PGW_Status bind_source(void *state, const PGW_SampleRepresentation *source)
 {
     PGW_CANCategoryState *cat = state;
     if (pthread_mutex_lock(&cat->connection->mutex)) return PGW_IO_ERROR;
-    if (!source || !PGW_schema_equal(source->schema, cat->representation.schema) ||
+    if (!source || !PGW_type_info_equal(source->schema, cat->representation.schema) ||
         !source->access || source->access->version != PGW_ABI_VERSION ||
         source->access->size != sizeof(PGW_SampleAccessI) ||
         (!source->access->copy_value && !source->access->view)) {
@@ -666,7 +666,7 @@ static PGW_Status unregister_listener(void *state,
     return pthread_mutex_unlock(&connection->mutex) ? PGW_IO_ERROR : PGW_OK;
 }
 
-static PGW_Status sample_signal(const PGW_Representation *source,
+static PGW_Status sample_signal(const PGW_SampleRepresentation *source,
                                const PGW_Sample *sample,
                                const PGW_Signal **value,
                                PGW_Signal *copy)
@@ -825,7 +825,7 @@ static const PGW_StreamWriterI writer_iface = {
     PGW_ABI_VERSION, sizeof(PGW_StreamWriterI), bind_source, write_samples
 };
 
-static PGW_Status get_reader(PGW_Connection *connection, const char *name,
+static PGW_Status lookup_stream_reader(PGW_Connection *connection, const char *name,
                              PGW_StreamReader *out)
 {
     PGW_CANConnection *c = (PGW_CANConnection *)connection;
@@ -841,11 +841,11 @@ static PGW_Status get_reader(PGW_Connection *connection, const char *name,
     return PGW_INVALID;
 }
 
-static PGW_Status get_writer(PGW_Connection *connection, const char *name,
+static PGW_Status lookup_stream_writer(PGW_Connection *connection, const char *name,
                              PGW_StreamWriter *out)
 {
     PGW_StreamReader r;
-    PGW_Status status = get_reader(connection, name, &r);
+    PGW_Status status = lookup_stream_reader(connection, name, &r);
     if (!out) return PGW_INVALID;
     if (status == PGW_OK)
         *out = (PGW_StreamWriter){r.state, &writer_iface, r.representation};
@@ -1215,7 +1215,7 @@ static PGW_Status create(const void *configuration, PGW_Arena *arena,
             PGW_SAMPLE_VIEW_CANONICAL, sizeof(PGW_Signal),
             &PGW_CAN_SIGNAL_VALUE_IDENTITY, &PGW_CAN_METADATA_IDENTITY
         };
-        cat->representation = (PGW_Representation){
+        cat->representation = (PGW_SampleRepresentation){
             category->schema, "can.signal", sizeof(PGW_CANSample),
             _Alignof(PGW_CANSample), &sample_access, &cat->view_contract};
         PGW_CANSample *queue_buffer;
@@ -1313,7 +1313,7 @@ const PGW_Counters *PGW_CAN_counters(const PGW_Connection *c)
 
 static const PGW_ConnectionI connection_iface = {
     PGW_ABI_VERSION, sizeof(PGW_ConnectionI),
-    get_reader, get_writer, close_connection
+    lookup_stream_reader, lookup_stream_writer, close_connection
 };
 const PGW_AdapterI PGW_CANAdapter = {
     .version = PGW_ABI_VERSION,

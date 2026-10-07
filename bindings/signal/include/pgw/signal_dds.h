@@ -18,11 +18,11 @@
 extern "C" {
 #endif
 #define PGW_SIGNAL_DECLARE_CATEGORY(name) \
-    extern const PGW_DDSBinding PGW_signal_dds_binding_##name;
+    extern const PGW_DDSTypeBinding PGW_signal_dds_type_binding_##name;
 PGW_CODEC_CATEGORIES(PGW_SIGNAL_DECLARE_CATEGORY)
 #undef PGW_SIGNAL_DECLARE_CATEGORY
 bool PGW_signal_validate_dds(const void *);
-PGW_Status PGW_signal_bind_view(void *, const PGW_Representation *);
+PGW_Status PGW_signal_bind_view(void *, const PGW_SampleRepresentation *);
 PGW_Status PGW_signal_from_view(const PGW_SampleView *, void *, size_t);
 PGW_Status PGW_signal_from_dds(const void *, void *, size_t);
 DDS_ReturnCode_t PGW_signal_to_dds(const void *, void *);

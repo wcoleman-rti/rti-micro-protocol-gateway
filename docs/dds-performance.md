@@ -143,13 +143,13 @@ reader per-key limits outside the supported one/two-slot policy.
 
 Five libc and three OSAPI allocation controls plus an arena control verify
 the interceptors before measurement. Initialization monitoring starts after
-OSAPI initialization/control verification and covers MAG/model/entity/binding
-construction. After READY the arena is frozen and monitoring includes initial
+OSAPI initialization/control verification and covers MAG/model/entity/type-binding
+construction. After service initialization the arena is frozen and monitoring includes initial
 endpoint matching, the first business/Probe/management traffic, all batches,
 resource/status/snapshot reads, and service STOP.
 
 Discovery starts during participant initialization; matching is a separately
-reported post-READY phase, not a claim that discovery first begins then.
+reported post-initialization phase, not a claim that discovery first begins then.
 The process contains only the declared peers, not later undeclared-peer churn.
 
 The arena must receive zero runtime requests and must not grow. Libc/OSAPI

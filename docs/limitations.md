@@ -10,57 +10,47 @@
   the software.
 -->
 
-# Extension and certification boundaries
+# Current scope and limits
 
-The implementation requires an externally installed, licensed RTI Connext
-Micro 4.3.0 SDK. RTI runtime libraries and implementation sources are external; the
-bundled CMake utility modules retain their original license notices.
-Gateway-authored files carry the project license in [LICENSE](../LICENSE);
-third-party files with separate notices remain under their own terms.
+The gateway requires an installed, licensed RTI Connext Micro 4.3.0 SDK. The
+core uses Micro's typed sequences and OSAPI even when the DDS adapter is
+disabled.
 
-The SDK's custom sequence templates are isolated behind `PGW_SampleSeq`.
-Installed availability is not qualification evidence, a Cert compatibility
-guarantee or a cross-version infrastructure ABI promise.
+## Configuration and routing
 
-## Deliberately deferred
+- Topology, endpoint types, adapters, and routes are configured before service
+  initialization. There is no runtime plugin loading, endpoint creation, or
+  stream discovery.
+- A route has one reader and one writer. A consuming reader belongs to one
+  route. Each session has one worker; routes within a session are dispatched
+  serially in bounded, round-robin batches.
+- Storage and queues are fixed-capacity. Capacity exhaustion follows the
+  documented adapter policy; the core does not retain or retry samples after
+  writer backpressure.
+- Generated DDS types are statically bound. `PGW_TypeInfo` provides logical
+  type identity, not a runtime-introspectable field schema. Type-specific
+  conversion belongs to generated `PGW_DDSTypeBinding` callbacks.
 
-- DPSE profile/remote assertions; this prototype uses finite DPDE resources.
-- Shared-library plugins, hot reload, runtime graph/type discovery and
-  dynamic stream creation.
-- Runtime type discovery, arbitrary schema transformation, DynamicData and
-  serialized CDR forwarding. Statically compiled DDS bindings may provide
-  explicit cross-schema translators over `PGW_SampleView`; there is no generic
-  transformation engine or runtime-discovered mapping.
-- Parallel gateway sessions/thread pools.
-- Extended DBC multiplexing, floating-point DBC fields, J1939 and ISO-TP.
-- Profinet, OPC UA, MQTT and non-Linux CAN transports.
-- Native downstream replay of DDS publication identity/sequence numbers.
-- Clock synchronization/conversion and arbitrary cross-host timing claims.
+## Protocol and delivery behavior
 
-Metadata capture does not imply destination preservation. Timestamp policies
-are adapter-specific and opt-in; source clock validity and precision must be
-explicit. Publication handles and sequence numbers are scoped provenance,
-not globally portable identity or order. The schema is not silently extended
-to carry private metadata.
+- CAN supports the bounded DBC subset documented by the
+  [DBC code generator](../tools/dbc_codegen/README.md). CAN commands require a
+  received baseline, and baselines do not expire.
+- CAN is available through the memory transport and Linux SocketCAN. The
+  maintained suite does not claim physical-bus delivery or live vcan traffic;
+  see [vcan integration](vcan-integration.md).
+- Connext Micro 4.3.0 writes support source timestamps and destination instance
+  handles. Its `write_w_params` implementation does not propagate input sample
+  identity or related-sample identity.
+- Local CAN acceptance and local DDS write acceptance are not proof of
+  physical delivery or remote DDS observation. Source timestamps do not
+  synchronize clocks across hosts.
+- Resource limits are based on the declared AppGen topology. Undeclared peers
+  can exceed the configured discovery/resource budget.
 
-CAN commands need a received baseline, preserve unrelated bits and never
-invent a zero-filled frame. Baselines do not expire: stale-state risk is an
-explicit selected behavior, not freshness assurance. Local adapter acceptance
-does not establish physical delivery or DDS acknowledgment.
+## Qualification
 
-MAG owns topology-derived resources for the declared XML inventory.
-Key/history/workload budgets remain application inputs. An undeclared peer
-can exceed that engineering envelope; dynamic discovery is not unlimited
-capacity.
-
-## Future Cert assessment
-
-Audit the actual Cert product/release for OSAPI and sequence subset availability,
-static type support, initialization/deletion lifecycle, threading, PSL/BSP,
-discovery, permitted allocators and supported resource/diagnostic APIs. Then
-qualify tools and verification artifacts against the target process.
-
-Host tests are not RTOS/hardware qualification. Kernel/middleware memory,
-thread stacks, all allocator entry points, bounded scheduling under target
-loads and WCET/deadline assurance require target-specific measurements.
-Absence of vendor logging must not remove operational counters.
+The project is a prototype, not a certified implementation or a whole-process
+allocation, WCET, or deadline guarantee. Host tests and benchmarks do not
+qualify an RTOS, hardware target, kernel, physical CAN bus, or every
+middleware/vendor allocator.

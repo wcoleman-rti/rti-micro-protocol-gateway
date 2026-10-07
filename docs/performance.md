@@ -23,7 +23,8 @@ Runs persist JSON with source/executable fingerprints, build options, host,
 workload and instrumentation settings, declared input fingerprints and verified
 SDK/compiler/JRE/generator provenance. Source fingerprinting excludes generated
 build trees, the local tool environment and results. No warm-up is hidden:
-allocation monitoring and elapsed measurement include first use after READY.
+allocation monitoring and elapsed measurement include first use after service
+initialization.
 
 The initial workload forwards four opaque keyed values per scheduler step.
 It reports accepted samples/s separately from steps, initialization duration,

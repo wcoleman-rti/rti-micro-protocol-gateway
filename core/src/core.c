@@ -82,7 +82,7 @@ PGW_Status PGW_Arena_allocate(PGW_Arena *a, size_t bytes, size_t alignment, void
     return PGW_OK;
 }
 
-bool PGW_schema_equal(const PGW_Schema *a, const PGW_Schema *b)
+bool PGW_type_info_equal(const PGW_TypeInfo *a, const PGW_TypeInfo *b)
 {
     return a && b && a->name && a->name[0] && b->name && b->name[0] &&
            a->fingerprint && a->fingerprint[0] && b->fingerprint && b->fingerprint[0] &&
@@ -90,7 +90,7 @@ bool PGW_schema_equal(const PGW_Schema *a, const PGW_Schema *b)
            !strcmp(a->fingerprint, b->fingerprint);
 }
 
-static bool representation_valid(const PGW_Representation *b)
+static bool representation_valid(const PGW_SampleRepresentation *b)
 {
     bool access_valid = !b || !b->access ||
         (b->access->version == PGW_ABI_VERSION &&
@@ -104,27 +104,30 @@ static bool representation_valid(const PGW_Representation *b)
           b->view_contract->value_size));
     return b && b->name && b->name[0] && b->sample_size && b->sample_alignment &&
         !(b->sample_alignment & (b->sample_alignment - 1)) &&
-        PGW_schema_equal(b->schema, b->schema) &&
+        PGW_type_info_equal(b->schema, b->schema) &&
         access_valid && view_valid;
 }
 
 PGW_Status PGW_Registry_initialize(PGW_Registry *r, const PGW_AdapterSeq *adapters,
-                                  const PGW_RepresentationSeq *bindings)
+                                  const PGW_SampleRepresentationSeq *representations)
 {
-    if (!r || !adapters || !bindings || r->initialized) return PGW_INVALID;
+    if (!r || !adapters || !representations || r->initialized) return PGW_INVALID;
     RTI_INT32 adapter_capacity = PGW_AdapterSeq_get_maximum(adapters);
-    RTI_INT32 binding_capacity = PGW_RepresentationSeq_get_maximum(bindings);
+    RTI_INT32 representation_capacity =
+        PGW_SampleRepresentationSeq_get_maximum(representations);
     RTI_INT32 adapter_length = PGW_AdapterSeq_get_length(adapters);
-    RTI_INT32 binding_length = PGW_RepresentationSeq_get_length(bindings);
+    RTI_INT32 representation_length =
+        PGW_SampleRepresentationSeq_get_length(representations);
     PGW_AdapterRef *adapter_storage = PGW_AdapterSeq_get_contiguous_buffer(adapters);
-    PGW_RepresentationRef *binding_storage = PGW_RepresentationSeq_get_contiguous_buffer(bindings);
-    if (adapter_capacity <= 0 || binding_capacity <= 0 ||
+    PGW_SampleRepresentationRef *representation_storage =
+        PGW_SampleRepresentationSeq_get_contiguous_buffer(representations);
+    if (adapter_capacity <= 0 || representation_capacity <= 0 ||
         adapter_length < 0 || adapter_length > adapter_capacity ||
-        binding_length < 0 || binding_length > binding_capacity ||
-        !adapter_storage || !binding_storage) return PGW_INVALID;
+        representation_length < 0 || representation_length > representation_capacity ||
+        !adapter_storage || !representation_storage) return PGW_INVALID;
     r->frozen = false;
     if (!PGW_AdapterSeq_initialize(&r->adapters)) return PGW_FATAL;
-    if (!PGW_RepresentationSeq_initialize(&r->bindings)) {
+    if (!PGW_SampleRepresentationSeq_initialize(&r->representations)) {
         (void)PGW_AdapterSeq_finalize(&r->adapters);
         return PGW_FATAL;
     }
@@ -135,12 +138,13 @@ PGW_Status PGW_Registry_initialize(PGW_Registry *r, const PGW_AdapterSeq *adapte
         return PGW_INVALID;
     }
     r->adapters_borrowed = true;
-    if (!PGW_RepresentationSeq_loan_contiguous(&r->bindings, binding_storage,
-                                               binding_length, binding_capacity)) {
+    if (!PGW_SampleRepresentationSeq_loan_contiguous(
+            &r->representations, representation_storage, representation_length,
+            representation_capacity)) {
         (void)PGW_Registry_finalize(r);
         return PGW_INVALID;
     }
-    r->bindings_borrowed = true;
+    r->representations_borrowed = true;
     return PGW_OK;
 }
 
@@ -148,14 +152,16 @@ PGW_Status PGW_Registry_finalize(PGW_Registry *r)
 {
     if (!r || !r->initialized) return PGW_INVALID;
     bool adapters = !r->adapters_borrowed || PGW_AdapterSeq_unloan(&r->adapters);
-    bool bindings = !r->bindings_borrowed || PGW_RepresentationSeq_unloan(&r->bindings);
+    bool representations = !r->representations_borrowed ||
+        PGW_SampleRepresentationSeq_unloan(&r->representations);
     if (adapters) adapters = PGW_AdapterSeq_finalize(&r->adapters);
-    if (bindings) bindings = PGW_RepresentationSeq_finalize(&r->bindings);
-    if (!adapters || !bindings) return PGW_LOAN_ERROR;
+    if (representations)
+        representations = PGW_SampleRepresentationSeq_finalize(&r->representations);
+    if (!adapters || !representations) return PGW_LOAN_ERROR;
     r->frozen = false;
     r->initialized = false;
     r->adapters_borrowed = false;
-    r->bindings_borrowed = false;
+    r->representations_borrowed = false;
     return PGW_OK;
 }
 
@@ -165,7 +171,7 @@ PGW_Status PGW_Registry_register_adapter(PGW_Registry *r, const PGW_AdapterI *a)
         a->size != sizeof(*a) || !a->name || !a->name[0] || !a->create || !a->connection ||
         a->connection->version != PGW_ABI_VERSION ||
         a->connection->size != sizeof(PGW_ConnectionI) ||
-        (!a->connection->reader && !a->connection->writer) ||
+        (!a->connection->lookup_stream_reader && !a->connection->lookup_stream_writer) ||
         !a->connection->close || !r->initialized) return PGW_INVALID;
 #if defined(PGW_ENABLE_REMOTE_CONTROL)
     if (a->control && (a->control->version != PGW_CONTROL_ABI_VERSION ||
@@ -182,15 +188,17 @@ PGW_Status PGW_Registry_register_adapter(PGW_Registry *r, const PGW_AdapterI *a)
     return PGW_OK;
 }
 
-PGW_Status PGW_Registry_register_binding(PGW_Registry *r, const PGW_Representation *b)
+PGW_Status PGW_Registry_register_representation(
+    PGW_Registry *r, const PGW_SampleRepresentation *representation)
 {
-    if (!r || r->frozen || !representation_valid(b) ||
+    if (!r || r->frozen || !representation_valid(representation) ||
         !r->initialized) return PGW_INVALID;
-    if (PGW_Registry_find_binding(r, b->name)) return PGW_INVALID;
-    RTI_INT32 count = PGW_RepresentationSeq_get_length(&r->bindings);
-    if (count == PGW_RepresentationSeq_get_maximum(&r->bindings)) return PGW_CAPACITY;
-    if (!PGW_RepresentationSeq_set_length(&r->bindings, count + 1)) return PGW_CAPACITY;
-    *PGW_RepresentationSeq_get_reference(&r->bindings, count) = b;
+    if (PGW_Registry_find_representation(r, representation->name)) return PGW_INVALID;
+    RTI_INT32 count = PGW_SampleRepresentationSeq_get_length(&r->representations);
+    if (count == PGW_SampleRepresentationSeq_get_maximum(&r->representations)) return PGW_CAPACITY;
+    if (!PGW_SampleRepresentationSeq_set_length(&r->representations, count + 1)) return PGW_CAPACITY;
+    *PGW_SampleRepresentationSeq_get_reference(&r->representations, count) =
+        representation;
     return PGW_OK;
 }
 
@@ -204,11 +212,11 @@ const PGW_AdapterI *PGW_Registry_find_adapter(const PGW_Registry *r, const char 
     return NULL;
 }
 
-const PGW_Representation *PGW_Registry_find_binding(const PGW_Registry *r, const char *name)
+const PGW_SampleRepresentation *PGW_Registry_find_representation(const PGW_Registry *r, const char *name)
 {
     if (!r || !r->initialized || !name) return NULL;
-    for (RTI_INT32 i = 0; i < PGW_RepresentationSeq_get_length(&r->bindings); ++i) {
-        PGW_RepresentationRef binding = *PGW_RepresentationSeq_get_reference(&r->bindings, i);
+    for (RTI_INT32 i = 0; i < PGW_SampleRepresentationSeq_get_length(&r->representations); ++i) {
+        PGW_SampleRepresentationRef binding = *PGW_SampleRepresentationSeq_get_reference(&r->representations, i);
         if (!strcmp(binding->name, name)) return binding;
     }
     return NULL;
@@ -251,11 +259,28 @@ PGW_Status PGW_Route_initialize_storage(PGW_Route *r, const PGW_SampleSeq *sampl
 
 static PGW_Status session_signal_wake(PGW_Session *session)
 {
-    if (!session || !session->wake_guard) return PGW_OK;
-    if (DDS_GuardCondition_set_trigger_value(session->wake_guard,
+    if (!session || !session->async_waitset.wake_condition) return PGW_OK;
+    if (DDS_GuardCondition_set_trigger_value(session->async_waitset.wake_condition,
             DDS_BOOLEAN_TRUE) != DDS_RETCODE_OK) {
         atomic_store_explicit(&session->error, PGW_IO_ERROR,
                               memory_order_release);
+        return PGW_IO_ERROR;
+    }
+    return PGW_OK;
+}
+
+static PGW_Status route_signal_ready(PGW_Route *route)
+{
+    if (!route) return PGW_INVALID;
+    if (route->lifecycle == PGW_FAULTED) return PGW_OK;
+    atomic_store_explicit(&route->pending, true, memory_order_release);
+    if (route->lifecycle == PGW_PAUSED) return PGW_OK;
+    if (!route->ready_condition) return PGW_INVALID;
+    if (DDS_GuardCondition_set_trigger_value(route->ready_condition,
+            DDS_BOOLEAN_TRUE) != DDS_RETCODE_OK) {
+        if (route->session)
+            atomic_store_explicit(&route->session->error, PGW_IO_ERROR,
+                                  memory_order_release);
         return PGW_IO_ERROR;
     }
     return PGW_OK;
@@ -265,8 +290,7 @@ static void route_data_available(void *context)
 {
     PGW_Route *route = context;
     if (!route || !route->session) return;
-    atomic_store_explicit(&route->pending, true, memory_order_release);
-    (void)session_signal_wake(route->session);
+    (void)route_signal_ready(route);
 }
 
 #if defined(PGW_ENABLE_REMOTE_CONTROL)
@@ -301,7 +325,7 @@ PGW_Status PGW_Route_pause(PGW_Route *r)
     if (!r || !r->storage_initialized) return PGW_INVALID;
     if (r->lifecycle == PGW_FAULTED) return PGW_FATAL;
     if (r->lifecycle == PGW_PAUSED) return PGW_NO_CHANGE;
-    if (r->lifecycle != PGW_READY && r->lifecycle != PGW_RUNNING)
+    if (r->lifecycle != PGW_ENABLED && r->lifecycle != PGW_STARTED)
         return PGW_INVALID;
     r->lifecycle = PGW_PAUSED;
     return notify_route_state(r);
@@ -312,10 +336,14 @@ PGW_Status PGW_Route_resume(PGW_Route *r)
     if (!r || !r->storage_initialized) return PGW_INVALID;
     if (r->lifecycle == PGW_FAULTED) return PGW_FATAL;
     if (r->lifecycle == PGW_PAUSED) {
-        r->lifecycle = PGW_READY;
+        r->lifecycle = PGW_ENABLED;
+        if (atomic_load_explicit(&r->pending, memory_order_acquire)) {
+            PGW_Status status = route_signal_ready(r);
+            if (status != PGW_OK) return status;
+        }
         return notify_route_state(r);
     }
-    if (r->lifecycle == PGW_READY || r->lifecycle == PGW_RUNNING)
+    if (r->lifecycle == PGW_ENABLED || r->lifecycle == PGW_STARTED)
         return PGW_NO_CHANGE;
     return PGW_INVALID;
 }
@@ -494,7 +522,7 @@ static PGW_ControlResourceStatus control_route_status(const PGW_Route *route)
 {
     if (route->lifecycle == PGW_FAULTED) return PGW_CONTROL_STATUS_FAULTED;
     if (route->lifecycle == PGW_PAUSED) return PGW_CONTROL_STATUS_PAUSED;
-    if (route->lifecycle == PGW_READY || route->lifecycle == PGW_RUNNING)
+    if (route->lifecycle == PGW_ENABLED || route->lifecycle == PGW_STARTED)
         return PGW_CONTROL_STATUS_UP;
     return PGW_CONTROL_STATUS_UNKNOWN;
 }
@@ -876,7 +904,7 @@ static PGW_Status route_step(PGW_Service *s, PGW_Route *r)
 {
     if (r->lifecycle == PGW_FAULTED || r->lifecycle == PGW_PAUSED)
         return PGW_OK;
-    r->lifecycle = PGW_RUNNING;
+    r->lifecycle = PGW_STARTED;
     size_t maximum = PGW_SampleSeq_get_maximum(&r->samples);
     size_t budget = s->sample_budget < maximum ? s->sample_budget : maximum;
 #if defined(PGW_ENABLE_ROUTE_LATENCY_METRICS)
@@ -965,12 +993,44 @@ static PGW_Status route_step(PGW_Service *s, PGW_Route *r)
     return PGW_OK;
 }
 
+static PGW_Status route_ready_handler(void *context)
+{
+    PGW_Route *route = context;
+    if (!route || !route->session || !route->session->service ||
+        !route->ready_condition) return PGW_INVALID;
+    PGW_Session *session = route->session;
+    if (DDS_GuardCondition_set_trigger_value(route->ready_condition,
+            DDS_BOOLEAN_FALSE) != DDS_RETCODE_OK)
+        return PGW_IO_ERROR;
+    if (route->lifecycle == PGW_FAULTED) {
+        atomic_store_explicit(&route->pending, false, memory_order_release);
+        return PGW_OK;
+    }
+    if (route->lifecycle == PGW_PAUSED) {
+        atomic_store_explicit(&route->pending, true, memory_order_release);
+        return PGW_OK;
+    }
+    if (!atomic_exchange_explicit(&route->pending, false, memory_order_acq_rel))
+        return PGW_OK;
+
+    PGW_Status status = route_step(session->service, route);
+    if (status != PGW_OK)
+        atomic_store_explicit(&session->error, status, memory_order_release);
+    if (route->lifecycle == PGW_PAUSED)
+        atomic_store_explicit(&route->pending, true, memory_order_release);
+    else if (route->lifecycle == PGW_FAULTED)
+        atomic_store_explicit(&route->pending, false, memory_order_release);
+    atomic_fetch_add_explicit(&session->dispatched_routes, 1,
+                              memory_order_release);
+    return status;
+}
+
 static PGW_Status session_attach(PGW_Session *session, DDS_Condition *condition)
 {
     if (!condition ||
-        DDS_WaitSet_attach_condition(session->waitset, condition) != DDS_RETCODE_OK)
+        DDS_WaitSet_attach_condition(session->async_waitset.waitset, condition) != DDS_RETCODE_OK)
         return PGW_IO_ERROR;
-    ++session->attached_conditions;
+    ++session->async_waitset.attached_conditions;
     return PGW_OK;
 }
 
@@ -1003,29 +1063,32 @@ static PGW_Status session_unsubscribe(PGW_Session *session)
 static PGW_Status session_initialize(PGW_Service *service, PGW_Session *session)
 {
     size_t route_count = (size_t)PGW_RouteSeq_get_length(&session->routes);
+    if (route_count >= INT32_MAX) return PGW_CAPACITY;
     session->service = service;
     session->cursor = 0;
-    session->attached_conditions = 0;
+    session->async_waitset.attached_conditions = 0;
     atomic_init(&session->wakeups, 0);
     atomic_init(&session->dispatched_routes, 0);
     atomic_init(&session->stopping, false);
     atomic_init(&session->error, PGW_OK);
-    session->waitset = DDS_WaitSet_new();
-    if (!session->waitset) return PGW_FATAL;
-    session->wake_guard = DDS_GuardCondition_new();
-    if (!session->wake_guard) return PGW_FATAL;
-    if (!DDS_ConditionSeq_initialize(&session->active_conditions)) return PGW_FATAL;
-    session->conditions_initialized = true;
-    if (!DDS_ConditionSeq_set_maximum(&session->active_conditions, 1))
+    session->async_waitset.waitset = DDS_WaitSet_new();
+    if (!session->async_waitset.waitset) return PGW_FATAL;
+    session->async_waitset.wake_condition = DDS_GuardCondition_new();
+    if (!session->async_waitset.wake_condition) return PGW_FATAL;
+    if (!DDS_ConditionSeq_initialize(&session->async_waitset.active_conditions)) return PGW_FATAL;
+    session->async_waitset.conditions_initialized = true;
+    if (!DDS_ConditionSeq_set_maximum(
+            &session->async_waitset.active_conditions,
+            (RTI_INT32)(route_count + 1)))
         return PGW_CAPACITY;
     PGW_Status status = session_attach(session,
-        DDS_GuardCondition_as_condition(session->wake_guard));
+        DDS_GuardCondition_as_condition(session->async_waitset.wake_condition));
     if (status != PGW_OK) return status;
-    session->wake_attached = true;
-    session->initialized = true;
-    if (DDS_GuardCondition_set_trigger_value(session->wake_guard,
+    session->async_waitset.wake_attached = true;
+    session->async_waitset.initialized = true;
+    if (DDS_GuardCondition_set_trigger_value(session->async_waitset.wake_condition,
             DDS_BOOLEAN_TRUE) != DDS_RETCODE_OK ||
-        DDS_GuardCondition_set_trigger_value(session->wake_guard,
+        DDS_GuardCondition_set_trigger_value(session->async_waitset.wake_condition,
             DDS_BOOLEAN_FALSE) != DDS_RETCODE_OK)
         return PGW_IO_ERROR;
 #if defined(PGW_ENABLE_REMOTE_CONTROL)
@@ -1106,44 +1169,70 @@ static PGW_Status session_initialize(PGW_Service *service, PGW_Session *session)
         status = route->writer.iface->bind(route->writer.state,
                                            route->reader.representation);
         if (status != PGW_OK) return fail(route, status, "bind");
+        route->ready_condition = DDS_GuardCondition_new();
+        if (!route->ready_condition) return fail(route, PGW_FATAL,
+                                                  "ready condition");
+        route->ready_handler = route_ready_handler;
+        route->ready_context = route;
+        status = session_attach(session,
+            DDS_GuardCondition_as_condition(route->ready_condition));
+        if (status != PGW_OK) return fail(route, status, "attach ready condition");
+        route->ready_attached = true;
         status = route->reader.iface->register_listener(
             route->reader.state, &route->listener);
         if (status != PGW_OK) return fail(route, status, "register listener");
         route->listener_registered = true;
-        route->lifecycle = PGW_READY;
+        route->lifecycle = PGW_ENABLED;
     }
-    session->lifecycle = PGW_READY;
+    session->lifecycle = PGW_ENABLED;
     return PGW_OK;
 }
 
 static PGW_Status session_release(PGW_Session *session, bool release_routes)
 {
-    if (session->worker) return PGW_INVALID;
+    if (session->async_waitset.worker) return PGW_INVALID;
     PGW_Status status = session_unsubscribe(session);
     if (status != PGW_OK) return status;
-    if (session->wake_attached && session->waitset &&
-        DDS_WaitSet_detach_condition(session->waitset,
-            DDS_GuardCondition_as_condition(session->wake_guard)) !=
+    for (RTI_INT32 i = 0; session->routes_initialized &&
+         i < PGW_RouteSeq_get_length(&session->routes); ++i) {
+        PGW_Route *route = PGW_RouteSeq_get_reference(&session->routes, i);
+        if (route->ready_attached && session->async_waitset.waitset &&
+            DDS_WaitSet_detach_condition(session->async_waitset.waitset,
+                DDS_GuardCondition_as_condition(route->ready_condition)) !=
+                    DDS_RETCODE_OK)
+            return PGW_IO_ERROR;
+        route->ready_attached = false;
+        route->ready_handler = NULL;
+        route->ready_context = NULL;
+        if (route->ready_condition) {
+            if (DDS_GuardCondition_delete(route->ready_condition) != DDS_RETCODE_OK)
+                return PGW_IO_ERROR;
+            route->ready_condition = NULL;
+        }
+    }
+    if (session->async_waitset.wake_attached && session->async_waitset.waitset &&
+        DDS_WaitSet_detach_condition(session->async_waitset.waitset,
+            DDS_GuardCondition_as_condition(session->async_waitset.wake_condition)) !=
                 DDS_RETCODE_OK)
         return PGW_IO_ERROR;
-    session->wake_attached = false;
-    if (session->wake_guard) {
-        if (DDS_GuardCondition_delete(session->wake_guard) != DDS_RETCODE_OK)
+    session->async_waitset.wake_attached = false;
+    if (session->async_waitset.wake_condition) {
+        if (DDS_GuardCondition_delete(session->async_waitset.wake_condition) != DDS_RETCODE_OK)
             return PGW_IO_ERROR;
-        session->wake_guard = NULL;
+        session->async_waitset.wake_condition = NULL;
     }
-    if (session->conditions_initialized) {
-        if (!DDS_ConditionSeq_finalize(&session->active_conditions))
+    if (session->async_waitset.conditions_initialized) {
+        if (!DDS_ConditionSeq_finalize(&session->async_waitset.active_conditions))
             return PGW_LOAN_ERROR;
-        session->conditions_initialized = false;
+        session->async_waitset.conditions_initialized = false;
     }
-    if (session->waitset) {
-        if (DDS_WaitSet_delete(session->waitset) != DDS_RETCODE_OK)
+    if (session->async_waitset.waitset) {
+        if (DDS_WaitSet_delete(session->async_waitset.waitset) != DDS_RETCODE_OK)
             return PGW_IO_ERROR;
-        session->waitset = NULL;
+        session->async_waitset.waitset = NULL;
     }
-    session->attached_conditions = 0;
-    session->initialized = false;
+    session->async_waitset.attached_conditions = 0;
+    session->async_waitset.initialized = false;
     session->service = NULL;
     for (RTI_INT32 i = 0; session->routes_initialized &&
          i < PGW_RouteSeq_get_length(&session->routes); ++i) {
@@ -1188,7 +1277,7 @@ PGW_Status PGW_Service_initialize(PGW_Service *service)
         PGW_Session *session =
             PGW_SessionSeq_get_reference(&service->sessions, i);
         if (!session->name || !session->name[0] || !session->routes_initialized ||
-            !PGW_RouteSeq_get_length(&session->routes) || session->initialized ||
+            !PGW_RouteSeq_get_length(&session->routes) || session->async_waitset.initialized ||
             session->lifecycle != PGW_UNINITIALIZED) {
             status = PGW_INVALID;
             break;
@@ -1247,7 +1336,7 @@ PGW_Status PGW_Service_initialize(PGW_Service *service)
         service->lifecycle = cleanup_complete ? PGW_FAULTED : PGW_STOPPED;
         return status;
     }
-    service->lifecycle = PGW_READY;
+    service->lifecycle = PGW_ENABLED;
 #if defined(PGW_ENABLE_REMOTE_CONTROL)
     if (service->control_resources) {
         atomic_flag_clear(&service->control_lock);
@@ -1311,15 +1400,30 @@ static void control_sync_all_routes(PGW_Service *service)
 static RTI_BOOL session_thread_wakeup(struct OSAPI_ThreadInfo *info)
 {
     PGW_Session *session = info->user_data;
-    return session->wake_guard &&
-        DDS_GuardCondition_set_trigger_value(session->wake_guard,
+    return session->async_waitset.wake_condition &&
+        DDS_GuardCondition_set_trigger_value(session->async_waitset.wake_condition,
             DDS_BOOLEAN_TRUE) == DDS_RETCODE_OK ? RTI_TRUE : RTI_FALSE;
+}
+
+static bool session_condition_active(const PGW_Session *session,
+                                     DDS_Condition *condition)
+{
+    RTI_INT32 length = DDS_ConditionSeq_get_length(
+        &session->async_waitset.active_conditions);
+    for (RTI_INT32 i = 0; i < length; ++i) {
+        DDS_Condition **active = DDS_ConditionSeq_get_reference(
+            &session->async_waitset.active_conditions, i);
+        if (active && *active == condition) return true;
+    }
+    return false;
 }
 
 static RTI_BOOL session_thread_entry(struct OSAPI_ThreadInfo *info)
 {
     PGW_Session *session = info->user_data;
+#if defined(PGW_ENABLE_REMOTE_CONTROL)
     PGW_Service *service = session->service;
+#endif
     while (!atomic_load_explicit(&session->stopping, memory_order_acquire)) {
 #if defined(PGW_ENABLE_REMOTE_CONTROL)
         struct DDS_Duration_t timeout_storage;
@@ -1334,14 +1438,14 @@ static RTI_BOOL session_thread_entry(struct OSAPI_ThreadInfo *info)
 #else
         const struct DDS_Duration_t *timeout = &DDS_DURATION_INFINITE;
 #endif
-        if (!DDS_ConditionSeq_set_length(&session->active_conditions, 0)) {
+        if (!DDS_ConditionSeq_set_length(&session->async_waitset.active_conditions, 0)) {
             atomic_store_explicit(&session->error, PGW_FATAL,
                                   memory_order_release);
             session->lifecycle = PGW_FAULTED;
             return RTI_FALSE;
         }
         DDS_ReturnCode_t waited = DDS_WaitSet_wait(
-            session->waitset, &session->active_conditions, timeout);
+            session->async_waitset.waitset, &session->async_waitset.active_conditions, timeout);
         if (atomic_load_explicit(&session->stopping, memory_order_acquire))
             break;
         if (waited == DDS_RETCODE_TIMEOUT) {
@@ -1362,7 +1466,7 @@ static RTI_BOOL session_thread_entry(struct OSAPI_ThreadInfo *info)
             return RTI_FALSE;
         }
         atomic_fetch_add_explicit(&session->wakeups, 1, memory_order_release);
-        if (DDS_GuardCondition_set_trigger_value(session->wake_guard,
+        if (DDS_GuardCondition_set_trigger_value(session->async_waitset.wake_condition,
                 DDS_BOOLEAN_FALSE) != DDS_RETCODE_OK) {
             atomic_store_explicit(&session->error, PGW_IO_ERROR,
                                   memory_order_release);
@@ -1400,29 +1504,20 @@ static RTI_BOOL session_thread_entry(struct OSAPI_ThreadInfo *info)
             size_t index = (start + offset) % count;
             PGW_Route *route =
                 PGW_RouteSeq_get_reference(&session->routes, (RTI_INT32)index);
-            if (route->lifecycle == PGW_FAULTED) {
-                atomic_store_explicit(&route->pending, false,
+            if (!session_condition_active(session,
+                    DDS_GuardCondition_as_condition(route->ready_condition)))
+                continue;
+            if (!route->ready_handler) {
+                atomic_store_explicit(&session->error, PGW_INVALID,
                                       memory_order_release);
-                continue;
+                session->lifecycle = PGW_FAULTED;
+                return RTI_FALSE;
             }
-            if (route->lifecycle == PGW_PAUSED ||
-                !atomic_exchange_explicit(&route->pending, false,
-                                          memory_order_acq_rel))
-                continue;
-            {
-                PGW_Status route_status = route_step(service, route);
-                if (route_status != PGW_OK)
-                    atomic_store_explicit(&session->error, route_status,
-                                          memory_order_release);
-                if (route->lifecycle == PGW_PAUSED)
-                    atomic_store_explicit(&route->pending, true,
-                                          memory_order_release);
-                else if (route->lifecycle == PGW_FAULTED)
-                    atomic_store_explicit(&route->pending, false,
-                                          memory_order_release);
-                atomic_fetch_add_explicit(&session->dispatched_routes, 1,
-                                          memory_order_release);
-            }
+            PGW_Status handler_status =
+                route->ready_handler(route->ready_context);
+            if (handler_status != PGW_OK)
+                atomic_store_explicit(&session->error, handler_status,
+                                      memory_order_release);
         }
         session->cursor = (start + 1) % count;
     }
@@ -1431,7 +1526,7 @@ static RTI_BOOL session_thread_entry(struct OSAPI_ThreadInfo *info)
 
 PGW_Status PGW_Service_start(PGW_Service *service)
 {
-    if (!service || service->lifecycle != PGW_READY ||
+    if (!service || service->lifecycle != PGW_ENABLED ||
         !service->sessions_initialized) return PGW_INVALID;
     struct OSAPI_ThreadProperty property = OSAPI_ThreadProperty_INITIALIZER;
     RTI_INT32 count = PGW_SessionSeq_get_length(&service->sessions);
@@ -1439,27 +1534,27 @@ PGW_Status PGW_Service_start(PGW_Service *service)
         PGW_Session *session =
             PGW_SessionSeq_get_reference(&service->sessions, i);
         atomic_store_explicit(&session->stopping, false, memory_order_release);
-        session->worker = OSAPI_Thread_create("pgw-session", &property,
+        session->async_waitset.worker = OSAPI_Thread_create("pgw-session", &property,
             session_thread_entry, session, session_thread_wakeup);
-        if (!session->worker || !OSAPI_Thread_start(session->worker)) {
-            if (session->worker) {
-                if (OSAPI_Thread_destroy(session->worker))
-                    session->worker = NULL;
+        if (!session->async_waitset.worker || !OSAPI_Thread_start(session->async_waitset.worker)) {
+            if (session->async_waitset.worker) {
+                if (OSAPI_Thread_destroy(session->async_waitset.worker))
+                    session->async_waitset.worker = NULL;
             }
             PGW_Status stopped = PGW_Service_stop(service);
             return stopped == PGW_OK ? PGW_FATAL : stopped;
         }
-        session->started = true;
-        session->lifecycle = PGW_RUNNING;
+        session->async_waitset.started = true;
+        session->lifecycle = PGW_STARTED;
     }
-    service->lifecycle = PGW_RUNNING;
+    service->lifecycle = PGW_STARTED;
     return PGW_OK;
 }
 
 PGW_Status PGW_Service_stop(PGW_Service *service)
 {
-    if (!service || (service->lifecycle != PGW_READY &&
-                     service->lifecycle != PGW_RUNNING))
+    if (!service || (service->lifecycle != PGW_ENABLED &&
+                     service->lifecycle != PGW_STARTED))
         return PGW_INVALID;
     PGW_Status result = PGW_OK;
     RTI_INT32 count = PGW_SessionSeq_get_length(&service->sessions);
@@ -1467,27 +1562,27 @@ PGW_Status PGW_Service_stop(PGW_Service *service)
         PGW_Session *session =
             PGW_SessionSeq_get_reference(&service->sessions, i);
         atomic_store_explicit(&session->stopping, true, memory_order_release);
-        if (session->started &&
-            DDS_GuardCondition_set_trigger_value(session->wake_guard,
+        if (session->async_waitset.started &&
+            DDS_GuardCondition_set_trigger_value(session->async_waitset.wake_condition,
                 DDS_BOOLEAN_TRUE) != DDS_RETCODE_OK)
             result = PGW_IO_ERROR;
     }
     for (RTI_INT32 i = 0; i < count; ++i) {
         PGW_Session *session =
             PGW_SessionSeq_get_reference(&service->sessions, i);
-        if (session->worker) {
-            if (!OSAPI_Thread_destroy(session->worker)) {
+        if (session->async_waitset.worker) {
+            if (!OSAPI_Thread_destroy(session->async_waitset.worker)) {
                 result = PGW_IO_ERROR;
                 continue;
             }
-            session->worker = NULL;
-            session->started = false;
+            session->async_waitset.worker = NULL;
+            session->async_waitset.started = false;
         }
     }
     for (RTI_INT32 i = 0; i < count; ++i) {
         PGW_Session *session =
             PGW_SessionSeq_get_reference(&service->sessions, i);
-        if (session->worker) return PGW_IO_ERROR;
+        if (session->async_waitset.worker) return PGW_IO_ERROR;
     }
     for (RTI_INT32 i = 0; i < count; ++i) {
         PGW_Session *session =
@@ -1519,7 +1614,7 @@ PGW_Status PGW_Service_finalize(PGW_Service *service)
     for (RTI_INT32 i = 0; i < PGW_SessionSeq_get_length(&service->sessions); ++i) {
         PGW_Session *session =
             PGW_SessionSeq_get_reference(&service->sessions, i);
-        if (configured_only && session->initialized) return PGW_INVALID;
+        if (configured_only && session->async_waitset.initialized) return PGW_INVALID;
         PGW_Status released = session_release(session, true);
         if (released != PGW_OK) return released;
         session->lifecycle = PGW_UNINITIALIZED;

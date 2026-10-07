@@ -114,6 +114,42 @@ static void routing(void)
     assert(PGW_Diagnostics_finalize(&diagnostics));
 }
 
+static void async_waitset_dispatches_each_ready_route_condition(void)
+{
+    PGW_TestReader readers[2] = {
+        {.values = {{101, 1}}, .available = 1},
+        {.values = {{202, 2}}, .available = 1}
+    };
+    PGW_TestWriter writers[2] = {
+        {.outcome = PGW_WRITE_ACCEPTED},
+        {.outcome = PGW_WRITE_ACCEPTED}
+    };
+    PGW_SampleRef references[2][1];
+    PGW_WriteResult results[2][1];
+    PGW_Route routes[2];
+    PGW_Session session = {.name = "condition-dispatch"};
+    PGW_Service service = {.sample_budget = 1};
+    for (size_t i = 0; i < 2; ++i)
+        PGW_test_route(&routes[i], (uint32_t)i + 100,
+                       &readers[i], &writers[i],
+                       references[i], results[i], 1);
+    assert(PGW_test_service_set_routes(&service, &session, routes, 2) == PGW_OK);
+    assert(PGW_Service_initialize(&service) == PGW_OK);
+    assert(routes[0].ready_condition && routes[1].ready_condition);
+
+    for (size_t i = 0; i < 2; ++i)
+        routes[i].listener.on_data_available(routes[i].listener.context);
+    assert(PGW_Service_start(&service) == PGW_OK);
+    PGW_test_wait_dispatches(&session, 2);
+    assert(readers[0].borrows == 1 && readers[0].returns == 1);
+    assert(readers[1].borrows == 1 && readers[1].returns == 1);
+    assert(writers[0].writes == 1 && writers[1].writes == 1);
+
+    assert(PGW_Service_stop(&service) == PGW_OK);
+    assert(PGW_Service_finalize(&service) == PGW_OK);
+    assert(!routes[0].ready_condition && !routes[1].ready_condition);
+}
+
 static void route_pause_resume(void)
 {
     PGW_TestReader reader = {.values = {{10, 1}}, .available = 1};
@@ -139,7 +175,7 @@ static void route_pause_resume(void)
     assert(PGW_test_notify_routes(&service) == PGW_OK);
     assert(reader.borrows == 0 && writer.writes == 0);
     assert(PGW_Route_resume(&route) == PGW_OK);
-    assert(route.lifecycle == PGW_READY);
+    assert(route.lifecycle == PGW_ENABLED);
     assert(PGW_Route_resume(&route) == PGW_NO_CHANGE);
     assert(PGW_test_notify_routes(&service) == PGW_OK);
     assert(reader.borrows == 1 && reader.returns == 1 && writer.writes == 1);
@@ -594,7 +630,7 @@ static void remote_control_routes_are_bounded_and_allocation_free(void)
     harness.command_count = 8;
     control_signal(&harness);
     wait_for_commands(&harness, 8);
-    assert(route.lifecycle == PGW_READY);
+    assert(route.lifecycle == PGW_ENABLED);
     assert(reader.borrows == 1 && writer.writes == 1);
     assert(harness.states[3].status == PGW_CONTROL_STATUS_PAUSED);
     assert(harness.states[4].status == PGW_CONTROL_STATUS_UP);
@@ -781,7 +817,7 @@ static PGW_Status temperature_return(void *state, PGW_SampleSeq *seq)
     return PGW_SampleSeq_set_length(seq, 0) ? PGW_OK : PGW_LOAN_ERROR;
 }
 
-static PGW_Status temperature_bind(void *state, const PGW_Representation *rep)
+static PGW_Status temperature_bind(void *state, const PGW_SampleRepresentation *rep)
 {
     (void)state;
     return rep->access && rep->access->copy_value == temperature_copy ? PGW_OK : PGW_UNSUPPORTED;
@@ -802,11 +838,11 @@ static PGW_Status temperature_write(void *state, const PGW_SampleSeq *seq,
 
 static void second_schema_and_loan_errors(void)
 {
-    const PGW_Schema schema = {"test.temperature", 1, "f64-key-v1"};
+    const PGW_TypeInfo schema = {"test.temperature", 1, "f64-key-v1"};
     const PGW_SampleAccessI ops = {
         PGW_ABI_VERSION, sizeof(ops), temperature_copy, NULL, NULL
     };
-    const PGW_Representation rep = {
+    const PGW_SampleRepresentation rep = {
         &schema, "temperature", sizeof(Temperature), _Alignof(Temperature), &ops, NULL
     };
     const PGW_StreamReaderI reader_ops = {
@@ -947,7 +983,7 @@ static void bounds_and_schema(void)
     assert((uintptr_t)p % 16 == 0);
     assert(PGW_Arena_allocate(&arena, 100, 8, &p) == PGW_CAPACITY);
     assert(PGW_Arena_allocate(&arena, 1, 3, &p) == PGW_INVALID);
-    const PGW_Representation *slots[2];
+    const PGW_SampleRepresentation *slots[2];
     PGW_AdapterRef adapter_slots[1];
     PGW_Registry registry = {0};
     assert(PGW_test_registry_initialize(&registry, adapter_slots, 1, slots, 2) == PGW_OK);
@@ -973,21 +1009,21 @@ static void bounds_and_schema(void)
     assert(PGW_Registry_find_adapter(&registry, "fixture") == &adapter);
     assert(PGW_Registry_register_adapter(&registry, &adapter) == PGW_INVALID);
     assert(PGW_Registry_register_adapter(&registry, &other_adapter) == PGW_CAPACITY);
-    assert(PGW_Registry_register_binding(&registry, &PGW_test_representation) == PGW_OK);
-    assert(PGW_Registry_register_binding(&registry, &PGW_test_representation) == PGW_INVALID);
-    PGW_Schema other = {"test.temperature", 1, "f64-key-v1"};
-    PGW_Representation second = PGW_test_representation;
+    assert(PGW_Registry_register_representation(&registry, &PGW_test_representation) == PGW_OK);
+    assert(PGW_Registry_register_representation(&registry, &PGW_test_representation) == PGW_INVALID);
+    PGW_TypeInfo other = {"test.temperature", 1, "f64-key-v1"};
+    PGW_SampleRepresentation second = PGW_test_representation;
     second.name = "test.temperature.native";
     second.schema = &other;
-    assert(PGW_Registry_register_binding(&registry, &second) == PGW_OK);
-    assert(!PGW_Registry_find_binding(&registry, "missing"));
-    PGW_Schema empty_fingerprint = {"test.counter", 1, ""};
-    assert(!PGW_schema_equal(&empty_fingerprint, &empty_fingerprint));
+    assert(PGW_Registry_register_representation(&registry, &second) == PGW_OK);
+    assert(!PGW_Registry_find_representation(&registry, "missing"));
+    PGW_TypeInfo empty_fingerprint = {"test.counter", 1, ""};
+    assert(!PGW_type_info_equal(&empty_fingerprint, &empty_fingerprint));
     registry.frozen = true;
     assert(PGW_Registry_register_adapter(&registry, &other_adapter) == PGW_INVALID);
-    assert(PGW_Registry_register_binding(&registry, &second) == PGW_INVALID);
-    assert(PGW_RepresentationSeq_get_length(&registry.bindings) == 2);
-    assert(PGW_RepresentationSeq_get_maximum(&registry.bindings) == 2);
+    assert(PGW_Registry_register_representation(&registry, &second) == PGW_INVALID);
+    assert(PGW_SampleRepresentationSeq_get_length(&registry.representations) == 2);
+    assert(PGW_SampleRepresentationSeq_get_maximum(&registry.representations) == 2);
     assert(PGW_Registry_finalize(&registry) == PGW_OK);
     PGW_TestReader r = {0};
     PGW_TestWriter w = {0};
@@ -1002,7 +1038,7 @@ static void bounds_and_schema(void)
     assert(PGW_test_service_set_routes(&s, &session, &route, 1) == PGW_OK);
     assert(PGW_Service_initialize(&s) == PGW_UNSUPPORTED);
     assert(s.lifecycle == PGW_FAULTED);
-    other = (PGW_Schema){"test.counter", 1, "different-layout-same-name"};
+    other = (PGW_TypeInfo){"test.counter", 1, "different-layout-same-name"};
     PGW_test_route(&route, 1, &r, &w, refs, results, 4);
     route.writer.representation = &second;
     w.target_schema = second.schema;
@@ -1149,6 +1185,7 @@ int main(void)
     PGW_allocation_monitor(false);
     bounds_and_schema();
     routing();
+    async_waitset_dispatches_each_ready_route_condition();
     route_pause_resume();
     independent_sessions_and_shutdown_wakeup();
 #if defined(PGW_ENABLE_ROUTE_LATENCY_METRICS)

@@ -2,15 +2,15 @@
 
 ## Public execution model
 
-A service contains one or more explicitly configured sessions. Every route
-belongs to exactly one session; there is no implicit session, manual stepping
-mode, or periodic runner. Each session owns one DDS `WaitSet`, one wake
-`GuardCondition`, and one serialized worker thread. Service initialization
-creates the session conditions and registers every input reader listener.
-Service start launches one worker per session. Stop signals each session and
-joins all workers; service finalization unregisters listeners before releasing
-session conditions. Adapters own connections and typed endpoints and destroy
-them only after service finalization.
+A service contains explicitly configured sessions and routes. Each session
+owns a `PGW_AsyncWaitSet`: a Micro DDS
+`WaitSet`, one serialized OSAPI worker thread, a shared lifecycle/control wake
+condition, and one readiness condition per route. Service initialization
+attaches the conditions and registers every input reader listener. Service
+start launches one worker per session. Stop signals each session and joins all
+workers; service finalization unregisters listeners, detaches conditions, and
+destroys the dispatcher. Adapters own connections and typed endpoints and
+destroy them only after service finalization.
 
 Each route has exactly one consuming reader. A reader endpoint cannot be shared
 by routes because both would compete for the same samples. Writers may be
@@ -23,28 +23,30 @@ writer representation compatibility during initialization.
 Each typed reader implements `register_listener` and `unregister_listener`.
 The listener's `on_data_available` callback is a thread-safe, nonblocking,
 allocation-free signal only: it does not read or take samples, route data, or
-wait for the session worker. A notification records readiness in a coalescing
-per-route pending flag and signals the owning session's core-owned wake
-condition. A notification identifies its reader through the listener context;
-the adapter does not attach its own conditions to the session `WaitSet`.
+wait for the session worker. A notification sets that reader's route-owned
+guard condition; the `PGW_AsyncWaitSet` dispatches the handler associated with
+each active route condition. The separate shared wake condition is reserved
+for stop, route-state, and control work.
 
-DDS bridges its real `DDS_DATA_AVAILABLE_STATUS` listener to this interface.
+DDS bridges its `DDS_DATA_AVAILABLE_STATUS` listener to the route condition.
 Unread samples remain in the DataReader history; there is no mirrored queue.
 CAN uses one receiver per connection to decode frames into the existing
 bounded typed category storage and notify the affected readers. Producer,
 consumer, queue, and listener operations are synchronized; CAN does not insert
 a second sample queue.
 
-The wake condition is coalescing, not a count of samples. The worker clears it
-before draining pending reader flags. Each wake processes pending routes in
-round-robin order, with at most one configured sample-budget batch per route
-per wake. Adapter reads that reach their bound while data remains must notify
-again before returning. A notification racing with a read sets the pending flag
-again; the corresponding session wake is observed on the next wait. The
-adapter's producer/consumer synchronization and this re-arm rule prevent an
-enqueue from being hidden by a condition clear or a bounded read. A route that
-remains active cannot monopolize the worker: the starting route cursor rotates
-after each wake.
+Conditions are coalescing readiness signals, not sample counts. Before
+dispatching an active route, the worker clears its route condition and consumes
+the coalesced pending flag. A racing notification re-triggers the condition
+for the next wait. Adapters must re-notify before returning from a read if they
+know input remains. CAN checks its queue occupancy; the DDS adapter
+conservatively re-notifies when a typed take fills its bound, which can cause
+one harmless empty read when the history was exactly drained. The core does
+not infer unread transport data from a full batch. This protocol prevents data
+from being stranded without generating adapter-independent spurious reads.
+Each wait result dispatches at most one sample-budget batch for each active
+route in rotating order. A route that remains ready cannot monopolize the
+worker: the starting route cursor advances after every wait result.
 
 ## Sample ownership and backpressure
 
@@ -63,25 +65,25 @@ dynamically. A writer reports acceptance, backpressure, invalid data, or fatal
 failure per sample. Samples reported as backpressured are consumed from that
 loan and counted; the core does not retain or replay them.
 
-Generated strongly typed representations are defined per logical schema. The
-shared core `PGW_Representation` descriptor identifies that schema and its
-native typed sample access; it is distinct from protocol/type binding
-descriptors such as `PGW_DDSBinding`. Typed endpoint instances compose a
-reusable binding with adapter-owned connection, queue/entity, and loan state.
-Bindings implement conversion to and from the schema's typed representation.
+`PGW_TypeInfo` carries a static logical type identity (name, version, and
+fingerprint), not a field-level schema. `PGW_SampleRepresentation` describes
+the local C sample layout and access/view contract. Generated DDS
+operations and conversion glue live in a `PGW_DDSTypeBinding`, not in either
+core descriptor. Typed endpoint instances compose a reusable type binding with
+adapter-owned connection, entity, and loan state.
 Cross-schema conversion is explicit in the selected binding, never implicit in
 the core.
 
 ## Lifecycle, control, and timers
 
 Configuration, session membership, endpoint binding, listener registration,
-and `WaitSet` construction complete before workers start. Stop first marks each
-session stopping, signals its wake condition, and joins its worker. Finalization
-then unregisters/quiesces input listeners before destroying the session
-condition and `WaitSet`; adapters may close readers and connections only after
-this completes. Listener context points to route/session storage that remains
-alive through synchronous unregistration, so no callback can access a finalized
-session.
+condition attachment, and `PGW_AsyncWaitSet` construction complete before
+workers start. Stop first marks each session stopping, signals its shared wake
+condition, and joins its worker. Finalization then unregisters/quiesces input
+listeners before detaching and destroying route conditions and the underlying
+WaitSet; adapters may close readers and connections only after this completes.
+Listener context points to route/session storage that remains alive through
+synchronous unregistration, so no callback can access a finalized session.
 
 Route pause/resume is synchronized with dispatch. A pending event for a paused
 route remains pending and is re-signaled when the route becomes eligible.
@@ -90,7 +92,6 @@ to their atomic/adapter synchronization contracts. A route fault disables only
 that route and is surfaced through its error and diagnostics.
 
 When remote control is enabled, its command reader listener is registered with
-the explicitly selected control session. The session worker processes bounded
-command batches on wake. Telemetry deadlines and dirty-state retries use timed
-`WaitSet` waits, so they remain active without reader traffic; no step counter
-drives control or telemetry.
+the explicitly selected control session and signals the shared wake condition.
+The session worker processes bounded command batches on wake. Telemetry
+deadlines and dirty-state retries use timed `WaitSet` waits.

@@ -27,13 +27,11 @@ the session worker, into the second connection's negotiated synchronous
 writer. Generated descriptors and codecs
 come from the maintained example DBC/mapping via `pgw_generate_dbc`.
 CAN catalogs, scratch values, baseline/staging records, private loan slots and
-write sidecars are actual Micro typed sequences. Core route/reference/result
-members are likewise adopted through the new typed-sequence helpers; the
-benchmark does not implement a parallel pointer/count vector abstraction.
-The complete accepted conversion/exclusion inventory is in
-[`adapters/can/README.md`](../adapters/can/README.md#collection-inventory-actual-micro-sequences-and-justified-exclusions).
+write sidecars use Micro typed sequences. Core route/reference/result members
+also use typed sequences; see [Typed sequences](sequences.md) for their setup
+and ownership.
 
-After READY, the output receives its first raw baseline. Each subsequent batch
+After service initialization, the output receives its first raw baseline. Each subsequent batch
 injects one input Engine frame with changing speed/state values, a signed
 Motorola torque value and boolean command. Unmapped input bytes differ from
 the output baseline. All accepted output frames are checked against an
@@ -67,12 +65,12 @@ before business routing. It does not alter the stored baseline or route counts.
 
 ## Allocation and timing boundaries
 
-The benchmark links the shared `pgw_allocation_probe`. Before the READY
-measurement barrier, deliberate controls verify link interception of
+The benchmark links the shared `pgw_allocation_probe`. Before the
+post-initialization measurement barrier, deliberate controls verify link interception of
 `malloc`, `calloc`, `realloc`, `aligned_alloc`, `posix_memalign`,
 `OSAPI_Heap_allocate`, `OSAPI_Heap_realloc` and
 `OSAPI_Heap_allocate_buffer`. All eight are checked individually or against
-explicit counter increases. Post-READY traffic asserts zero libc and OSAPI
+explicit counter increases. Runtime traffic asserts zero libc and OSAPI
 **allocation** calls. This does not prohibit ordinary bounded libc operations
 such as `memcpy`, or claim coverage of every SDK/private allocator, kernel
 queues or a whole DDS process.

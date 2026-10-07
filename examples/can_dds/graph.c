@@ -22,8 +22,8 @@
 #include "osapi/osapi_log.h"
 #include "osapi/osapi_log_impl.h"
 #define REDA_SEQUENCE_USER_API
-#define T PGW_CompiledNativeStreamElement
-#define TSeq PGW_CompiledNativeStreamSeq
+#define T PGW_CompiledAdapterStreamElement
+#define TSeq PGW_CompiledAdapterStreamSeq
 #include "reda/reda_sequence_defn.h"
 #undef T
 #undef TSeq
@@ -42,24 +42,24 @@
 
 static const char *native_endpoint(const char *connection, const char *stream, bool reader)
 {
-    for (RTI_INT32 i = 0; i < PGW_CompiledNativeStreamSeq_get_length(&pgw_config_native_streams); ++i) {
-        const PGW_CompiledNativeStream *entry =
-            PGW_CompiledNativeStreamSeq_get_reference(&pgw_config_native_streams, i);
+    for (RTI_INT32 i = 0; i < PGW_CompiledAdapterStreamSeq_get_length(&pgw_config_adapter_streams); ++i) {
+        const PGW_CompiledAdapterStream *entry =
+            PGW_CompiledAdapterStreamSeq_get_reference(&pgw_config_adapter_streams, i);
         if (!strcmp(entry->connection, connection) && !strcmp(entry->name, stream) &&
             entry->reader == reader) return entry->endpoint;
     }
     return NULL;
 }
-PGW_Status PGW_example_can_categories(const PGW_Schema *schema, PGW_CANCategorySeq *out)
+PGW_Status PGW_example_can_categories(const PGW_TypeInfo *schema, PGW_CANCategorySeq *out)
 {
     if (!schema || !out) return PGW_INVALID;
     RTI_INT32 capacity = PGW_CANCategorySeq_get_maximum(out);
     if (capacity <= 0 || !PGW_CANCategorySeq_get_contiguous_buffer(out) ||
         !PGW_CANCategorySeq_set_length(out, 0)) return PGW_INVALID;
     RTI_INT32 length = 0;
-    for (RTI_INT32 i = 0; i < PGW_CompiledNativeStreamSeq_get_length(&pgw_config_native_streams); ++i) {
-        const PGW_CompiledNativeStream *entry =
-            PGW_CompiledNativeStreamSeq_get_reference(&pgw_config_native_streams, i);
+    for (RTI_INT32 i = 0; i < PGW_CompiledAdapterStreamSeq_get_length(&pgw_config_adapter_streams); ++i) {
+        const PGW_CompiledAdapterStream *entry =
+            PGW_CompiledAdapterStreamSeq_get_reference(&pgw_config_adapter_streams, i);
         if (!entry->reader || strcmp(entry->connection, "can")) continue;
         if (length == capacity) {
             (void)PGW_CANCategorySeq_set_length(out, 0);
@@ -83,20 +83,20 @@ PGW_Status PGW_example_attach_routes(PGW_Connection *can, PGW_Connection *dds,
         PGW_Status status;
         target->id = route->id;
         if (!strcmp(route->input_connection, "gateway"))
-            status = PGW_DDSConnextMicroAdapter.connection->reader(dds, route->input_stream,
+            status = PGW_DDSConnextMicroAdapter.connection->lookup_stream_reader(dds, route->input_stream,
                                                            &target->reader);
         else {
             const char *endpoint = native_endpoint(route->input_connection, route->input_stream, true);
-            status = endpoint ? PGW_CANAdapter.connection->reader(can, endpoint,
+            status = endpoint ? PGW_CANAdapter.connection->lookup_stream_reader(can, endpoint,
                                      &target->reader) : PGW_INVALID;
         }
         if (status != PGW_OK) return status;
         if (!strcmp(route->output_connection, "gateway"))
-            status = PGW_DDSConnextMicroAdapter.connection->writer(dds, route->output_stream,
+            status = PGW_DDSConnextMicroAdapter.connection->lookup_stream_writer(dds, route->output_stream,
                                                            &target->writer);
         else {
             const char *endpoint = native_endpoint(route->output_connection, route->output_stream, false);
-            status = endpoint ? PGW_CANAdapter.connection->writer(can, endpoint,
+            status = endpoint ? PGW_CANAdapter.connection->lookup_stream_writer(can, endpoint,
                                      &target->writer) : PGW_INVALID;
         }
         if (status != PGW_OK) return status;

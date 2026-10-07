@@ -34,8 +34,8 @@ typedef struct {
 } PGW_TestReader;
 
 typedef struct {
-    const PGW_Representation *source;
-    const PGW_Schema *target_schema;
+    const PGW_SampleRepresentation *source;
+    const PGW_TypeInfo *target_schema;
     uint64_t sum;
     size_t writes;
     PGW_WriteResult outcome;
@@ -45,7 +45,7 @@ typedef struct {
     unsigned order[8];
 } PGW_TestWriter;
 
-extern const PGW_Representation PGW_test_representation;
+extern const PGW_SampleRepresentation PGW_test_representation;
 extern const PGW_StreamReaderI PGW_test_reader_iface;
 extern const PGW_StreamWriterI PGW_test_writer_iface;
 void PGW_test_route(PGW_Route *, uint32_t, PGW_TestReader *, PGW_TestWriter *,
@@ -60,6 +60,6 @@ PGW_Status PGW_test_notify_routes(PGW_Service *);
 void PGW_test_wait_wakeups(PGW_Session *, uint64_t);
 void PGW_test_wait_dispatches(PGW_Session *, uint64_t);
 PGW_Status PGW_test_registry_initialize(PGW_Registry *, PGW_AdapterRef *, size_t,
-                                        PGW_RepresentationRef *, size_t);
+                                        PGW_SampleRepresentationRef *, size_t);
 bool PGW_test_diagnostics_initialize(PGW_Diagnostics *, PGW_Event *, size_t);
 #endif

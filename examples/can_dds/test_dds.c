@@ -77,7 +77,7 @@ static const PGW_SampleAccessI signal_access = {
 static const PGW_SampleAccessI probe_access = {
     PGW_ABI_VERSION, sizeof(PGW_SampleAccessI), probe_copy, probe_timestamp, NULL
 };
-static PGW_Representation benchmark_signal_representation;
+static PGW_SampleRepresentation benchmark_signal_representation;
 static const PGW_SampleAccessI probe_payload_only = {
     PGW_ABI_VERSION, sizeof(PGW_SampleAccessI), probe_copy, NULL, NULL
 };
@@ -181,8 +181,8 @@ static int benchmark_dds_write_paths(PGW_Connection *gateway,
     PGW_WriteResult output_result, ingress_result;
     PGW_WriteResultSeq output_results, ingress_results;
     PGW_SampleAccessI fallback_access;
-    PGW_Representation fallback_representation, direct_alias;
-    PGW_Schema direct_alias_schema = {
+    PGW_SampleRepresentation fallback_representation, direct_alias;
+    PGW_TypeInfo direct_alias_schema = {
         "generated.type.alias", 99,
         "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
     };
@@ -191,11 +191,11 @@ static int benchmark_dds_write_paths(PGW_Connection *gateway,
         .value = {1001, {.kind = PGW_VALUE_DOUBLE, .data.real = 123.4}}
     };
     uint64_t direct_times[5], converted_times[5];
-    if (PGW_DDSConnextMicroAdapter.connection->reader(
+    if (PGW_DDSConnextMicroAdapter.connection->lookup_stream_reader(
             gateway, "command_powertrain", &source_reader) != PGW_OK ||
-        PGW_DDSConnextMicroAdapter.connection->writer(
+        PGW_DDSConnextMicroAdapter.connection->lookup_stream_writer(
             gateway, "state_powertrain", &output) != PGW_OK ||
-        PGW_DDSConnextMicroAdapter.connection->writer(
+        PGW_DDSConnextMicroAdapter.connection->lookup_stream_writer(
             companion, "command_powertrain", &ingress) != PGW_OK)
         return 1;
 
@@ -317,13 +317,13 @@ int main(void)
     PGW_CANFrame rx[8], tx[8], sent;
     PGW_CANFrame baseline = {.id = 256, .length = 8,
         .data = {0x10, 0x27, 0x00, 0x00, 0x01, 0x01, 0xab, 0xcd}};
-    PGW_Schema signal_schema = {PGW_codec_schema.name, PGW_codec_schema.version,
+    PGW_TypeInfo signal_schema = {PGW_codec_schema.name, PGW_codec_schema.version,
                                PGW_codec_schema.fingerprint};
-    PGW_Schema alternate_route_schema = {
+    PGW_TypeInfo alternate_route_schema = {
         "can.signal.alternate", 2,
         "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
     };
-    PGW_Representation canonical_route_source, cross_schema_route_source;
+    PGW_SampleRepresentation canonical_route_source, cross_schema_route_source;
     PGW_CANCategory categories[2];
     PGW_CANCategorySeq category_sequence;
     PGW_CANConfig can_config = {
@@ -350,22 +350,22 @@ int main(void)
     PGW_SampleRef refs[8];
     PGW_WriteResult result;
     PGW_WriteResultSeq result_sequence;
-    PGW_Representation signal_rep = {&signal_schema, "test.signal", sizeof(SignalSample),
+    PGW_SampleRepresentation signal_rep = {&signal_schema, "test.signal", sizeof(SignalSample),
                                      _Alignof(SignalSample), &signal_access, NULL};
-    PGW_Representation probe_rep = *PGW_probe_binding.representation;
+    PGW_SampleRepresentation probe_rep = *PGW_probe_type_binding.representation;
     SignalSample update = {.value = {1001, {.kind = PGW_VALUE_DOUBLE,
                                             .data.real = 123.4}}};
     ProbeSample probe = {.value = {1, 42}, .timestamp = {true, true, 123, 456}};
     {
         const PGW_AdapterI *slots[1];
-        PGW_RepresentationRef binding_slots[1];
+        PGW_SampleRepresentationRef binding_slots[1];
         PGW_AdapterSeq adapter_sequence;
-        PGW_RepresentationSeq binding_sequence;
+        PGW_SampleRepresentationSeq binding_sequence;
         PGW_Registry registry = {0};
         CHECK(PGW_AdapterSeq_initialize(&adapter_sequence));
         CHECK(PGW_AdapterSeq_loan_contiguous(&adapter_sequence, slots, 0, 1));
-        CHECK(PGW_RepresentationSeq_initialize(&binding_sequence));
-        CHECK(PGW_RepresentationSeq_loan_contiguous(&binding_sequence, binding_slots, 0, 1));
+        CHECK(PGW_SampleRepresentationSeq_initialize(&binding_sequence));
+        CHECK(PGW_SampleRepresentationSeq_loan_contiguous(&binding_sequence, binding_slots, 0, 1));
         CHECK(PGW_Registry_initialize(&registry, &adapter_sequence, &binding_sequence) == PGW_OK);
         CHECK(PGW_DDS_register_adapter(&registry) == PGW_OK);
         CHECK(PGW_Registry_find_adapter(&registry, "connext_micro") == &PGW_DDSConnextMicroAdapter);
@@ -373,8 +373,8 @@ int main(void)
         CHECK(PGW_Registry_finalize(&registry) == PGW_OK);
         CHECK(PGW_AdapterSeq_unloan(&adapter_sequence));
         CHECK(PGW_AdapterSeq_finalize(&adapter_sequence));
-        CHECK(PGW_RepresentationSeq_unloan(&binding_sequence));
-        CHECK(PGW_RepresentationSeq_finalize(&binding_sequence));
+        CHECK(PGW_SampleRepresentationSeq_unloan(&binding_sequence));
+        CHECK(PGW_SampleRepresentationSeq_finalize(&binding_sequence));
     }
     PGW_allocation_monitor(true);
     {
@@ -399,7 +399,7 @@ int main(void)
             .endpoints = endpoint_sequence, .endpoints_initialized = true};
         PGW_Connection *unused = NULL;
         size_t used = arena.used;
-        endpoint_storage[0].binding = NULL;
+        endpoint_storage[0].type_binding = NULL;
         CHECK(PGW_DDSConnextMicroAdapter.create(&invalid, &arena, &unused) == PGW_INVALID);
         CHECK(arena.used == used && !unused);
         endpoint_storage[0] = *PGW_DDSEndpointConfigSeq_get_reference(
@@ -754,7 +754,7 @@ int main(void)
         atomic_store(&frozen, false);
         atomic_store(&runtime_arena_calls, 0);
     }
-    CHECK(PGW_DDSConnextMicroAdapter.connection->reader(companion, "state_powertrain", &reader) == PGW_OK);
+    CHECK(PGW_DDSConnextMicroAdapter.connection->lookup_stream_reader(companion, "state_powertrain", &reader) == PGW_OK);
     CHECK(PGW_SampleSeq_initialize(&loan));
     CHECK(PGW_WriteResultSeq_initialize(&result_sequence));
     CHECK(PGW_WriteResultSeq_loan_contiguous(&result_sequence, &result, 0, 1));
@@ -804,9 +804,9 @@ int main(void)
         PGW_StreamWriter exporter;
         PGW_StreamReader subscriber;
         PGW_CounterSnapshot snapshot;
-        CHECK(PGW_DDSConnextMicroAdapter.connection->writer(gateway, "diagnostics", &exporter) == PGW_OK);
-        CHECK(exporter.iface->bind(exporter.state, PGW_diagnostics_binding.representation) == PGW_OK);
-        CHECK(PGW_DDSConnextMicroAdapter.connection->reader(companion, "diagnostics", &subscriber) == PGW_OK);
+        CHECK(PGW_DDSConnextMicroAdapter.connection->lookup_stream_writer(gateway, "diagnostics", &exporter) == PGW_OK);
+        CHECK(exporter.iface->bind(exporter.state, PGW_diagnostics_type_binding.representation) == PGW_OK);
+        CHECK(PGW_DDSConnextMicroAdapter.connection->lookup_stream_reader(companion, "diagnostics", &subscriber) == PGW_OK);
         CHECK(PGW_Counters_snapshot(&routes[0].counters, 1, 17, 0, &snapshot));
         CHECK(snapshot.values[PGW_COUNT_ACCEPTED] == 4);
         snapshot.entity_id = 5;
@@ -838,7 +838,7 @@ int main(void)
         CHECK(received);
     }
 #endif
-    CHECK(PGW_DDSConnextMicroAdapter.connection->writer(companion, "command_powertrain", &command) == PGW_OK);
+    CHECK(PGW_DDSConnextMicroAdapter.connection->lookup_stream_writer(companion, "command_powertrain", &command) == PGW_OK);
     CHECK(command.iface->bind(command.state, &signal_rep) == PGW_OK);
     CHECK(PGW_SampleSeq_set_length(&loan, 1));
     refs[0] = (const PGW_Sample *)&update;
@@ -872,8 +872,8 @@ int main(void)
         }
         CHECK(received);
     }
-    CHECK(PGW_DDSConnextMicroAdapter.connection->writer(gateway, "probe", &probe_writer) == PGW_OK);
-    CHECK(PGW_DDSConnextMicroAdapter.connection->reader(companion, "probe", &probe_reader) == PGW_OK);
+    CHECK(PGW_DDSConnextMicroAdapter.connection->lookup_stream_writer(gateway, "probe", &probe_writer) == PGW_OK);
+    CHECK(PGW_DDSConnextMicroAdapter.connection->lookup_stream_reader(companion, "probe", &probe_reader) == PGW_OK);
     probe_rep.access = &probe_access;
     CHECK(probe_writer.iface->bind(probe_writer.state, &signal_rep) == PGW_UNSUPPORTED);
     probe_rep.access = &probe_payload_only;

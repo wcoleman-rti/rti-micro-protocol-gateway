@@ -17,14 +17,16 @@ interpret a sample. The core validates each representation but delegates
 source/destination compatibility to the destination writer's `bind` operation.
 An adapter without an explicit translator should continue to require exact
 schema name, version, and fingerprint equality.
+`PGW_TypeInfo` is a static logical identity: it names a type and carries a
+version and fingerprint. `PGW_SampleRepresentation` describes local C sample
+layout and access/view operations. Generated DDS take/write/conversion calls
+belong to `PGW_DDSTypeBinding`.
 An adapter may expose a borrowed `PGW_SampleView` containing its native sample
 and associated context; a static view contract declares the kind, payload
 identity/size, and context identity before the writer binds. The runtime view
 must match that contract and remains valid only until the source loan is
 returned. The routing core does not serialize, copy, retain, or interpret the
-view. Sample-access ABI version 2 adds this contract; adapters must be rebuilt
-against the matching interface. No per-sample operations table, forwarding
-queue or runtime discovery is part of the routing core.
+view. Adapters must be built against the matching sample-access ABI.
 
 Readers fill the route's fixed `PGW_SampleSeq` pointer array. `OK` creates an
 adapter loan, including an empty sequence; `NO_DATA` does not. Every successful
@@ -70,6 +72,11 @@ The snapshot API allocates nothing and adds no DDS/remote-control endpoint.
 Metrics are absent, including timing calls and per-route storage, when the
 option is OFF.
 
+Service and session states progress through
+`PGW_UNINITIALIZED -> PGW_INITIALIZING -> PGW_ENABLED -> PGW_STARTED ->
+PGW_STOPPED`. Finalization returns them to `PGW_UNINITIALIZED`.
+`PGW_PAUSED` and `PGW_FAULTED` apply to routes.
+
 With `PGW_ENABLE_REMOTE_CONTROL`, a service may freeze a borrowed control
 resource catalog and nonblocking endpoint before initialization. The explicitly
 selected session registers a command-reader listener and processes at most
@@ -89,10 +96,10 @@ control timeout.
 Storage comes from caller arrays or a checked, initialization-only arena.
 There is no runtime resizing or fallback allocator. Interface ABI versions,
 required callbacks, capacities, duplicate registrations, and writer-negotiated
-source compatibility are validated before READY. Registries are frozen by the
+source compatibility are validated before `PGW_ENABLED`. Registries are frozen by the
 embedding application after static registration.
-Adapter/binding registries and route catalogs are `PGW_AdapterSeq`,
-`PGW_RepresentationSeq`, `PGW_RouteSeq` and `PGW_SessionSeq`. Their
+Adapter/representation registries and route catalogs are `PGW_AdapterSeq`,
+`PGW_SampleRepresentationSeq`, `PGW_RouteSeq` and `PGW_SessionSeq`. Their
 initialization functions accept native typed sequence views over
 caller-provisioned storage. Registry registration and traversal use native
 capacity/length/reference APIs; no duplicate gateway count/capacity fields are
@@ -135,7 +142,7 @@ partial output as a valid record. Local file/console consumers belong outside
 the routing thread. Regular files may block despite `O_NONBLOCK`.
 
 `PGW::diagnostics_local` provides a caller-buffer JSON Lines snapshot sink.
-Initialize it with an already opened descriptor before RUNNING; ownership stays
+Initialize it with an already opened descriptor before `PGW_STARTED`; ownership stays
 with the caller. A full nonblocking descriptor drops the new record with explicit
 backpressure. Truncation, short writes and I/O errors return failure and update
 sink counters without recursive events. Broken pipes return an I/O error:

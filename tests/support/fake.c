@@ -35,11 +35,11 @@ static PGW_Status copy_value(const PGW_Sample *sample, void *out, size_t bytes)
     return PGW_OK;
 }
 
-static const PGW_Schema schema = {"test.counter", 1, "integer-key-u64-v1"};
+static const PGW_TypeInfo schema = {"test.counter", 1, "integer-key-u64-v1"};
 static const PGW_SampleAccessI sample_access = {
     PGW_ABI_VERSION, sizeof(PGW_SampleAccessI), copy_value, NULL, NULL
 };
-const PGW_Representation PGW_test_representation = {
+const PGW_SampleRepresentation PGW_test_representation = {
     &schema, "test.counter.native", sizeof(PGW_TestValue),
     _Alignof(PGW_TestValue), &sample_access, NULL
 };
@@ -102,11 +102,11 @@ static PGW_Status unregister_listener(void *state,
     return PGW_OK;
 }
 
-static PGW_Status bind(void *state, const PGW_Representation *representation)
+static PGW_Status bind(void *state, const PGW_SampleRepresentation *representation)
 {
     PGW_TestWriter *w = state;
     if (!representation || !w->target_schema ||
-        !PGW_schema_equal(representation->schema, w->target_schema) ||
+        !PGW_type_info_equal(representation->schema, w->target_schema) ||
         !representation->access || !representation->access->copy_value)
         return PGW_UNSUPPORTED;
     w->source = representation;
@@ -305,28 +305,28 @@ PGW_Status PGW_test_notify_routes(PGW_Service *service)
 
 PGW_Status PGW_test_registry_initialize(PGW_Registry *registry,
                                         PGW_AdapterRef *adapters, size_t adapter_capacity,
-                                        PGW_RepresentationRef *bindings, size_t binding_capacity)
+                                        PGW_SampleRepresentationRef *bindings, size_t binding_capacity)
 {
     PGW_AdapterSeq adapter_sequence;
-    PGW_RepresentationSeq binding_sequence;
+    PGW_SampleRepresentationSeq binding_sequence;
     if (adapter_capacity > INT32_MAX || binding_capacity > INT32_MAX ||
         !PGW_AdapterSeq_initialize(&adapter_sequence) ||
-        !PGW_RepresentationSeq_initialize(&binding_sequence)) return PGW_INVALID;
+        !PGW_SampleRepresentationSeq_initialize(&binding_sequence)) return PGW_INVALID;
     if (!PGW_AdapterSeq_loan_contiguous(&adapter_sequence, adapters, 0,
                                          (RTI_INT32)adapter_capacity) ||
-        !PGW_RepresentationSeq_loan_contiguous(&binding_sequence, bindings, 0,
+        !PGW_SampleRepresentationSeq_loan_contiguous(&binding_sequence, bindings, 0,
                                                 (RTI_INT32)binding_capacity)) {
         (void)PGW_AdapterSeq_unloan(&adapter_sequence);
         (void)PGW_AdapterSeq_finalize(&adapter_sequence);
-        (void)PGW_RepresentationSeq_unloan(&binding_sequence);
-        (void)PGW_RepresentationSeq_finalize(&binding_sequence);
+        (void)PGW_SampleRepresentationSeq_unloan(&binding_sequence);
+        (void)PGW_SampleRepresentationSeq_finalize(&binding_sequence);
         return PGW_CAPACITY;
     }
     PGW_Status status = PGW_Registry_initialize(registry, &adapter_sequence, &binding_sequence);
     (void)PGW_AdapterSeq_unloan(&adapter_sequence);
     (void)PGW_AdapterSeq_finalize(&adapter_sequence);
-    (void)PGW_RepresentationSeq_unloan(&binding_sequence);
-    (void)PGW_RepresentationSeq_finalize(&binding_sequence);
+    (void)PGW_SampleRepresentationSeq_unloan(&binding_sequence);
+    (void)PGW_SampleRepresentationSeq_finalize(&binding_sequence);
     return status;
 }
 

@@ -30,7 +30,7 @@
  * successful take with @c return_loan before reusing reader storage.
  */
 typedef struct {
-    const PGW_Representation *representation; /**< Gateway view of the native type. */
+    const PGW_SampleRepresentation *representation; /**< Gateway view of the native type. */
     const char *dds_type_name;                 /**< Generated DDS type name. */
     size_t native_size;                        /**< Native sample size in bytes. */
     /** Initialize type-specific sequences/scratch storage from the arena.
@@ -55,12 +55,12 @@ typedef struct {
     DDS_ReturnCode_t (*return_loan)(void *, DDS_DataReader *);
     /** Copy one native sample into caller storage of the advertised representation. */
     PGW_Status (*copy_native)(const void *, void *, size_t);
-    /** Negotiate a borrowed source view before READY.
+    /** Negotiate a borrowed source view before the service reaches PGW_ENABLED.
      * Cross-schema routes require this operation together with write_view.
      * The source representation and its view_contract remain borrowed for the
      * connection lifetime.
      */
-    PGW_Status (*bind_view)(void *, const PGW_Representation *);
+    PGW_Status (*bind_view)(void *, const PGW_SampleRepresentation *);
     /** Translate and write a borrowed source sample view.
      * The callback may inspect payload and metadata but must not retain either
      * borrowed pointer. On PGW_OK it stores the DDS write result in write_result;
@@ -88,7 +88,7 @@ typedef struct {
     /** Write a borrowed native DDS sample without canonical conversion. */
     DDS_ReturnCode_t (*write_native)(void *, DDS_DataWriter *, const void *,
                                     const struct DDS_Time_t *);
-} PGW_DDSBinding;
+} PGW_DDSTypeBinding;
 
 /** @brief Select one named DDS reader or writer endpoint for a connection.
  * @c name is the gateway-facing endpoint name; @c entity_name is the generated
@@ -99,7 +99,7 @@ typedef struct {
 typedef struct {
     const char *name;                           /**< Unique gateway endpoint name. */
     const char *entity_name;                    /**< DDS participant entity lookup name. */
-    const PGW_DDSBinding *binding;              /**< Borrowed generated type binding. */
+    const PGW_DDSTypeBinding *type_binding;         /**< Borrowed generated type binding. */
     size_t capacity;                            /**< Nonzero endpoint sample capacity. */
     bool reader;                                /**< True for reader; false for writer. */
     bool preserve_source_timestamp;             /**< Preserve valid portable source time on writes. */
@@ -319,7 +319,7 @@ PGW_Status PGW_DDS_statistics(PGW_Connection *, const char *, PGW_DDSStatistics 
  * loan, and the representation must be the Connext Micro representation.
  * @return PGW_OK on success or PGW_INVALID for unrelated/invalid inputs.
  */
-PGW_Status PGW_DDS_metadata(const PGW_Representation *, const PGW_Sample *,
+PGW_Status PGW_DDS_metadata(const PGW_SampleRepresentation *, const PGW_Sample *,
                           PGW_DDSMetadata *);
 /** @brief Get the connection-owned DDS participant.
  * The returned participant is borrowed; do not delete it. It becomes invalid

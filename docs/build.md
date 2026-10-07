@@ -45,9 +45,7 @@ Supply the SDK's exact `RTIME_PIL_ARCH`, `RTIME_PSL_ARCH`, and
 archives. SDK and Java locations are explicit inputs, not embedded defaults. The
 `RTIME_TARGET_NAME` selects the installed Micro OSAPI/NETIO library profile; it
 does not require downstream gateway code to be compiled with a compiler of the
-same version encoded in that target name. GCC 13 or newer may compile the
-gateway and examples for the selected profile. The verified developer build
-uses GNU 15.2 with the Micro Linux6 library profile.
+same version encoded in that target name.
 The persisted launcher in
 `build/pgw-tools` embeds the configured JRE, so subsequent builds work even with
 `JREHOME` unset in the shell. Generator outputs stay in the build tree.
@@ -55,18 +53,6 @@ The persisted launcher in
 generator and Python test, taking precedence over `Python3_EXECUTABLE`.
 When it is empty, the standard CMake `Python3_EXECUTABLE` override/finder remains
 available. Configure does not implicitly activate `.venv` or install packages.
-
-The configure report records SDK, PIL/PSL, Micro archive configuration, JRE,
-Codegen and MAG versions. Each build tree also records these and the compiler/
-CMake versions/options in `pgw-build-info-<configuration>.txt`.
-The same verified tool versions, SDK/PIL/PSL paths and selected build flags/options
-are machine-readable in `provenance.json`, for benchmark manifest consumption.
-Multi-configuration generators place it in `<configuration>/provenance.json`.
-Micro 4.3.0 bundles Codegen 4.7.0; those numbers need not
-match. MAG does not implement `-version`: the finder checks its Java launcher with
-`-help` and reads `Implementation-Version` from its distribution JAR manifest.
-An unexpected SDK version, root, architecture, missing archive, unsupported
-rescan linker, or mismatched Debug/Release selection is an error, not a fallback.
 
 ## Options and components
 
@@ -161,36 +147,22 @@ untimed events with `time_valid=false`.
 
 Configure each `PGW_Session` with its fixed route sequence and attach the
 session catalog to `PGW_Service` before initialization. The core creates one
-WaitSet and wake GuardCondition per session, registers each typed reader's
-listener, and starts one serialized worker per session with
+`PGW_AsyncWaitSet` per session, backed by Micro `DDS_WaitSet`, a shared wake
+GuardCondition, and one route-readiness GuardCondition per route. It registers
+each typed reader's listener and starts one serialized dispatcher worker with
 `PGW_Service_start()`. Reader callbacks only coalesce readiness and signal the
-session; adapters keep their own queues/entities and re-notify after bounded
-reads when data remains. The core has no step API, periodic runner, or thread
-pool. See [session-runtime.md](session-runtime.md) for queue synchronization,
-re-arm, fairness, loan, and callback-lifetime contracts.
+route-specific condition; adapters keep their own queues/entities and re-notify
+when unread input remains. See [session-runtime.md](session-runtime.md) for
+condition ownership, fairness, loan, and callback-lifetime contracts.
 
 Stop signals and joins every worker. Service finalization unregisters and
-quiesces listeners before destroying session WaitSets and conditions; close
-adapter connections only after finalization. Adapter callbacks must be
+quiesces listeners before detaching and destroying the async-waitset conditions
+and underlying WaitSets; close adapter connections only after finalization.
+Adapter callbacks must be
 thread-safe, nonallocating, and nonblocking. Destroy all Micro users before the
 application calls `OSAPI_System_finalize()`.
 
-The core runtime lifecycle test observes initialization allocations, then
-verifies zero wrapped libc/OSAPI heap calls across session start, reader
-notifications/dispatch, and stop. This is instrumentation coverage, not proof
-of allocation freedom inside unintercepted vendor/OS internals. The
-implementation adds no platform backend: clock adaptation calls
-`OSAPI_System_initialize/get_ticktime`, and workers use SDK thread/WaitSet APIs.
-Blocking-thread behavior is verified on installed Linux6 PSL, not universally
-qualified for other PSL/Cert profiles.
-
-## Build utilities
-
-The three bundled RTI CMake utility modules retain their original copyright and
-license notices. Micro-specific adaptations correct generator validation,
-explicit JRE propagation, version probes, dependency and quoting handling, and
-archive-configuration mappings. These are build-time utilities; the licensed
-SDK runtime remains an external build dependency.
+Clock and worker support use Micro OSAPI and DDS WaitSet APIs.
 
 ## Install and independent consumers
 
@@ -241,19 +213,9 @@ Existing incompatible RTI imported targets are rejected. Relative GNUInstallDirs
 lib/include destinations are supported; absolute destinations are rejected
 because they cannot form a relocatable package.
 
-Application-specific generated codecs/models, typed signal DDS binding sources,
-and the mapping-dependent `pgw/signal_dds.h` facade are deliberately excluded.
+The package contains generic PGW libraries and public headers, not
+application-specific generated codecs, models, or typed signal bindings.
 Applications generate and compile those against the generic adapter targets.
-The standalone validation fixture `cmake/tests/package_consumer` links every
-generic adapter target without opening a CAN interface or creating DDS entities.
-It was built and run against both the original and a moved installation prefix.
-It also declares/instantiates an application-owned typed Micro sequence by defining
-`T`/`TSeq` and including installed RTI `reda_sequence_decl.h`/`reda_sequence_defn.h`
-directly, following the generator pattern. It exercises
-the registry's typed adapter catalog. Fixture arrays are initialization-time
-borrowed backing storage, not independent pointer/count/capacity collection APIs.
-There is no PGW container façade or `PGW::platform_osapi` compatibility target.
-Core supplies runtime adaptation and optional runner policy directly.
 
 ```sh
 cmake -S cmake/tests/package_consumer -B build-package/consumer \

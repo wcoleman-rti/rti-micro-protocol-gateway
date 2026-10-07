@@ -297,7 +297,7 @@ int main(int argc, char **argv)
     PGW_CANMemory memory;
     PGW_CANFrame rx[8], tx[1];
     assert(PGW_CANMemory_initialize(&memory, rx, 8, tx, 1) == PGW_OK);
-    PGW_Schema schema = {PGW_codec_schema.name, PGW_codec_schema.version, PGW_codec_schema.fingerprint};
+    PGW_TypeInfo schema = {PGW_codec_schema.name, PGW_codec_schema.version, PGW_codec_schema.fingerprint};
     PGW_CANCategory categories[2];
     PGW_CANCategorySeq category_sequence;
     PGW_CANConfig can_config = {.entity_id = 1, .transport = PGW_CANMemory_transport(&memory),
@@ -347,13 +347,13 @@ int main(int argc, char **argv)
     assert(PGW_Service_start(&service) == PGW_OK);
     PGW_StreamReader state_reader, probe_reader;
     PGW_StreamWriter command_writer, probe_writer;
-    assert(PGW_DDSConnextMicroConnection.reader(companion, "state_powertrain", &state_reader) == PGW_OK);
-    assert(PGW_DDSConnextMicroConnection.writer(companion, "command_powertrain", &command_writer) == PGW_OK);
-    assert(PGW_DDSConnextMicroConnection.reader(companion, "probe", &probe_reader) == PGW_OK);
-    assert(PGW_DDSConnextMicroConnection.writer(gateway, "probe", &probe_writer) == PGW_OK);
-    PGW_Representation signal_rep = {&schema, "benchmark.signal", sizeof(SignalSample),
+    assert(PGW_DDSConnextMicroConnection.lookup_stream_reader(companion, "state_powertrain", &state_reader) == PGW_OK);
+    assert(PGW_DDSConnextMicroConnection.lookup_stream_writer(companion, "command_powertrain", &command_writer) == PGW_OK);
+    assert(PGW_DDSConnextMicroConnection.lookup_stream_reader(companion, "probe", &probe_reader) == PGW_OK);
+    assert(PGW_DDSConnextMicroConnection.lookup_stream_writer(gateway, "probe", &probe_writer) == PGW_OK);
+    PGW_SampleRepresentation signal_rep = {&schema, "benchmark.signal", sizeof(SignalSample),
                                      _Alignof(SignalSample), &signal_access, NULL};
-    PGW_Representation probe_rep = *PGW_probe_binding.representation;
+    PGW_SampleRepresentation probe_rep = *PGW_probe_type_binding.representation;
     probe_rep.access = &probe_access;
     assert(command_writer.iface->bind(command_writer.state, &signal_rep) == PGW_OK);
     assert(probe_writer.iface->bind(probe_writer.state, &probe_rep) == PGW_OK);
@@ -372,9 +372,9 @@ int main(int argc, char **argv)
     PGW_StreamReader diagnostic_reader;
     PGW_SampleSeq diagnostic_loan;
     PGW_SampleRef diagnostic_refs[4];
-    assert(PGW_DDSConnextMicroConnection.writer(gateway, "diagnostics", &exporter) == PGW_OK);
-    assert(exporter.iface->bind(exporter.state, PGW_diagnostics_binding.representation) == PGW_OK);
-    assert(PGW_DDSConnextMicroConnection.reader(companion, "diagnostics", &diagnostic_reader) == PGW_OK);
+    assert(PGW_DDSConnextMicroConnection.lookup_stream_writer(gateway, "diagnostics", &exporter) == PGW_OK);
+    assert(exporter.iface->bind(exporter.state, PGW_diagnostics_type_binding.representation) == PGW_OK);
+    assert(PGW_DDSConnextMicroConnection.lookup_stream_reader(companion, "diagnostics", &diagnostic_reader) == PGW_OK);
     initialize_sequence(&diagnostic_loan, diagnostic_refs, 4);
 #endif
     size_t route_capacities[] = {8, 8, 8, 8};

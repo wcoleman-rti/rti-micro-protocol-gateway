@@ -77,7 +77,7 @@ static PGW_Status unregister_listener(void *opaque,
 }
 
 static PGW_Status bind_empty(void *context,
-                             const PGW_Representation *representation)
+                             const PGW_SampleRepresentation *representation)
 {
     (void)context;
     (void)representation;
@@ -127,8 +127,8 @@ int main(void)
     CHECK(pthread_mutex_init(&reader.mutex, NULL) == 0);
     atomic_init(&reader.read_calls, 0);
     atomic_init(&reader.notify_stopping, false);
-    const PGW_Schema schema = {"runtime-test", 1, "runtime-test-v1"};
-    const PGW_Representation representation = {
+    const PGW_TypeInfo schema = {"runtime-test", 1, "runtime-test-v1"};
+    const PGW_SampleRepresentation representation = {
         &schema, "runtime-test", sizeof(int), _Alignof(int), NULL, NULL
     };
     const PGW_StreamReaderI reader_ops = {

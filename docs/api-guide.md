@@ -17,11 +17,11 @@ route catalog to a `PGW_Service`. Then initialize and start the service; one wor
 session's reader notifications until the application stops it. Finalize its
 caller-owned storage after all session workers have stopped. The main entry points are
 `PGW_Registry_initialize`, `PGW_Registry_register_adapter`,
-`PGW_Registry_register_binding`, `PGW_Route_initialize_storage`,
+`PGW_Registry_register_representation`, `PGW_Route_initialize_storage`,
 `PGW_Session_set_routes`, `PGW_Service_set_sessions`,
 `PGW_Service_initialize`, `PGW_Service_start`, `PGW_Service_stop`, and
-`PGW_Service_finalize`. See the [event-driven session runtime](session-runtime.md)
-for listener registration, queue re-arming, callback lifetime, and fairness.
+`PGW_Service_finalize`. See the [event-driven session runtime](docs/session-runtime.md)
+for condition dispatch, queue re-arming, callback lifetime, and fairness.
 
 ## Connect CAN
 
@@ -40,9 +40,10 @@ and [signal representation API](reference/group__pgw__signal__api.html), then
 follow [adapter and DDS binding development](docs/developing-adapters.md).
 Register the DDS adapter, describe named endpoints with
 `PGW_DDSEndpointConfig` and `PGW_DDSConfig`, then create the connection with
-`PGW_DDS_create`. Bind each endpoint to generated type support and a
-representation; borrowed DDS samples and metadata remain valid only while
-their reader loan is active.
+`PGW_DDS_create`. Bind each endpoint to generated type support through a
+`PGW_DDSTypeBinding` and a `PGW_SampleRepresentation`; borrowed samples and
+metadata remain valid only while their
+reader loan is active.
 
 ## Collect diagnostics
 

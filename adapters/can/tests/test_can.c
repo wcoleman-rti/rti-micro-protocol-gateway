@@ -181,8 +181,8 @@ static void wait_for_io_errors(PGW_Connection *connection, uint64_t expected)
     assert(!"timed out waiting for transport error");
 }
 
-static void partial_messages(const PGW_Schema *schema,
-                             const PGW_Representation *source)
+static void partial_messages(const PGW_TypeInfo *schema,
+                             const PGW_SampleRepresentation *source)
 {
     void *storage = malloc(16384);
     assert(storage);
@@ -220,14 +220,14 @@ static void partial_messages(const PGW_Schema *schema,
     cfg.receive_budget = 2; cfg.write_capacity = 2;
     cfg.disable_metadata_capture = true;
     assert(PGW_CANAdapter.create(&cfg, &arena, &connection) == PGW_OK);
-    assert(PGW_CANAdapter.connection->writer(connection, "all", &writer) == PGW_OK);
-    PGW_Representation native_source = {
+    assert(PGW_CANAdapter.connection->lookup_stream_writer(connection, "all", &writer) == PGW_OK);
+    PGW_SampleRepresentation native_source = {
         source->schema, "test.native_signal", sizeof(uint32_t),
         _Alignof(uint32_t), &native_view_access, &native_view_contract
     };
     assert(writer.iface->bind(writer.state, &native_source) == PGW_UNSUPPORTED);
     assert(writer.iface->bind(writer.state, source) == PGW_OK);
-    assert(PGW_CANAdapter.connection->reader(connection, "all", &reader) == PGW_OK);
+    assert(PGW_CANAdapter.connection->lookup_stream_reader(connection, "all", &reader) == PGW_OK);
     atomic_init(&notifications.calls, 0);
     assert(reader.iface->register_listener(reader.state, &listener) == PGW_OK);
     assert(PGW_SampleSeq_initialize(&input));
@@ -305,7 +305,7 @@ int main(void)
     PGW_Arena arena = {storage, 32768, 0};
     PGW_CANMemory memory;
     PGW_CANFrame rx[16], tx[1], sent;
-    PGW_Schema schema = {PGW_codec_schema.name, PGW_codec_schema.version,
+    PGW_TypeInfo schema = {PGW_codec_schema.name, PGW_codec_schema.version,
                          PGW_codec_schema.fingerprint};
     PGW_CANCategory categories[] = {
         {"powertrain", 4, &schema}, {"auxiliary", 3, &schema}};
@@ -329,9 +329,9 @@ int main(void)
     PGW_CANStats stats;
     static const PGW_SampleAccessI source_access = {
         PGW_ABI_VERSION, sizeof(PGW_SampleAccessI), source_copy, NULL, NULL};
-    PGW_Representation source = {&schema, "test.signal", sizeof(PGW_Signal),
+    PGW_SampleRepresentation source = {&schema, "test.signal", sizeof(PGW_Signal),
                                   _Alignof(PGW_Signal), &source_access, NULL};
-    PGW_Representation canonical_view_source = {
+    PGW_SampleRepresentation canonical_view_source = {
         &schema, "test.signal.view", sizeof(PGW_Signal), _Alignof(PGW_Signal),
         &canonical_view_access, &canonical_view_contract
     };
@@ -357,19 +357,19 @@ int main(void)
     assert(short_arena.used == 0 && connection == NULL);
     assert(PGW_CANAdapter.create(&cfg, &arena, &connection) == PGW_OK);
     assert(arena.used <= required);
-    assert(PGW_CANAdapter.connection->reader(connection, "powertrain", &reader) == PGW_OK);
-    assert(PGW_CANAdapter.connection->reader(connection, "auxiliary", &auxiliary) == PGW_OK);
+    assert(PGW_CANAdapter.connection->lookup_stream_reader(connection, "powertrain", &reader) == PGW_OK);
+    assert(PGW_CANAdapter.connection->lookup_stream_reader(connection, "auxiliary", &auxiliary) == PGW_OK);
     atomic_init(&reader_notifications.calls, 0);
     atomic_init(&auxiliary_notifications.calls, 0);
     assert(reader.iface->register_listener(reader.state, &reader_listener) == PGW_OK);
     assert(auxiliary.iface->register_listener(
         auxiliary.state, &auxiliary_listener) == PGW_OK);
-    assert(PGW_CANAdapter.connection->writer(connection, "powertrain", &writer) == PGW_OK);
-    assert(PGW_CANAdapter.connection->writer(connection, "auxiliary", &aux_writer) == PGW_OK);
+    assert(PGW_CANAdapter.connection->lookup_stream_writer(connection, "powertrain", &writer) == PGW_OK);
+    assert(PGW_CANAdapter.connection->lookup_stream_writer(connection, "auxiliary", &aux_writer) == PGW_OK);
     assert(writer.iface->bind(writer.state, &source) == PGW_OK);
     assert(aux_writer.iface->bind(aux_writer.state, &source) == PGW_OK);
-    PGW_Schema wrong_schema = {"pgw.signal", 1, "wrong-fingerprint"};
-    PGW_Representation wrong = source; wrong.schema = &wrong_schema;
+    PGW_TypeInfo wrong_schema = {"pgw.signal", 1, "wrong-fingerprint"};
+    PGW_SampleRepresentation wrong = source; wrong.schema = &wrong_schema;
     assert(writer.iface->bind(writer.state, &wrong) == PGW_UNSUPPORTED);
     assert(PGW_SampleSeq_initialize(&input));
     assert(PGW_SampleSeq_initialize(&loan));

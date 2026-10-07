@@ -33,9 +33,9 @@ int main(void)
 {
     PGW_DDS_Signal wire;
     PGW_Signal native;
-    assert(PGW_signal_dds_binding_powertrain.write_view == PGW_signal_write_view);
-    assert(PGW_signal_dds_binding_powertrain.bind_view == PGW_signal_bind_view);
-    PGW_Schema alternate_schema = {"can.signal.view", 7, "alternate"};
+    assert(PGW_signal_dds_type_binding_powertrain.write_view == PGW_signal_write_view);
+    assert(PGW_signal_dds_type_binding_powertrain.bind_view == PGW_signal_bind_view);
+    PGW_TypeInfo alternate_schema = {"can.signal.view", 7, "alternate"};
     PGW_SampleViewDescriptor can_view_contract = {
         PGW_SAMPLE_VIEW_CANONICAL, sizeof(PGW_Signal),
         &PGW_CAN_SIGNAL_VALUE_IDENTITY, &PGW_CAN_METADATA_IDENTITY
@@ -43,7 +43,7 @@ int main(void)
     const PGW_SampleAccessI can_view_access = {
         PGW_ABI_VERSION, sizeof(PGW_SampleAccessI), NULL, NULL, unavailable_view
     };
-    PGW_Representation alternate_source = {
+    PGW_SampleRepresentation alternate_source = {
         &alternate_schema, "can.signal", sizeof(PGW_Signal),
         _Alignof(PGW_Signal), &can_view_access, &can_view_contract
     };
@@ -56,7 +56,7 @@ int main(void)
     wire.id = 1003;
     wire.value._d = VALUE_BOOLEAN;
     wire.value._u.boolean_value = DDS_BOOLEAN_TRUE;
-    assert(PGW_signal_dds_binding_powertrain.copy_native(&wire, &native, sizeof(native)) == PGW_OK);
+    assert(PGW_signal_dds_type_binding_powertrain.copy_native(&wire, &native, sizeof(native)) == PGW_OK);
     assert(PGW_signal_validate_dds(&wire));
     assert(native.id == 1003 && native.value.kind == PGW_VALUE_BOOLEAN &&
            native.value.data.boolean);
@@ -79,7 +79,7 @@ int main(void)
     view = (PGW_SampleView){
         .kind = PGW_SAMPLE_VIEW_NATIVE,
         .value = &wire,
-        .type_identity = PGW_signal_dds_binding_powertrain.type_identity(),
+        .type_identity = PGW_signal_dds_type_binding_powertrain.type_identity(),
         .context = &dds_metadata,
         .context_identity = &PGW_DDS_METADATA_IDENTITY
     };
@@ -89,38 +89,38 @@ int main(void)
     wire.id = 1002;
     wire.value._d = VALUE_INT64;
     wire.value._u.integer_value = -100;
-    assert(PGW_signal_dds_binding_powertrain.copy_native(&wire, &native, sizeof(native)) == PGW_OK);
+    assert(PGW_signal_dds_type_binding_powertrain.copy_native(&wire, &native, sizeof(native)) == PGW_OK);
     assert(PGW_signal_validate_dds(&wire));
     assert(native.value.kind == PGW_VALUE_INT64 && native.value.data.integer == -100);
     wire.id = 1001;
     wire.value._d = VALUE_DOUBLE;
     wire.value._u.real_value = 123.4;
-    assert(PGW_signal_dds_binding_powertrain.copy_native(&wire, &native, sizeof(native)) == PGW_OK);
+    assert(PGW_signal_dds_type_binding_powertrain.copy_native(&wire, &native, sizeof(native)) == PGW_OK);
     assert(PGW_signal_validate_dds(&wire));
     assert(native.value.kind == PGW_VALUE_DOUBLE && native.value.data.real == 123.4);
     wire.value._u.real_value = NAN;
     assert(!PGW_signal_validate_dds(&wire));
-    assert(PGW_signal_dds_binding_powertrain.copy_native(&wire, &native, sizeof(native)) == PGW_INVALID);
+    assert(PGW_signal_dds_type_binding_powertrain.copy_native(&wire, &native, sizeof(native)) == PGW_INVALID);
     assert(native.value.data.real == 123.4);
     wire.value._d = VALUE_INT64;
     assert(!PGW_signal_validate_dds(&wire));
-    assert(PGW_signal_dds_binding_powertrain.copy_native(&wire, &native, sizeof(native)) == PGW_INVALID);
+    assert(PGW_signal_dds_type_binding_powertrain.copy_native(&wire, &native, sizeof(native)) == PGW_INVALID);
     wire.id = 9999;
     assert(!PGW_signal_validate_dds(&wire));
-    assert(PGW_signal_dds_binding_powertrain.copy_native(&wire, &native, sizeof(native)) == PGW_INVALID);
-    assert(PGW_signal_dds_binding_powertrain.copy_native(NULL, &native, sizeof(native)) == PGW_INVALID);
-    assert(PGW_signal_dds_binding_powertrain.copy_native(&wire, &native, sizeof(native) - 1) == PGW_INVALID);
-    assert(strcmp(PGW_signal_dds_binding_powertrain.representation->schema->fingerprint,
+    assert(PGW_signal_dds_type_binding_powertrain.copy_native(&wire, &native, sizeof(native)) == PGW_INVALID);
+    assert(PGW_signal_dds_type_binding_powertrain.copy_native(NULL, &native, sizeof(native)) == PGW_INVALID);
+    assert(PGW_signal_dds_type_binding_powertrain.copy_native(&wire, &native, sizeof(native) - 1) == PGW_INVALID);
+    assert(strcmp(PGW_signal_dds_type_binding_powertrain.representation->schema->fingerprint,
                   PGW_codec_schema.fingerprint) == 0);
-    assert(PGW_signal_dds_binding_powertrain.representation ==
-           PGW_signal_dds_binding_auxiliary.representation);
+    assert(PGW_signal_dds_type_binding_powertrain.representation ==
+           PGW_signal_dds_type_binding_auxiliary.representation);
     void *storage = malloc(8192);
     assert(storage);
     PGW_Arena arena = {storage, 8192, 0};
     void *state = NULL;
-    assert(PGW_signal_dds_binding_powertrain.initialize(&arena, 0, &state) == PGW_INVALID);
-    assert(PGW_signal_dds_binding_powertrain.initialize(&arena, 8, &state) == PGW_OK);
-    assert(state && PGW_signal_dds_binding_powertrain.length(state) == 0);
+    assert(PGW_signal_dds_type_binding_powertrain.initialize(&arena, 0, &state) == PGW_INVALID);
+    assert(PGW_signal_dds_type_binding_powertrain.initialize(&arena, 8, &state) == PGW_OK);
+    assert(state && PGW_signal_dds_type_binding_powertrain.length(state) == 0);
     free(storage);
     return 0;
 }

@@ -100,7 +100,7 @@ int main(int argc, char **argv)
     PGW_CANFrame memory_baseline = {.id = 256, .length = 8,
         .data = {0x10, 0x27, 0, 0, 1, 1, 0xab, 0xcd}};
     PGW_CANSocketConfig socket_config = {.enable_fd = true};
-    PGW_Schema schema = {PGW_codec_schema.name, PGW_codec_schema.version,
+    PGW_TypeInfo schema = {PGW_codec_schema.name, PGW_codec_schema.version,
                          PGW_codec_schema.fingerprint};
     PGW_CANCategory categories[2];
     PGW_CANCategorySeq category_sequence;
@@ -282,8 +282,8 @@ int main(int argc, char **argv)
         sessions[0].name = compiled_session->name;
     }
 #if PGW_DDS_DIAGNOSTICS
-    if (PGW_DDSConnextMicroAdapter.connection->writer(dds, "diagnostics", &exporter) != PGW_OK ||
-        exporter.iface->bind(exporter.state, PGW_diagnostics_binding.representation) != PGW_OK)
+    if (PGW_DDSConnextMicroAdapter.connection->lookup_stream_writer(dds, "diagnostics", &exporter) != PGW_OK ||
+        exporter.iface->bind(exporter.state, PGW_diagnostics_type_binding.representation) != PGW_OK)
         goto done;
 #endif
     for (RTI_INT32 i = 0; i < 4; ++i) {
@@ -354,7 +354,7 @@ int main(int argc, char **argv)
     }
     failed = 0;
 stopped:
-    if ((service.lifecycle == PGW_READY || service.lifecycle == PGW_RUNNING) &&
+    if ((service.lifecycle == PGW_ENABLED || service.lifecycle == PGW_STARTED) &&
         PGW_Service_stop(&service) != PGW_OK) {
         closed = false;
         goto done;
@@ -418,7 +418,7 @@ stopped:
         }
     }
 done:
-    if (service.lifecycle == PGW_READY || service.lifecycle == PGW_RUNNING) {
+    if (service.lifecycle == PGW_ENABLED || service.lifecycle == PGW_STARTED) {
         if (PGW_Service_stop(&service) != PGW_OK ||
             PGW_Service_finalize(&service) != PGW_OK) closed = false;
     } else if (service.lifecycle == PGW_STOPPED &&
