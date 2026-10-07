@@ -11,7 +11,7 @@
   the software.
 -->
 
-<gateway dds="dds.xml" route-budget="4" sample-budget="8" diagnostic-period-steps="1000">
+<gateway dds="dds.xml" sample-budget="8">
   <binding id="powertrain" symbol="PGW_signal_dds_binding_powertrain" type="PGW_DDS::Signal" schema="pgw.signal" fingerprint="@fingerprint@" schema-version="1" representation-name="signal.native" native-type="PGW_Signal" native-header="pgw/signal.h" support-header="signalsSupport.h" conversion="callbacks" dds-to-native="PGW_signal_from_dds" native-to-dds="PGW_signal_to_dds" register-keys="PGW_signal_register_keys_powertrain" supports-timestamp="true" direct-native-write="true" validate-native="PGW_signal_validate_dds" bind-view="PGW_signal_bind_view" write-view="PGW_signal_write_view"/>
   <binding id="auxiliary" symbol="PGW_signal_dds_binding_auxiliary" type="PGW_DDS::Signal" schema="pgw.signal" fingerprint="@fingerprint@" schema-version="1" representation-name="signal.native" native-type="PGW_Signal" native-header="pgw/signal.h" support-header="signalsSupport.h" conversion="callbacks" dds-to-native="PGW_signal_from_dds" native-to-dds="PGW_signal_to_dds" register-keys="PGW_signal_register_keys_auxiliary" supports-timestamp="true" direct-native-write="true" validate-native="PGW_signal_validate_dds" bind-view="PGW_signal_bind_view" write-view="PGW_signal_write_view"/>
   <binding id="probe" symbol="PGW_probe_binding" type="PGWTest::Probe" schema="pgw.probe" fingerprint="@probe_fingerprint@" schema-version="1" representation-name="probe.native" native-type="PGW_ProbeValue" native-header="probe_binding.h" support-header="probeSupport.h" conversion="fieldwise" register-key-value="1" supports-timestamp="true" direct-native-write="true"/>
@@ -38,8 +38,10 @@
     <stream name="command_powertrain" endpoint="powertrain" binding="powertrain" role="writer" capacity="8"/>
     <stream name="command_auxiliary" endpoint="auxiliary" binding="auxiliary" role="writer" capacity="8"/>
   </native-connection>
-  <route id="state_powertrain" input="can::state_powertrain" output="gateway::state_powertrain"/>
-  <route id="state_auxiliary" input="can::state_auxiliary" output="gateway::state_auxiliary"/>
-  <route id="command_powertrain" input="gateway::command_powertrain" output="can::command_powertrain"/>
-  <route id="command_auxiliary" input="gateway::command_auxiliary" output="can::command_auxiliary"/>
+  <session name="vehicle">
+    <route id="state_powertrain" input="can::state_powertrain" output="gateway::state_powertrain"/>
+    <route id="state_auxiliary" input="can::state_auxiliary" output="gateway::state_auxiliary"/>
+    <route id="command_powertrain" input="gateway::command_powertrain" output="can::command_powertrain"/>
+    <route id="command_auxiliary" input="gateway::command_auxiliary" output="can::command_auxiliary"/>
+  </session>
 </gateway>

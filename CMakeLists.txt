@@ -29,7 +29,6 @@ option(PGW_ENABLE_ROUTE_LATENCY_METRICS
     "Compile allocation-free per-route batch latency metrics" OFF)
 set(PGW_REMOTE_CONTROL_MAX_CONTROLLERS 1 CACHE STRING
     "Maximum DDS controller peers admitted by the control participant")
-option(PGW_ENABLE_RUNNER "Build core's optional initialization-created scheduler runner" ON)
 option(PGW_WARNINGS_AS_ERRORS "Treat gateway compiler warnings as errors" OFF)
 set(PGW_PYTHON_EXECUTABLE "" CACHE FILEPATH
     "Explicit host Python interpreter for all generators/tests (e.g. .venv/bin/python)")
@@ -156,7 +155,7 @@ if(PGW_BUILD_EXAMPLES)
 endif()
 if(PGW_BUILD_TESTS)
     pgw_add_component(tests)
-    if(PGW_ENABLE_RUNNER AND TARGET pgw_runtime_test AND TARGET pgw_allocation_probe)
+    if(TARGET pgw_runtime_test AND TARGET pgw_allocation_probe)
         target_link_libraries(pgw_runtime_test PRIVATE pgw_allocation_probe)
         target_compile_definitions(pgw_runtime_test PRIVATE PGW_TEST_ALLOCATION_PROBE=1)
     endif()

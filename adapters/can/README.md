@@ -104,10 +104,20 @@ silently changing each other's access callbacks.
 
 ## Receive, loans and metadata
 
-`PGW_CAN_poll(connection, budget)` consumes at most the smaller of the caller's
-budget and the configured frame budget. A reader invokes one such poll before
-borrowing its category queue. Unknown, malformed, control/error and echo frames
-still consume budget, before signal expansion/demultiplexing.
+Each connection owns one receiver thread. It receives at most the configured
+frame budget per receiver turn, then decodes and demultiplexes frames into the
+existing bounded typed category queues. When a reader queue may contain data,
+the adapter invokes that reader's registered listener; the callback only
+signals session readiness. The session worker performs the bounded read and
+route dispatch. The adapter does not require application polling or a second
+sample queue.
+
+Queue publication, bounded reads, re-arming, listener registration and
+unregistration are synchronized with the receiver. If a read leaves category
+samples queued, the adapter notifies again before returning. Unregistration
+quiesces any in-flight receiver notification before the session can finalize
+its callback context. Unknown, malformed, control/error and echo frames still
+consume the receiver's frame budget, before signal expansion/demultiplexing.
 
 Configured valid frames are decoded into fixed scratch storage and become the
 message baseline even when category queues overflow. Newly decoded signals
@@ -116,7 +126,7 @@ usable. Inactive multiplex branches are absent, not fabricated zero updates.
 Unconfigured frames are counted and ignored. RTR/error frames are counted
 diagnostic/control inputs, never DBC payloads.
 
-Loan slots are distinct from RX queues, so further polling cannot overwrite
+Loan slots are distinct from RX queues, so the receiver cannot overwrite
 borrowed samples. Readers require an initialized sequence with the caller/core's
 fixed reference array already attached and fill within that capacity.
 Exactly one `return_loan` is
@@ -255,7 +265,7 @@ logical lengths; allocating copies, growth and fallback are absent.
 | Opaque sample references | Core `PGW_SampleSeq`; caller-owned fixed pointer slots, adapter never unloans them |
 | Synchronous per-sample outcomes | Core `PGW_WriteResultSeq`, passed directly to the writer instead of pointer/capacity arguments |
 | SocketCAN configured filter catalog | `PGW_CANSocketFilterSeq`, readonly borrowed definitions; kernel API conversion remains bounded |
-| Benchmark routes/results/references | Core `PGW_RouteSeq`, `PGW_WriteResultSeq`, `PGW_SampleSeq`, adopted by `PGW_Service_set_routes` / `PGW_Route_initialize_storage` |
+| Benchmark routes/results/references | Core `PGW_RouteSeq`, `PGW_WriteResultSeq`, `PGW_SampleSeq`, adopted by `PGW_Session_set_routes` / `PGW_Route_initialize_storage` |
 
 Deliberate exclusions:
 
@@ -274,7 +284,7 @@ Deliberate exclusions:
   supply the adapter's bounded views.
 - Linux `setsockopt` filters and `recvmsg`/`send` use vendor/kernel-native
   buffer/byte-count interfaces, not an invented sequence ABI.
-- Arena byte budgets, scheduler budgets, maximum batch limits, scalar stream
+- Arena byte budgets, session sample budgets, maximum batch limits, scalar stream
   capacity declarations, strings and callback context pointers are not
   pointer-plus-cardinality collections.
 

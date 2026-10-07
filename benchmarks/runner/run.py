@@ -62,12 +62,12 @@ def input_fingerprints(root):
 
 
 def workload_configuration(measurement):
-    keys = {"workload", "steps", "timing", "allocation_coverage", "schema_fingerprint",
+    keys = {"workload", "batches", "timing", "allocation_coverage", "schema_fingerprint",
             "metadata_capture", "metadata_preservation", "configuration",
-            "backpressure_period_steps", "sample_rate_basis"}
+            "backpressure_period_batches", "sample_rate_basis"}
     signature = {key: value for key, value in measurement.items()
                  if key in keys or key.endswith(("_capacity", "_budget"))}
-    latency = measurement.get("step_latency_ns", {})
+    latency = measurement.get("dispatch_latency_ns", {})
     signature["timing_boundary"] = latency.get("boundary")
     signature["histogram"] = latency.get("histogram")
     return signature
@@ -117,7 +117,7 @@ def profile_process(perf, command, timeout):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("executable", type=pathlib.Path)
-    parser.add_argument("--steps", type=int, default=100000)
+    parser.add_argument("--batches", type=int, default=100000)
     parser.add_argument("--timing", choices=("0", "1"), default="1")
     parser.add_argument("--metadata", choices=("0", "1"),
                         help="adapter workload's optional third argument; see workload-specific policy")
@@ -129,8 +129,8 @@ def main():
     parser.add_argument("--perf", action="store_true",
                         help="extra owned-process perf stat run; permission failures are reported")
     args = parser.parse_args()
-    if not 1 <= args.steps <= 100000000 or not 1 <= args.repeat <= 100:
-        parser.error("steps/repeat outside bounded supported range")
+    if not 1 <= args.batches <= 100000000 or not 1 <= args.repeat <= 100:
+        parser.error("batches/repeat outside bounded supported range")
     if not 1 <= args.timeout <= 3600:
         parser.error("timeout must be between 1 and 3600 seconds")
     root = pathlib.Path(__file__).resolve().parents[2]
@@ -158,7 +158,7 @@ def main():
     toolchain = (json.loads(provenance.read_text()) if provenance.exists() else
                  {"available": False, "reason": "CMake build provenance not found"})
     measurements = []
-    command = [str(executable), str(args.steps), args.timing]
+    command = [str(executable), str(args.batches), args.timing]
     if args.metadata is not None:
         command.append(args.metadata)
     for _ in range(args.repeat):
@@ -199,7 +199,7 @@ def main():
         "toolchain": toolchain,
         "version_control": git_provenance(root),
         "input_fingerprints": input_fingerprints(root),
-        "seed": 0, "warmup_steps": 0,
+        "seed": 0, "warmup_batches": 0,
         "metadata_requested": args.metadata,
         "process_timeout_seconds": args.timeout,
         "measurements": measurements,

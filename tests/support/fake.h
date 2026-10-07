@@ -20,10 +20,13 @@ typedef struct {
 } PGW_TestValue;
 
 typedef struct {
-    PGW_TestValue values[4];
+    PGW_TestValue values[8];
     size_t available;
     size_t borrows;
     size_t returns;
+    atomic_uint_fast64_t read_calls;
+    atomic_uint_fast64_t notifications;
+    const PGW_ReaderListener *listener;
     bool loaned;
     bool empty_ok;
     PGW_Status read_status;
@@ -38,6 +41,8 @@ typedef struct {
     PGW_WriteResult outcome;
     bool partial;
     PGW_Status status;
+    atomic_uint *order_clock;
+    unsigned order[8];
 } PGW_TestWriter;
 
 extern const PGW_Representation PGW_test_representation;
@@ -47,7 +52,13 @@ void PGW_test_route(PGW_Route *, uint32_t, PGW_TestReader *, PGW_TestWriter *,
                     PGW_SampleRef *, PGW_WriteResult *, size_t);
 PGW_Status PGW_test_route_initialize_storage(PGW_Route *, PGW_SampleRef *,
                                              PGW_WriteResult *, size_t);
-PGW_Status PGW_test_service_set_routes(PGW_Service *, PGW_Route *, size_t);
+PGW_Status PGW_test_service_set_routes(PGW_Service *, PGW_Session *,
+                                      PGW_Route *, size_t);
+PGW_Status PGW_test_session_set_routes(PGW_Session *, PGW_Route *, size_t);
+PGW_Status PGW_test_service_set_sessions(PGW_Service *, PGW_Session *, size_t);
+PGW_Status PGW_test_notify_routes(PGW_Service *);
+void PGW_test_wait_wakeups(PGW_Session *, uint64_t);
+void PGW_test_wait_dispatches(PGW_Session *, uint64_t);
 PGW_Status PGW_test_registry_initialize(PGW_Registry *, PGW_AdapterRef *, size_t,
                                         PGW_RepresentationRef *, size_t);
 bool PGW_test_diagnostics_initialize(PGW_Diagnostics *, PGW_Event *, size_t);

@@ -95,11 +95,18 @@
             <xs:attribute name="write-capacity" type="xs:positiveInteger" use="required"/>
           </xs:complexType>
         </xs:element>
-        <xs:element name="route" minOccurs="0" maxOccurs="unbounded">
+        <xs:element name="session" minOccurs="1" maxOccurs="unbounded">
           <xs:complexType>
-            <xs:attribute name="id" type="identifier" use="required"/>
-            <xs:attribute name="input" type="xs:string" use="required"/>
-            <xs:attribute name="output" type="xs:string" use="required"/>
+            <xs:sequence>
+              <xs:element name="route" minOccurs="1" maxOccurs="unbounded">
+                <xs:complexType>
+                  <xs:attribute name="id" type="identifier" use="required"/>
+                  <xs:attribute name="input" type="xs:string" use="required"/>
+                  <xs:attribute name="output" type="xs:string" use="required"/>
+                </xs:complexType>
+              </xs:element>
+            </xs:sequence>
+            <xs:attribute name="name" type="identifier" use="required"/>
           </xs:complexType>
         </xs:element>
         <xs:element name="control" minOccurs="0" maxOccurs="1">
@@ -125,13 +132,12 @@
             <xs:attribute name="max-controller-peers" type="xs:positiveInteger" default="1"/>
             <xs:attribute name="minimum-telemetry-period-ms"
                           type="xs:nonNegativeInteger" default="0"/>
+            <xs:attribute name="session" type="identifier" use="required"/>
           </xs:complexType>
         </xs:element>
       </xs:sequence>
       <xs:attribute name="dds" type="xs:string" use="required"/>
-      <xs:attribute name="route-budget" type="xs:positiveInteger" use="required"/>
       <xs:attribute name="sample-budget" type="xs:positiveInteger" use="required"/>
-      <xs:attribute name="diagnostic-period-steps" type="xs:nonNegativeInteger" default="0"/>
     </xs:complexType>
   </xs:element>
 </xs:schema>

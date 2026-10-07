@@ -80,7 +80,6 @@ rescan linker, or mismatched Debug/Release selection is an error, not a fallback
 | `PGW_BUILD_TESTS` | ON | Requirement verification, including core runtime lifecycle |
 | `PGW_BUILD_EXAMPLES` | ON | Runnable examples |
 | `PGW_BUILD_BENCHMARKS` | OFF | Benchmark workloads |
-| `PGW_ENABLE_RUNNER` | ON | Core's initialization-created optional scheduler policy |
 | `PGW_WARNINGS_AS_ERRORS` | OFF | Strict gateway C compiler diagnostics |
 | `PGW_GENERATOR_WARNINGS_AS_ERRORS` | ON | Reject RTI generation warnings |
 | `RTIME_LIBS_BUILD_TYPE` | Auto | Match Debug archives to Debug, otherwise Release |
@@ -88,7 +87,7 @@ rescan linker, or mismatched Debug/Release selection is an error, not a fallback
 The top-level build adds `core`, `tools`, enabled adapters, `bindings`,
 and selected examples/tests/benchmarks only when their component CMake files
 exist. Disabling DDS **does not remove the installed Micro requirement**: core
-typed sequences, clock adaptation and optional runner use Micro infrastructure
+typed sequences, session WaitSets, and clock adaptation use Micro infrastructure
 and OSAPI directly.
 Static archive linkage is required (`BUILD_SHARED_LIBS=OFF`). Multi-configuration
 generators use `RTIME_LIBS_BUILD_TYPE=Auto`; RelWithDebInfo/MinSizeRel use Release
@@ -148,46 +147,42 @@ are strict by default. For a known acceptable warning, set the narrow regular
 expression `PGW_GENERATOR_WARNING_ALLOW_REGEX`; do not mask unsupported-field
 warnings or resource-limit generation failures.
 
-## Core runtime policy and OSAPI limits
+## Core runtime and OSAPI limits
 
 Include `pgw/runtime.h` and link `PGW::core`. Call
-`PGW_Runtime_initialize()` before using the monotonic clock or runner. The fallible
+`PGW_Runtime_initialize()` before using the monotonic clock or creating sessions. The fallible
 `PGW_Runtime_monotonic_time_ns()` uses Micro's monotonic ticktime, not wall-clock
 time. Its units are nanoseconds, but resolution follows the installed PSL timer;
 it is not a nanosecond-resolution benchmark clock. The convenience
 `PGW_Runtime_monotonic_clock(void *, uint64_t *)` has the service callback
 signature and propagates failures rather than substituting a zero timestamp.
-An event whose service clock callback fails is not captured, and the step
-returns `PGW_IO_ERROR`; adapters may emit untimed events with `time_valid=false`.
+An event whose service clock callback fails is not captured; adapters may emit
+untimed events with `time_valid=false`.
 
-The optional runner uses a zero-initialized caller-owned `PGW_Runner`.
-`initialize` creates its semaphores/native thread and starts that thread blocked;
-`start` only releases it, without thread creation or allocation. Period and stack
-size are initialization settings. `stop` wakes and joins; no callbacks run after
-it returns successfully. Pass a configured **UNINITIALIZED** `PGW_Service` to
-runner initialization. A one-second startup handshake establishes the parked
-native thread before the runner calls `PGW_Service_initialize()` and exposes
-READY. There are no startup retries in the operating phase. The runner exclusively drives
-`PGW_Service_step()`; after joining, it calls `PGW_Service_stop()`. Its atomic
-`last_step_status` records the latest step result without replacing route
-diagnostics. Service finalization remains caller-owned. Lifecycle calls are
-serialized by the caller and may not execute inside an adapter callback.
-Finalize/reinitialize both service and runner before restarting.
-Adapter callbacks must obey the gateway's nonallocating/nonblocking contract. Destroy
-all Micro users before the application calls `OSAPI_System_finalize()`.
-Before runner initialization, provision each route with
-`PGW_Route_initialize_storage()` and attach the route catalog with
-`PGW_Service_set_routes()`. These borrow fixed typed backing arrays behind actual
-per-element Micro sequences. Service finalization releases those attachments;
-repeat both helpers before restarting. Core runtime policy storage contains only
-thread/semaphore handles and scalar lifecycle state, not sequence-like catalogs.
-The core runtime lifecycle test observes initialization allocations, then verifies
-zero wrapped libc/OSAPI heap calls across start, first/repeated steps and stop.
-This is instrumentation coverage, not proof of allocation freedom inside
-unintercepted vendor/OS internals. The implementation adds no platform backend:
-clock adaptation calls `OSAPI_System_initialize/get_ticktime`, and runner policy
-uses SDK threads/semaphores. Blocking-thread behavior is verified on installed
-Linux6 PSL, not universally qualified for other PSL/Cert profiles.
+Configure each `PGW_Session` with its fixed route sequence and attach the
+session catalog to `PGW_Service` before initialization. The core creates one
+WaitSet and wake GuardCondition per session, registers each typed reader's
+listener, and starts one serialized worker per session with
+`PGW_Service_start()`. Reader callbacks only coalesce readiness and signal the
+session; adapters keep their own queues/entities and re-notify after bounded
+reads when data remains. The core has no step API, periodic runner, or thread
+pool. See [session-runtime.md](session-runtime.md) for queue synchronization,
+re-arm, fairness, loan, and callback-lifetime contracts.
+
+Stop signals and joins every worker. Service finalization unregisters and
+quiesces listeners before destroying session WaitSets and conditions; close
+adapter connections only after finalization. Adapter callbacks must be
+thread-safe, nonallocating, and nonblocking. Destroy all Micro users before the
+application calls `OSAPI_System_finalize()`.
+
+The core runtime lifecycle test observes initialization allocations, then
+verifies zero wrapped libc/OSAPI heap calls across session start, reader
+notifications/dispatch, and stop. This is instrumentation coverage, not proof
+of allocation freedom inside unintercepted vendor/OS internals. The
+implementation adds no platform backend: clock adaptation calls
+`OSAPI_System_initialize/get_ticktime`, and workers use SDK thread/WaitSet APIs.
+Blocking-thread behavior is verified on installed Linux6 PSL, not universally
+qualified for other PSL/Cert profiles.
 
 ## Build utilities
 

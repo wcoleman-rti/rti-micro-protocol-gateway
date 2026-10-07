@@ -10,12 +10,15 @@
  * the software.
  */
 
+#define _POSIX_C_SOURCE 200809L
 #include "pgw/can_memory.h"
 #include "pgw_codec.h"
 #include <assert.h>
+#include <errno.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #ifdef PGW_CAN_WRAP_ALLOCATIONS
 static bool frozen;
@@ -117,6 +120,67 @@ static PGW_Signal get_signal(PGW_StreamReader *reader, PGW_SampleSeq *seq,
     return s;
 }
 
+typedef struct {
+    atomic_size_t calls;
+} NotificationCounter;
+
+static void reader_available(void *context)
+{
+    NotificationCounter *counter = context;
+    atomic_fetch_add_explicit(&counter->calls, 1, memory_order_release);
+}
+
+static void wait_for_notifications(const NotificationCounter *counter,
+                                   size_t expected)
+{
+    struct timespec delay = {0, 1000000};
+    for (size_t i = 0; i < 2000; ++i) {
+        if (atomic_load_explicit(&counter->calls, memory_order_acquire) >=
+            expected) return;
+        int result;
+        do {
+            result = nanosleep(&delay, &delay);
+        } while (result && errno == EINTR);
+        assert(!result);
+        delay = (struct timespec){0, 1000000};
+    }
+    assert(!"timed out waiting for reader notification");
+}
+
+static void wait_for_received(PGW_Connection *connection, uint64_t expected)
+{
+    struct timespec delay = {0, 1000000};
+    for (size_t i = 0; i < 2000; ++i) {
+        PGW_CANStats stats;
+        assert(PGW_CAN_stats(connection, &stats) == PGW_OK);
+        if (stats.received_frames >= expected) return;
+        int result;
+        do {
+            result = nanosleep(&delay, &delay);
+        } while (result && errno == EINTR);
+        assert(!result);
+        delay = (struct timespec){0, 1000000};
+    }
+    assert(!"timed out waiting for CAN receiver");
+}
+
+static void wait_for_io_errors(PGW_Connection *connection, uint64_t expected)
+{
+    struct timespec delay = {0, 1000000};
+    for (size_t i = 0; i < 2000; ++i) {
+        PGW_CANStats stats;
+        assert(PGW_CAN_stats(connection, &stats) == PGW_OK);
+        if (stats.io_errors >= expected) return;
+        int result;
+        do {
+            result = nanosleep(&delay, &delay);
+        } while (result && errno == EINTR);
+        assert(!result);
+        delay = (struct timespec){0, 1000000};
+    }
+    assert(!"timed out waiting for transport error");
+}
+
 static void partial_messages(const PGW_Schema *schema,
                              const PGW_Representation *source)
 {
@@ -132,6 +196,8 @@ static void partial_messages(const PGW_Schema *schema,
     PGW_Connection *connection;
     PGW_StreamWriter writer;
     PGW_StreamReader reader;
+    NotificationCounter notifications;
+    PGW_ReaderListener listener = {reader_available, &notifications};
     PGW_SampleSeq input, loan;
     PGW_SampleRef refs[2], loan_refs[7];
     PGW_WriteResult results[2];
@@ -162,6 +228,8 @@ static void partial_messages(const PGW_Schema *schema,
     assert(writer.iface->bind(writer.state, &native_source) == PGW_UNSUPPORTED);
     assert(writer.iface->bind(writer.state, source) == PGW_OK);
     assert(PGW_CANAdapter.connection->reader(connection, "all", &reader) == PGW_OK);
+    atomic_init(&notifications.calls, 0);
+    assert(reader.iface->register_listener(reader.state, &listener) == PGW_OK);
     assert(PGW_SampleSeq_initialize(&input));
     assert(PGW_SampleSeq_initialize(&loan));
     assert(PGW_SampleSeq_loan_contiguous(&input, refs, 0, 2));
@@ -179,7 +247,8 @@ static void partial_messages(const PGW_Schema *schema,
 #endif
     assert(PGW_CANMemory_inject(&memory, &engine) == PGW_OK);
     assert(PGW_CANMemory_inject(&memory, &aux) == PGW_OK);
-    assert(PGW_CAN_poll(connection, 2) == PGW_OK);
+    wait_for_received(connection, 2);
+    wait_for_notifications(&notifications, 2);
     assert(reader.iface->read(reader.state, &loan, 7) == PGW_OK);
     assert(PGW_SampleSeq_get_length(&loan) == 7);
     for (size_t i = 0; i < 7; ++i) {
@@ -211,6 +280,7 @@ static void partial_messages(const PGW_Schema *schema,
     assert(PGW_CANMemory_take_sent(&memory, &sent) == PGW_OK);
     assert(sent.id == 0x123 && sent.data[1] == 4 &&
            sent.data[8] == 0 && sent.data[9] == 0);
+    assert(reader.iface->unregister_listener(reader.state, &listener) == PGW_OK);
     assert(PGW_CANAdapter.connection->close(connection) == PGW_OK);
     assert(PGW_SampleSeq_unloan(&input));
     assert(PGW_SampleSeq_unloan(&loan));
@@ -243,6 +313,13 @@ int main(void)
     PGW_CANConfig cfg = {0};
     PGW_Connection *connection = NULL;
     PGW_StreamReader reader, auxiliary;
+    NotificationCounter reader_notifications, auxiliary_notifications;
+    PGW_ReaderListener reader_listener = {
+        reader_available, &reader_notifications
+    };
+    PGW_ReaderListener auxiliary_listener = {
+        reader_available, &auxiliary_notifications
+    };
     PGW_StreamWriter writer, aux_writer;
     PGW_SampleSeq input, loan, external_loan;
     PGW_SampleRef refs[16], loan_refs[4], external_refs[2];
@@ -282,6 +359,11 @@ int main(void)
     assert(arena.used <= required);
     assert(PGW_CANAdapter.connection->reader(connection, "powertrain", &reader) == PGW_OK);
     assert(PGW_CANAdapter.connection->reader(connection, "auxiliary", &auxiliary) == PGW_OK);
+    atomic_init(&reader_notifications.calls, 0);
+    atomic_init(&auxiliary_notifications.calls, 0);
+    assert(reader.iface->register_listener(reader.state, &reader_listener) == PGW_OK);
+    assert(auxiliary.iface->register_listener(
+        auxiliary.state, &auxiliary_listener) == PGW_OK);
     assert(PGW_CANAdapter.connection->writer(connection, "powertrain", &writer) == PGW_OK);
     assert(PGW_CANAdapter.connection->writer(connection, "auxiliary", &aux_writer) == PGW_OK);
     assert(writer.iface->bind(writer.state, &source) == PGW_OK);
@@ -346,13 +428,17 @@ int main(void)
     bad = engine; bad.id = 0x700;
     assert(PGW_CANMemory_inject(&memory, &bad) == PGW_OK);
     assert(PGW_CANMemory_inject(&memory, &engine) == PGW_OK);
-    assert(reader.iface->read(reader.state, &loan, 4) == PGW_NO_DATA);
-    assert(memory.rx_count == 1); /* CAN-BUDGET: unknown frame still uses budget */
-    assert(reader.iface->read(reader.state, &loan, 4) == PGW_OK);
-    assert(PGW_SampleSeq_get_length(&loan) == 4);
-    assert(get_signal(&reader, &loan, 1001).value.data.real == 100.0);
-    assert(get_signal(&reader, &loan, 1002).value.data.integer == -16);
-    assert(get_signal(&reader, &loan, 1003).value.data.boolean);
+    wait_for_received(connection, 2);
+    wait_for_notifications(&reader_notifications, 1);
+    assert(PGW_CAN_stats(connection, &stats) == PGW_OK);
+    assert(stats.unknown_frames == 1); /* unknown frames consume receiver budget */
+    PGW_Signal decoded_signals[4];
+    assert(reader.iface->read(reader.state, &loan, 2) == PGW_OK);
+    assert(PGW_SampleSeq_get_length(&loan) == 2);
+    for (size_t i = 0; i < 2; ++i)
+        assert(reader.representation->access->copy_value(
+            *PGW_SampleSeq_get_reference(&loan, (RTI_INT32)i),
+            &decoded_signals[i], sizeof(PGW_Signal)) == PGW_OK);
     PGW_Timestamp timestamp;
     assert(reader.representation->access->source_timestamp(
         *PGW_SampleSeq_get_reference(&loan, 0), &timestamp) == PGW_OK);
@@ -362,6 +448,29 @@ int main(void)
     assert(reader.iface->return_loan(reader.state, &loan) == PGW_OK);
     assert(PGW_SampleSeq_get_contiguous_buffer(&loan) != NULL &&
            PGW_SampleSeq_get_length(&loan) == 0);
+    assert(reader.iface->read(reader.state, &loan, 2) == PGW_OK);
+    assert(PGW_SampleSeq_get_length(&loan) == 2);
+    for (size_t i = 0; i < 2; ++i)
+        assert(reader.representation->access->copy_value(
+            *PGW_SampleSeq_get_reference(&loan, (RTI_INT32)i),
+            &decoded_signals[i + 2], sizeof(PGW_Signal)) == PGW_OK);
+    bool seen[4] = {false};
+    PGW_Signal by_id[4] = {0};
+    for (size_t i = 0; i < 4; ++i) {
+        assert(decoded_signals[i].id >= 1001 &&
+               decoded_signals[i].id <= 1004);
+        size_t index = decoded_signals[i].id - 1001;
+        seen[index] = true;
+        by_id[index] = decoded_signals[i];
+    }
+    assert(seen[0] && seen[1] && seen[2] && seen[3]);
+    assert(by_id[0].value.data.real == 100.0);
+    assert(by_id[1].value.data.integer == -16);
+    assert(by_id[2].value.data.boolean);
+    assert(by_id[3].value.data.integer == 2);
+    assert(reader.iface->return_loan(reader.state, &loan) == PGW_OK);
+    assert(atomic_load_explicit(&reader_notifications.calls,
+                                memory_order_acquire) >= 2);
     assert(reader.iface->return_loan(reader.state, &loan) == PGW_LOAN_ERROR);
     values[1] = (PGW_Signal){1002, {PGW_VALUE_INT64, {.integer = -2}}};
     values[2] = (PGW_Signal){1003, {PGW_VALUE_BOOLEAN, {.boolean = false}}};
@@ -375,6 +484,8 @@ int main(void)
     assert(!memcmp(sent.data, patched, sizeof(patched))); /* CAN-GOLDEN */
     assert(!sent.timestamp.valid);
     assert(PGW_CANMemory_inject(&memory, &aux) == PGW_OK);
+    wait_for_received(connection, 3);
+    wait_for_notifications(&auxiliary_notifications, 1);
     assert(auxiliary.iface->read(auxiliary.state, &loan, 4) == PGW_OK);
     assert(PGW_SampleSeq_get_length(&loan) == 3); /* inactive Pressure absent */
     assert(get_signal(&auxiliary, &loan, 2002).value.data.real == -39.0);
@@ -420,8 +531,8 @@ int main(void)
     engine.data[0] = 0x10; engine.data[1] = 0x27;
     for (size_t i = 0; i < 2; ++i) {
         assert(PGW_CANMemory_inject(&memory, &engine) == PGW_OK);
-        assert(PGW_CAN_poll(connection, 1) == PGW_OK);
     }
+    wait_for_received(connection, 5);
     assert(PGW_CAN_stats(connection, &stats) == PGW_OK);
     assert(stats.receive_drops == 4 && stats.backpressure_commands == 1 &&
            stats.missing_baseline == 1 && stats.unknown_frames == 1);
@@ -437,19 +548,19 @@ int main(void)
            sent.data[3] == 0x0a && sent.data[5] == 2); /* received supersedes shadow */
     bad = engine; bad.length = 7;
     assert(PGW_CANMemory_inject(&memory, &bad) == PGW_OK);
-    assert(PGW_CAN_poll(connection, 1) == PGW_OK);
+    wait_for_received(connection, 6);
     bad = engine; bad.length = 65;
     assert(PGW_CANMemory_inject(&memory, &bad) == PGW_OK);
-    assert(PGW_CAN_poll(connection, 1) == PGW_OK);
+    wait_for_received(connection, 7);
     bad = engine; bad.flags = PGW_CAN_FLAG_RTR;
     assert(PGW_CANMemory_inject(&memory, &bad) == PGW_OK);
-    assert(PGW_CAN_poll(connection, 1) == PGW_OK);
+    wait_for_received(connection, 8);
     bad = engine; bad.flags = PGW_CAN_FLAG_ERROR;
     assert(PGW_CANMemory_inject(&memory, &bad) == PGW_OK);
-    assert(PGW_CAN_poll(connection, 1) == PGW_OK);
+    wait_for_received(connection, 9);
     bad = engine; bad.flags = PGW_CAN_FLAG_ECHO;
     assert(PGW_CANMemory_inject(&memory, &bad) == PGW_OK);
-    assert(PGW_CAN_poll(connection, 1) == PGW_OK);
+    wait_for_received(connection, 10);
     assert(PGW_CAN_stats(connection, &stats) == PGW_OK);
     assert(stats.malformed_frames == 4 && stats.echoes == 1);
     memory.send_failure = PGW_IO_ERROR;
@@ -466,12 +577,16 @@ int main(void)
     assert(PGW_CAN_baseline_timestamp(connection, 0, &timestamp) == PGW_OK);
     assert(timestamp.seconds == 42 && timestamp.nanoseconds == 123);
     memory.receive_failure = PGW_IO_ERROR;
-    assert(PGW_CAN_poll(connection, 1) == PGW_IO_ERROR);
+    wait_for_io_errors(connection, 1);
     memory.receive_failure = PGW_OK;
     for (size_t i = 0; i < 16; ++i)
         assert(PGW_CANMemory_inject(&memory, &engine) == PGW_OK);
     assert(PGW_CANMemory_inject(&memory, &engine) == PGW_BACKPRESSURE);
     assert(memory.rx_overflow == 1);
+    assert(reader.iface->unregister_listener(
+        reader.state, &reader_listener) == PGW_OK);
+    assert(auxiliary.iface->unregister_listener(
+        auxiliary.state, &auxiliary_listener) == PGW_OK);
 #ifdef PGW_CAN_WRAP_ALLOCATIONS
     assert(allocations == 0); /* CAN-NOALLOC, including first traffic/failure */
     frozen = false;

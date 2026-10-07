@@ -12,6 +12,7 @@
 
 add_library(pgw_adapter_can STATIC src/can.c)
 add_library(PGW::adapter_can ALIAS pgw_adapter_can)
+find_package(Threads REQUIRED)
 set_property(TARGET pgw_adapter_can PROPERTY PGW_ADAPTER_MANIFEST
     "${CMAKE_CURRENT_SOURCE_DIR}/adapter.xml")
 pgw_generate_adapter_control_idl(pgw_adapter_can)
@@ -19,7 +20,7 @@ target_include_directories(pgw_adapter_can PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>)
 target_link_libraries(pgw_adapter_can PUBLIC PGW::core PGW::binding_signal
-    PRIVATE PGW::build_options)
+    PRIVATE PGW::build_options Threads::Threads)
 
 add_library(pgw_can_memory STATIC src/memory.c)
 add_library(PGW::can_memory ALIAS pgw_can_memory)

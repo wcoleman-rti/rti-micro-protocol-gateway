@@ -219,6 +219,9 @@ typedef struct {
     size_t state_handle_count;
     DDS_InstanceHandle_t *telemetry_handles;
     size_t telemetry_handle_count;
+    struct DDS_DataReaderListener command_listener;
+    _Atomic(const PGW_ReaderListener *) command_listener_target;
+    atomic_uint command_callbacks_inflight;
     bool initialized;
 } PGW_DDSControlTransport;
 

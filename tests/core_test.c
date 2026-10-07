@@ -13,19 +13,26 @@
 #define _POSIX_C_SOURCE 200809L
 #include "support/fake.h"
 #include "support/allocation.h"
+#include "pgw/runtime.h"
 #include <assert.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include "osapi/osapi_heap.h"
+#include "osapi/osapi_thread.h"
+#include "osapi/osapi_system.h"
 
 static void routing(void)
 {
     PGW_TestReader readers[2] = {
-        {.values = {{10, 1}, {20, 2}}, .available = 2},
+        {.values = {{10, 1}, {20, 2}, {30, 3}}, .available = 3},
         {.values = {{7, 3}}, .available = 1}
     };
     PGW_TestWriter writers[2] = {{.outcome = PGW_WRITE_BACKPRESSURE}, {0}};
+    atomic_uint write_order;
+    atomic_init(&write_order, 0);
+    writers[0].order_clock = &write_order;
+    writers[1].order_clock = &write_order;
     PGW_SampleRef refs[2][4];
     PGW_WriteResult results[2][4];
     PGW_Route routes[2];
@@ -34,20 +41,26 @@ static void routing(void)
     PGW_Event events[2];
     PGW_Diagnostics diagnostics;
     assert(PGW_test_diagnostics_initialize(&diagnostics, events, 2));
-    PGW_Service service = {.route_budget = 1,
-                            .sample_budget = 2, .diagnostics = &diagnostics};
-    assert(PGW_test_service_set_routes(&service, routes, 2) == PGW_OK);
+    PGW_Session session = {0};
+    PGW_Service service = {.sample_budget = 2, .diagnostics = &diagnostics};
+    assert(PGW_test_service_set_routes(&service, &session, routes, 2) == PGW_OK);
     assert(PGW_Service_initialize(&service) == PGW_OK);
+    assert(PGW_Service_start(&service) == PGW_OK);
     PGW_allocation_monitor(true);
-    for (size_t i = 0; i < 10000; ++i) assert(PGW_Service_step(&service) == PGW_OK);
-    assert(readers[0].borrows == 5000 && readers[0].returns == 5000);
-    assert(readers[1].borrows == 5000 && readers[1].returns == 5000);
-    assert(writers[1].sum == 35000);
+    assert(PGW_test_notify_routes(&service) == PGW_OK);
+    PGW_test_wait_dispatches(&session, 3);
+    assert(readers[0].borrows == 2 && readers[0].returns == 2);
+    assert(readers[1].borrows == 1 && readers[1].returns == 1);
+    assert(writers[1].sum == 7);
+    assert(atomic_load_explicit(&readers[0].notifications,
+                                memory_order_relaxed) >= 3);
+    assert(writers[0].writes == 2 && writers[1].writes == 1);
+    assert(writers[0].order[0] == 1 && writers[1].order[0] == 2 &&
+           writers[0].order[1] == 3);
     PGW_CounterSnapshot snapshot;
     PGW_Counters_snapshot(&routes[0].counters, 1, 1, 0, &snapshot);
-    assert(snapshot.values[PGW_COUNT_BACKPRESSURE] == 10000);
+    assert(snapshot.values[PGW_COUNT_BACKPRESSURE] == 3);
     assert(snapshot.values[PGW_COUNT_LOANS] == 0);
-    assert(atomic_load(&diagnostics.overflow) == 4998);
     PGW_Event drained[2];
     PGW_EventSeq drained_seq;
     assert(PGW_EventSeq_initialize(&drained_seq));
@@ -63,30 +76,26 @@ static void routing(void)
     char tiny[2];
     assert(!PGW_snapshot_json(&snapshot, tiny, sizeof(tiny), &bytes));
     assert(tiny[1] == 0);
-    readers[0].available = 0;
     readers[0].empty_ok = true;
-    assert(PGW_Service_step(&service) == PGW_OK);
-    assert(readers[0].borrows == 5001 && readers[0].returns == 5001);
-    readers[1].available = 0;
-    assert(PGW_Service_step(&service) == PGW_OK);
-    assert(readers[1].borrows == 5000);
+    assert(PGW_test_notify_routes(&service) == PGW_OK);
+    assert(readers[0].borrows == 3 && readers[0].returns == 3);
     readers[0].available = 2;
     writers[0].outcome = PGW_WRITE_INVALID;
-    assert(PGW_Service_step(&service) == PGW_OK);
+    assert(PGW_test_notify_routes(&service) == PGW_OK);
     PGW_Counters_snapshot(&routes[0].counters, 1, 2, 0, &snapshot);
     assert(snapshot.values[PGW_COUNT_INVALID] == 2);
     assert(PGW_Diagnostics_drain(&diagnostics, &drained_seq));
     drained_count = PGW_EventSeq_get_length(&drained_seq);
     assert(drained_count == 1 && drained[0].code == PGW_INVALID &&
            drained[0].count == 2 && drained[0].severity == 2);
-    assert(PGW_Service_step(&service) == PGW_OK);
     writers[0].partial = true;
     writers[0].outcome = PGW_WRITE_BACKPRESSURE;
-    assert(PGW_Service_step(&service) == PGW_OK);
+    readers[0].available = 2;
+    assert(PGW_test_notify_routes(&service) == PGW_OK);
     assert(writers[0].sum == 10);
-    assert(PGW_Service_step(&service) == PGW_OK);
+    readers[0].available = 2;
     writers[0].status = PGW_FATAL;
-    assert(PGW_Service_step(&service) == PGW_FATAL);
+    assert(PGW_test_notify_routes(&service) == PGW_FATAL);
     assert(routes[0].lifecycle == PGW_FAULTED);
     assert(PGW_Route_pause(&routes[0]) == PGW_FATAL);
     assert(PGW_Route_resume(&routes[0]) == PGW_FATAL);
@@ -94,8 +103,8 @@ static void routing(void)
     assert(snapshot.values[PGW_COUNT_ROUTE_FAULTS] == 1);
     assert(readers[0].borrows == readers[0].returns);
     readers[1].available = 1;
-    assert(PGW_Service_step(&service) == PGW_OK);
-    assert(writers[1].sum == 35007);
+    assert(PGW_test_notify_routes(&service) == PGW_OK);
+    assert(writers[1].sum == 14);
     assert(PGW_allocation_calls() == 0 && PGW_osapi_allocation_calls() == 0);
     PGW_allocation_monitor(false);
     assert(PGW_Service_stop(&service) == PGW_OK);
@@ -112,27 +121,30 @@ static void route_pause_resume(void)
     PGW_SampleRef refs[1];
     PGW_WriteResult results[1];
     PGW_Route route;
+    PGW_Session session = {0};
     PGW_test_route(&route, 17, &reader, &writer, refs, results, 1);
-    PGW_Service service = {.route_budget = 1, .sample_budget = 1};
-    assert(PGW_test_service_set_routes(&service, &route, 1) == PGW_OK);
+    PGW_Service service = {.sample_budget = 1};
+    assert(PGW_test_service_set_routes(&service, &session, &route, 1) == PGW_OK);
     assert(PGW_Route_pause(&route) == PGW_INVALID);
     assert(PGW_Service_initialize(&service) == PGW_OK);
-    size_t allocation_calls = PGW_allocation_calls();
-    uint64_t osapi_allocation_calls = PGW_osapi_allocation_calls();
-    PGW_allocation_monitor(true);
     assert(PGW_Route_resume(&route) == PGW_NO_CHANGE);
     assert(PGW_Route_pause(&route) == PGW_OK);
     assert(route.lifecycle == PGW_PAUSED);
     assert(PGW_Route_pause(&route) == PGW_NO_CHANGE);
-    assert(PGW_Service_step(&service) == PGW_OK);
+    assert(PGW_Service_start(&service) == PGW_OK);
+    PGW_test_wait_wakeups(&session, 1);
+    size_t allocation_calls = PGW_allocation_calls();
+    uint64_t osapi_allocation_calls = PGW_osapi_allocation_calls();
+    PGW_allocation_monitor(true);
+    assert(PGW_test_notify_routes(&service) == PGW_OK);
     assert(reader.borrows == 0 && writer.writes == 0);
     assert(PGW_Route_resume(&route) == PGW_OK);
     assert(route.lifecycle == PGW_READY);
     assert(PGW_Route_resume(&route) == PGW_NO_CHANGE);
-    assert(PGW_Service_step(&service) == PGW_OK);
+    assert(PGW_test_notify_routes(&service) == PGW_OK);
     assert(reader.borrows == 1 && reader.returns == 1 && writer.writes == 1);
     assert(PGW_Route_pause(&route) == PGW_OK);
-    assert(PGW_Service_step(&service) == PGW_OK);
+    assert(PGW_test_notify_routes(&service) == PGW_OK);
     assert(reader.borrows == 1 && writer.writes == 1);
     assert(PGW_allocation_calls() == allocation_calls);
     assert(PGW_osapi_allocation_calls() == osapi_allocation_calls);
@@ -141,6 +153,46 @@ static void route_pause_resume(void)
     assert(PGW_Route_resume(&route) == PGW_INVALID);
     assert(PGW_Service_finalize(&service) == PGW_OK);
     assert(strcmp(PGW_status_name(PGW_NO_CHANGE), "NO_CHANGE") == 0);
+}
+
+static void independent_sessions_and_shutdown_wakeup(void)
+{
+    PGW_TestReader readers[2] = {
+        {.values = {{11, 1}}, .available = 1},
+        {.values = {{22, 2}}, .available = 1}
+    };
+    PGW_TestWriter writers[2] = {
+        {.outcome = PGW_WRITE_ACCEPTED},
+        {.outcome = PGW_WRITE_ACCEPTED}
+    };
+    PGW_SampleRef references[2][1];
+    PGW_WriteResult results[2][1];
+    PGW_Route routes[2];
+    PGW_Session sessions[2] = {
+        {.name = "first"},
+        {.name = "second"}
+    };
+    for (size_t i = 0; i < 2; ++i) {
+        PGW_test_route(&routes[i], (uint32_t)i + 1, &readers[i], &writers[i],
+                       references[i], results[i], 1);
+        assert(PGW_test_session_set_routes(&sessions[i], &routes[i], 1) ==
+               PGW_OK);
+    }
+    PGW_Service service = {.sample_budget = 1};
+    assert(PGW_test_service_set_sessions(&service, sessions, 2) == PGW_OK);
+    assert(PGW_Service_initialize(&service) == PGW_OK);
+    assert(PGW_Service_start(&service) == PGW_OK);
+    PGW_test_wait_dispatches(&sessions[0], 1);
+    PGW_test_wait_dispatches(&sessions[1], 1);
+    assert(writers[0].sum == 11 && writers[1].sum == 22);
+    assert(readers[0].borrows == readers[0].returns);
+    assert(readers[1].borrows == readers[1].returns);
+    uint64_t before, after;
+    assert(PGW_Runtime_monotonic_time_ns(&before));
+    assert(PGW_Service_stop(&service) == PGW_OK);
+    assert(PGW_Runtime_monotonic_time_ns(&after) && after >= before);
+    assert(after - before < UINT64_C(500000000));
+    assert(PGW_Service_finalize(&service) == PGW_OK);
 }
 
 #if defined(PGW_ENABLE_ROUTE_LATENCY_METRICS)
@@ -170,21 +222,23 @@ static void route_latency_batches(void)
     PGW_SampleRef refs[4];
     PGW_WriteResult results[4];
     PGW_Route route;
+    PGW_Session session = {0};
     PGW_test_route(&route, 31, &reader, &writer, refs, results, 4);
     LatencyClock clock = {.values = {100, 1600, 2000, 3000, 4000}, .count = 5};
     PGW_Service service = {
-        .route_budget = 1, .sample_budget = 4,
+        .sample_budget = 4,
         .clock_ns = latency_clock, .clock_state = &clock
     };
     PGW_RouteLatencySnapshot snapshot;
-    assert(PGW_test_service_set_routes(&service, &route, 1) == PGW_OK);
+    assert(PGW_test_service_set_routes(&service, &session, &route, 1) == PGW_OK);
     assert(PGW_Route_latency_snapshot(&route, &snapshot) == PGW_INVALID);
     service.clock_ns = NULL;
     assert(PGW_Service_initialize(&service) == PGW_INVALID);
     service.clock_ns = latency_clock;
     assert(PGW_Service_initialize(&service) == PGW_OK);
+    assert(PGW_Service_start(&service) == PGW_OK);
 
-    assert(PGW_Service_step(&service) == PGW_OK);
+    assert(PGW_test_notify_routes(&service) == PGW_OK);
     assert(PGW_Route_latency_snapshot(&route, &snapshot) == PGW_OK);
     assert(snapshot.batches == 1 && snapshot.timed_batches == 1);
     assert(snapshot.samples == 3 && snapshot.accepted == 1 &&
@@ -194,7 +248,7 @@ static void route_latency_batches(void)
            snapshot.maximum_ns == 1500 && snapshot.histogram[1] == 1);
 
     reader.available = 0;
-    assert(PGW_Service_step(&service) == PGW_OK);
+    assert(PGW_test_notify_routes(&service) == PGW_OK);
     assert(PGW_Route_latency_snapshot(&route, &snapshot) == PGW_OK);
     assert(snapshot.batches == 1 && snapshot.timed_batches == 1 &&
            snapshot.clock_failures == 0);
@@ -202,7 +256,7 @@ static void route_latency_batches(void)
     reader.available = 2;
     writer.outcome = PGW_WRITE_INVALID;
     writer.partial = false;
-    assert(PGW_Service_step(&service) == PGW_OK);
+    assert(PGW_test_notify_routes(&service) == PGW_OK);
     assert(PGW_Route_latency_snapshot(&route, &snapshot) == PGW_OK);
     assert(snapshot.batches == 2 && snapshot.timed_batches == 2);
     assert(snapshot.samples == 5 && snapshot.invalid == 2);
@@ -211,7 +265,7 @@ static void route_latency_batches(void)
 
     reader.available = 1;
     writer.outcome = PGW_WRITE_ACCEPTED;
-    assert(PGW_Service_step(&service) == PGW_OK);
+    assert(PGW_test_notify_routes(&service) == PGW_OK);
     assert(PGW_Route_latency_snapshot(&route, &snapshot) == PGW_OK);
     assert(snapshot.batches == 3 && snapshot.timed_batches == 2);
     assert(snapshot.samples == 6 && snapshot.accepted == 2 &&
@@ -237,15 +291,17 @@ static void route_latency_disabled_has_no_clock_overhead(void)
     PGW_SampleRef refs[1];
     PGW_WriteResult results[1];
     PGW_Route route;
+    PGW_Session session = {0};
     size_t clock_calls = 0;
     PGW_test_route(&route, 31, &reader, &writer, refs, results, 1);
     PGW_Service service = {
-        .route_budget = 1, .sample_budget = 1,
+        .sample_budget = 1,
         .clock_ns = counted_clock, .clock_state = &clock_calls
     };
-    assert(PGW_test_service_set_routes(&service, &route, 1) == PGW_OK);
+    assert(PGW_test_service_set_routes(&service, &session, &route, 1) == PGW_OK);
     assert(PGW_Service_initialize(&service) == PGW_OK);
-    assert(PGW_Service_step(&service) == PGW_OK);
+    assert(PGW_Service_start(&service) == PGW_OK);
+    assert(PGW_test_notify_routes(&service) == PGW_OK);
     assert(clock_calls == 0);
     assert(PGW_Service_stop(&service) == PGW_OK);
     assert(PGW_Service_finalize(&service) == PGW_OK);
@@ -254,23 +310,25 @@ static void route_latency_disabled_has_no_clock_overhead(void)
 
 #if defined(PGW_ENABLE_REMOTE_CONTROL)
 typedef struct {
+    const PGW_ReaderListener *listener;
     PGW_ControlCommand commands[8];
     PGW_ControlCorrelation correlations[8];
     PGW_ControlState states[8];
     PGW_ControlResult results[8];
-    size_t command_count;
-    size_t command_cursor;
+    atomic_size_t command_count;
+    atomic_size_t command_cursor;
     size_t state_attempts;
     size_t state_writes;
     size_t result_attempts;
-    size_t result_writes;
+    atomic_size_t result_writes;
     size_t fail_state_writes;
     size_t fail_result_writes;
     size_t telemetry_reads;
-    size_t telemetry_attempts;
+    atomic_size_t telemetry_attempts;
     size_t telemetry_writes;
     size_t fail_telemetry_writes;
     uint64_t clock_ns;
+    bool realtime_clock;
     size_t adapter_calls;
     PGW_Status adapter_status;
 } ControlHarness;
@@ -279,11 +337,69 @@ static PGW_Status control_take(void *state, PGW_ControlCommand *command,
                                PGW_ControlCorrelation *correlation)
 {
     ControlHarness *harness = state;
-    if (harness->command_cursor == harness->command_count) return PGW_NO_DATA;
-    size_t index = harness->command_cursor++;
+    size_t cursor = atomic_load_explicit(&harness->command_cursor,
+                                         memory_order_acquire);
+    size_t count = atomic_load_explicit(&harness->command_count,
+                                        memory_order_acquire);
+    if (cursor == count) return PGW_NO_DATA;
+    size_t index = cursor;
+    atomic_store_explicit(&harness->command_cursor, cursor + 1,
+                          memory_order_release);
     *command = harness->commands[index];
     *correlation = harness->correlations[index];
     return PGW_OK;
+}
+
+static PGW_Status control_register_listener(
+    void *state, const PGW_ReaderListener *listener)
+{
+    ControlHarness *harness = state;
+    if (!harness || !listener || !listener->on_data_available ||
+        (harness->listener && harness->listener != listener))
+        return PGW_INVALID;
+    harness->listener = listener;
+    if (atomic_load_explicit(&harness->command_cursor, memory_order_acquire) <
+        atomic_load_explicit(&harness->command_count, memory_order_acquire))
+        listener->on_data_available(listener->context);
+    return PGW_OK;
+}
+
+static PGW_Status control_unregister_listener(
+    void *state, const PGW_ReaderListener *listener)
+{
+    ControlHarness *harness = state;
+    if (!harness || harness->listener != listener) return PGW_INVALID;
+    harness->listener = NULL;
+    return PGW_OK;
+}
+
+static PGW_Status control_rearm_commands(void *state)
+{
+    ControlHarness *harness = state;
+    if (!harness) return PGW_INVALID;
+    if (atomic_load_explicit(&harness->command_cursor, memory_order_acquire) <
+            atomic_load_explicit(&harness->command_count, memory_order_acquire) &&
+        harness->listener)
+        harness->listener->on_data_available(harness->listener->context);
+    return PGW_OK;
+}
+
+static void control_signal(ControlHarness *harness)
+{
+    assert(harness->listener);
+    harness->listener->on_data_available(harness->listener->context);
+}
+
+static void wait_for_commands(ControlHarness *harness, size_t count)
+{
+    for (size_t i = 0; i < 2000 &&
+         atomic_load_explicit(&harness->result_writes,
+                              memory_order_acquire) < count; ++i)
+        OSAPI_Thread_sleep(1);
+    assert(atomic_load_explicit(&harness->command_cursor,
+                                memory_order_acquire) >= count);
+    assert(atomic_load_explicit(&harness->result_writes,
+                                memory_order_acquire) >= count);
 }
 
 static PGW_Status control_write_state(void *state, const PGW_ControlState *snapshot)
@@ -303,8 +419,12 @@ static PGW_Status control_write_result(void *state, const PGW_ControlResult *res
 {
     ControlHarness *harness = state;
     ++harness->result_attempts;
-    assert(harness->result_writes < 8);
-    harness->results[harness->result_writes++] = *result;
+    size_t index = atomic_load_explicit(&harness->result_writes,
+                                        memory_order_relaxed);
+    assert(index < 8);
+    harness->results[index] = *result;
+    atomic_store_explicit(&harness->result_writes, index + 1,
+                          memory_order_release);
     if (harness->fail_result_writes) {
         --harness->fail_result_writes;
         return PGW_BACKPRESSURE;
@@ -316,7 +436,8 @@ static PGW_Status control_write_telemetry(void *state,
                                           const PGW_ControlTelemetry *sample)
 {
     ControlHarness *harness = state;
-    ++harness->telemetry_attempts;
+    atomic_fetch_add_explicit(&harness->telemetry_attempts, 1,
+                              memory_order_release);
     assert(sample->metric_id == 0 && sample->resource_id == 0 &&
            sample->telemetry_kind == 0 && sample->scalar.type == PGW_CONTROL_SCALAR_UINT64 &&
            !strcmp(sample->unit, "frames"));
@@ -351,17 +472,22 @@ static PGW_Status control_read_telemetry(void *state, const char *name,
 static bool control_clock(void *state, uint64_t *out)
 {
     ControlHarness *harness = state;
+    if (harness->realtime_clock)
+        return PGW_Runtime_monotonic_time_ns(out);
     *out = harness->clock_ns;
     return true;
 }
 
 static const PGW_ControlEndpointI control_endpoint_iface = {
-    PGW_CONTROL_ABI_VERSION,
-    sizeof(PGW_ControlEndpointI),
-    control_take,
-    control_write_state,
-    control_write_result,
-    control_write_telemetry
+    .version = PGW_CONTROL_ABI_VERSION,
+    .size = sizeof(PGW_ControlEndpointI),
+    .register_listener = control_register_listener,
+    .unregister_listener = control_unregister_listener,
+    .take_command = control_take,
+    .rearm_commands = control_rearm_commands,
+    .write_state = control_write_state,
+    .write_result = control_write_result,
+    .write_telemetry = control_write_telemetry
 };
 
 static const PGW_ControlAdapterI control_input_adapter = {
@@ -404,8 +530,9 @@ static void remote_control_routes_are_bounded_and_allocation_free(void)
     PGW_SampleRef refs[1];
     PGW_WriteResult writes[1];
     PGW_Route route;
+    PGW_Session session = {0};
     PGW_test_route(&route, 17, &reader, &writer, refs, writes, 1);
-    PGW_Service service = {.route_budget = 1, .sample_budget = 1};
+    PGW_Service service = {.sample_budget = 1};
     PGW_ControlResource resource = {
         .id = 42,
         .kind = PGW_CONTROL_RESOURCE_ROUTE,
@@ -415,7 +542,7 @@ static void remote_control_routes_are_bounded_and_allocation_free(void)
         .route = &route
     };
     PGW_ControlEndpoint endpoint = {&harness, &control_endpoint_iface};
-    assert(PGW_test_service_set_routes(&service, &route, 1) == PGW_OK);
+    assert(PGW_test_service_set_routes(&service, &session, &route, 1) == PGW_OK);
     PGW_ControlAdapterI invalid_adapter = control_input_adapter;
     invalid_adapter.action_mask = 0;
     PGW_ControlResource invalid_resource = {
@@ -424,25 +551,25 @@ static void remote_control_routes_are_bounded_and_allocation_free(void)
         .command_capabilities = PGW_CONTROL_ACTION_MASK(PGW_CONTROL_INPUT_ENABLE),
         .adapter = &invalid_adapter
     };
-    assert(PGW_Service_set_control(&service, endpoint, &invalid_resource, 1) == PGW_INVALID);
-    assert(PGW_Service_set_control(&service, endpoint, &resource, 1) == PGW_OK);
+    assert(PGW_Service_set_control(&service, &session, endpoint,
+                                   &invalid_resource, 1) == PGW_INVALID);
+    assert(PGW_Service_set_control(&service, &session, endpoint,
+                                   &resource, 1) == PGW_OK);
     queue_control(&harness, 0, 42, PGW_CONTROL_ROUTE_PAUSE);
     queue_control(&harness, 1, 42, PGW_CONTROL_ROUTE_PAUSE);
     queue_control(&harness, 2, 42, PGW_CONTROL_ROUTE_RESUME);
     queue_control(&harness, 3, 42, PGW_CONTROL_ROUTE_RESUME);
-    queue_control(&harness, 4, 42, PGW_CONTROL_ROUTE_PAUSE);
-    queue_control(&harness, 5, 42, PGW_CONTROL_ROUTE_RESUME);
-    queue_control(&harness, 6, 999, PGW_CONTROL_ROUTE_PAUSE);
-    queue_control(&harness, 7, 42, PGW_CONTROL_CONNECTION_UP);
-    harness.command_count = 5;
+    harness.command_count = 4;
     harness.fail_result_writes = 1;
     assert(PGW_Service_initialize(&service) == PGW_OK);
+    assert(PGW_Service_start(&service) == PGW_OK);
     assert(harness.state_writes == 1);
     assert(harness.states[0].resource_id == 42 &&
            harness.states[0].status == PGW_CONTROL_STATUS_UP);
     PGW_allocation_monitor(true);
-    assert(PGW_Service_step(&service) == PGW_OK);
-    assert(harness.command_cursor == PGW_CONTROL_MAX_COMMANDS_PER_STEP);
+    control_signal(&harness);
+    wait_for_commands(&harness, 4);
+    PGW_test_wait_dispatches(&session, 1);
     assert(harness.results[0].outcome == PGW_CONTROL_OUTCOME_APPLIED);
     assert(harness.results[1].outcome == PGW_CONTROL_OUTCOME_NO_CHANGE);
     assert(harness.results[2].outcome == PGW_CONTROL_OUTCOME_APPLIED);
@@ -454,13 +581,21 @@ static void remote_control_routes_are_bounded_and_allocation_free(void)
     assert(reader.borrows == 1 && writer.writes == 1);
 
     harness.fail_state_writes = 1;
-    assert(PGW_Service_step(&service) == PGW_OK);
-    assert(harness.command_cursor == 5 && route.lifecycle == PGW_PAUSED);
+    queue_control(&harness, 4, 42, PGW_CONTROL_ROUTE_PAUSE);
+    harness.command_count = 5;
+    control_signal(&harness);
+    wait_for_commands(&harness, 5);
+    assert(route.lifecycle == PGW_PAUSED);
     assert(harness.state_attempts == 4 && harness.state_writes == 3);
-    assert(reader.borrows == 1 && writer.writes == 1);
+
+    queue_control(&harness, 5, 42, PGW_CONTROL_ROUTE_RESUME);
+    queue_control(&harness, 6, 999, PGW_CONTROL_ROUTE_PAUSE);
+    queue_control(&harness, 7, 42, PGW_CONTROL_CONNECTION_UP);
     harness.command_count = 8;
-    assert(PGW_Service_step(&service) == PGW_OK);
-    assert(harness.command_cursor == 8 && route.lifecycle == PGW_RUNNING);
+    control_signal(&harness);
+    wait_for_commands(&harness, 8);
+    assert(route.lifecycle == PGW_READY);
+    assert(reader.borrows == 1 && writer.writes == 1);
     assert(harness.states[3].status == PGW_CONTROL_STATUS_PAUSED);
     assert(harness.states[4].status == PGW_CONTROL_STATUS_UP);
     assert(harness.results[6].outcome == PGW_CONTROL_OUTCOME_INVALID);
@@ -486,8 +621,9 @@ static void remote_control_adapter_actions_are_idempotent(void)
     PGW_SampleRef refs[1];
     PGW_WriteResult writes[1];
     PGW_Route route;
+    PGW_Session session = {0};
     PGW_test_route(&route, 18, &reader, &writer, refs, writes, 1);
-    PGW_Service service = {.route_budget = 1, .sample_budget = 1};
+    PGW_Service service = {.sample_budget = 1};
     PGW_ControlResource resource = {
         .id = 3,
         .kind = PGW_CONTROL_RESOURCE_INPUT,
@@ -498,15 +634,18 @@ static void remote_control_adapter_actions_are_idempotent(void)
         .adapter_state = &harness
     };
     PGW_ControlEndpoint endpoint = {&harness, &control_endpoint_iface};
-    assert(PGW_test_service_set_routes(&service, &route, 1) == PGW_OK);
-    assert(PGW_Service_set_control(&service, endpoint, &resource, 1) == PGW_OK);
+    assert(PGW_test_service_set_routes(&service, &session, &route, 1) == PGW_OK);
+    assert(PGW_Service_set_control(&service, &session, endpoint,
+                                   &resource, 1) == PGW_OK);
     queue_control(&harness, 0, 3, PGW_CONTROL_INPUT_ENABLE);
     queue_control(&harness, 1, 3, PGW_CONTROL_INPUT_ENABLE);
     queue_control(&harness, 2, 3, PGW_CONTROL_INPUT_DISABLE);
     harness.command_count = 3;
     assert(PGW_Service_initialize(&service) == PGW_OK);
+    assert(PGW_Service_start(&service) == PGW_OK);
     assert(harness.states[0].status == PGW_CONTROL_STATUS_UNKNOWN);
-    assert(PGW_Service_step(&service) == PGW_OK);
+    control_signal(&harness);
+    wait_for_commands(&harness, 3);
     assert(harness.adapter_calls == 2);
     assert(harness.results[0].outcome == PGW_CONTROL_OUTCOME_APPLIED);
     assert(harness.results[1].outcome == PGW_CONTROL_OUTCOME_NO_CHANGE);
@@ -519,15 +658,18 @@ static void remote_control_adapter_actions_are_idempotent(void)
 
 static void remote_control_telemetry_is_periodic_and_failure_bounded(void)
 {
-    ControlHarness harness = {.fail_telemetry_writes = 1};
+    ControlHarness harness = {
+        .fail_telemetry_writes = 1,
+        .realtime_clock = true
+    };
     PGW_TestReader reader = {0};
     PGW_TestWriter writer = {.outcome = PGW_WRITE_ACCEPTED};
     PGW_SampleRef refs[1];
     PGW_WriteResult writes[1];
     PGW_Route route;
+    PGW_Session session = {0};
     PGW_test_route(&route, 19, &reader, &writer, refs, writes, 1);
     PGW_Service service = {
-        .route_budget = 1,
         .sample_budget = 1,
         .clock_ns = control_clock,
         .clock_state = &harness
@@ -551,19 +693,25 @@ static void remote_control_telemetry_is_periodic_and_failure_bounded(void)
         .adapter_state = &harness
     };
     PGW_ControlEndpoint endpoint = {&harness, &control_endpoint_iface};
-    assert(PGW_test_service_set_routes(&service, &route, 1) == PGW_OK);
-    assert(PGW_Service_set_control(&service, endpoint, &resource, 1) == PGW_OK);
+    assert(PGW_test_service_set_routes(&service, &session, &route, 1) == PGW_OK);
+    assert(PGW_Service_set_control(&service, &session, endpoint,
+                                   &resource, 1) == PGW_OK);
     assert(PGW_Service_set_telemetry(&service, &metric, 1, 50, 100) == PGW_INVALID);
     assert(PGW_Service_set_telemetry(&service, &metric, 1, 100, 100) == PGW_OK);
     assert(PGW_Service_initialize(&service) == PGW_OK);
+    assert(PGW_Service_start(&service) == PGW_OK);
     PGW_allocation_monitor(true);
-    for (unsigned i = 0; i < 5; ++i) {
-        harness.clock_ns += UINT64_C(50000000);
-        assert(PGW_Service_step(&service) == PGW_OK);
+    PGW_ControlCounters counters = {0};
+    for (unsigned i = 0; i < 200; ++i) {
+        assert(PGW_Service_control_counters(&service, &counters) == PGW_OK);
+        if (counters.telemetry_samples +
+                counters.telemetry_write_failures >= 2) break;
+        OSAPI_Thread_sleep(5);
     }
-    PGW_ControlCounters counters;
     assert(PGW_Service_control_counters(&service, &counters) == PGW_OK);
-    assert(harness.telemetry_attempts == 2 && harness.telemetry_reads == 2);
+    assert(atomic_load_explicit(&harness.telemetry_attempts,
+                                memory_order_acquire) == 2);
+    assert(harness.telemetry_reads == 2);
     assert(harness.telemetry_writes == 1);
     assert(counters.telemetry_write_failures == 1 &&
            counters.telemetry_samples == 1 && counters.telemetry_read_failures == 0);
@@ -575,7 +723,13 @@ static void remote_control_telemetry_is_periodic_and_failure_bounded(void)
 #endif
 
 typedef struct { double temperature; uint32_t sensor; } Temperature;
-typedef struct { Temperature value; bool loaned; size_t returns; } TemperatureReader;
+typedef struct {
+    Temperature value;
+    bool available;
+    bool loaned;
+    size_t returns;
+    const PGW_ReaderListener *listener;
+} TemperatureReader;
 typedef struct { double received; } TemperatureWriter;
 
 static PGW_Status temperature_copy(const PGW_Sample *sample, void *out, size_t bytes)
@@ -589,9 +743,32 @@ static PGW_Status temperature_read(void *state, PGW_SampleSeq *seq, size_t budge
 {
     TemperatureReader *r = state;
     if (!budget || r->loaned) return PGW_LOAN_ERROR;
+    if (!r->available) return PGW_NO_DATA;
     assert(PGW_SampleSeq_set_length(seq, 1));
     *PGW_SampleSeq_get_reference(seq, 0) = (const PGW_Sample *)&r->value;
     r->loaned = true;
+    r->available = false;
+    return PGW_OK;
+}
+
+static PGW_Status temperature_register_listener(
+    void *state, const PGW_ReaderListener *listener)
+{
+    TemperatureReader *reader = state;
+    if (!listener || !listener->on_data_available || reader->listener)
+        return PGW_INVALID;
+    reader->listener = listener;
+    if (reader->available)
+        listener->on_data_available(listener->context);
+    return PGW_OK;
+}
+
+static PGW_Status temperature_unregister_listener(
+    void *state, const PGW_ReaderListener *listener)
+{
+    TemperatureReader *reader = state;
+    if (reader->listener != listener) return PGW_INVALID;
+    reader->listener = NULL;
     return PGW_OK;
 }
 
@@ -632,38 +809,48 @@ static void second_schema_and_loan_errors(void)
     const PGW_Representation rep = {
         &schema, "temperature", sizeof(Temperature), _Alignof(Temperature), &ops, NULL
     };
-    const PGW_StreamReaderI reader_ops = {PGW_ABI_VERSION, sizeof(reader_ops), temperature_read, temperature_return};
+    const PGW_StreamReaderI reader_ops = {
+        .version = PGW_ABI_VERSION,
+        .size = sizeof(reader_ops),
+        .read = temperature_read,
+        .return_loan = temperature_return,
+        .register_listener = temperature_register_listener,
+        .unregister_listener = temperature_unregister_listener
+    };
     const PGW_StreamWriterI writer_ops = {PGW_ABI_VERSION, sizeof(writer_ops), temperature_bind, temperature_write};
-    TemperatureReader reader = {.value = {23.75, 42}};
+    TemperatureReader reader = {.value = {23.75, 42}, .available = true};
     TemperatureWriter writer = {0};
     PGW_SampleRef refs[1];
     PGW_WriteResult results[1];
     PGW_Route route = {.id = 9, .reader = {&reader, &reader_ops, &rep},
         .writer = {&writer, &writer_ops, &rep}};
+    PGW_Session session = {0};
     assert(PGW_test_route_initialize_storage(&route, refs, results, 1) == PGW_OK);
-    PGW_Service s = {.route_budget = 1, .sample_budget = 1};
-    assert(PGW_test_service_set_routes(&s, &route, 1) == PGW_OK);
+    PGW_Service s = {.sample_budget = 1};
+    assert(PGW_test_service_set_routes(&s, &session, &route, 1) == PGW_OK);
     assert(PGW_Service_initialize(&s) == PGW_OK);
-    assert(PGW_Service_step(&s) == PGW_OK);
+    assert(PGW_Service_start(&s) == PGW_OK);
+    assert(PGW_test_notify_routes(&s) == PGW_OK);
     assert(writer.received == 23.75 && reader.returns == 1);
     assert(PGW_Service_stop(&s) == PGW_OK);
     assert(PGW_Service_finalize(&s) == PGW_OK);
     PGW_TestReader bad_reader = {.values = {{1, 1}}, .available = 1, .return_status = PGW_LOAN_ERROR};
     PGW_TestWriter sink = {0};
     PGW_test_route(&route, 1, &bad_reader, &sink, refs, results, 1);
-    s.lifecycle = PGW_UNINITIALIZED;
-    assert(PGW_test_service_set_routes(&s, &route, 1) == PGW_OK);
+    assert(PGW_test_service_set_routes(&s, &session, &route, 1) == PGW_OK);
     assert(PGW_Service_initialize(&s) == PGW_OK);
-    assert(PGW_Service_step(&s) == PGW_LOAN_ERROR);
+    assert(PGW_Service_start(&s) == PGW_OK);
+    assert(PGW_test_notify_routes(&s) == PGW_LOAN_ERROR);
     assert(bad_reader.returns == 1 && route.lifecycle == PGW_FAULTED);
     assert(!strcmp(route.error.operation, "return_loan"));
     assert(PGW_Service_stop(&s) == PGW_OK);
     assert(PGW_Service_finalize(&s) == PGW_OK);
     bad_reader = (PGW_TestReader){.read_status = PGW_IO_ERROR};
     PGW_test_route(&route, 1, &bad_reader, &sink, refs, results, 1);
-    assert(PGW_test_service_set_routes(&s, &route, 1) == PGW_OK);
+    assert(PGW_test_service_set_routes(&s, &session, &route, 1) == PGW_OK);
     assert(PGW_Service_initialize(&s) == PGW_OK);
-    assert(PGW_Service_step(&s) == PGW_IO_ERROR);
+    assert(PGW_Service_start(&s) == PGW_OK);
+    assert(PGW_test_notify_routes(&s) == PGW_IO_ERROR);
     assert(bad_reader.returns == 0);
     assert(PGW_Service_stop(&s) == PGW_OK);
     assert(PGW_Service_finalize(&s) == PGW_OK);
@@ -687,15 +874,17 @@ static void clock_failure_is_not_zero_timestamp(void)
     PGW_RouteSeq route_storage;
     assert(PGW_RouteSeq_initialize(&route_storage));
     assert(PGW_RouteSeq_loan_contiguous(&route_storage, routes, 1, 1));
+    PGW_Session session = {0};
     PGW_Event event_storage[2];
     PGW_Diagnostics diagnostics;
     assert(PGW_test_diagnostics_initialize(&diagnostics, event_storage, 2));
-    PGW_Service service = {.route_budget = 1, .sample_budget = 1,
+    PGW_Service service = {.sample_budget = 1,
                            .diagnostics = &diagnostics,
                            .clock_ns = unavailable_clock};
-    assert(PGW_Service_set_routes(&service, &route_storage) == PGW_OK);
+    assert(PGW_test_service_set_routes(&service, &session, routes, 1) == PGW_OK);
     assert(PGW_Service_initialize(&service) == PGW_OK);
-    assert(PGW_Service_step(&service) == PGW_IO_ERROR);
+    assert(PGW_Service_start(&service) == PGW_OK);
+    assert(PGW_test_notify_routes(&service) == PGW_IO_ERROR);
     assert(input.borrows == 1 && input.returns == 1);
     PGW_CounterSnapshot snapshot;
     assert(PGW_Counters_snapshot(&routes[0].counters, 17, 1, 0, &snapshot));
@@ -743,12 +932,12 @@ static void bounds_and_schema(void)
     assert(PGW_SizeSeq_initialize(&capacity_seq));
     assert(PGW_SizeSeq_loan_contiguous(&capacity_seq, capacities, 2, 2));
     PGW_CoreResourceReport report;
-    assert(PGW_core_resource_report(&capacity_seq, true, 8, &report) == PGW_OK);
+    assert(PGW_core_resource_report(&capacity_seq, 1, true, 8, &report) == PGW_OK);
     assert(report.sample_references_bytes == 6 * sizeof(PGW_SampleRef));
     assert(report.diagnostics_bytes == sizeof(PGW_Diagnostics) + 8 * sizeof(PGW_Event));
     assert(report.total_bytes == report.objects_bytes + report.sample_references_bytes +
                                 report.write_results_bytes + report.diagnostics_bytes);
-    assert(PGW_core_resource_report(&capacity_seq, true, SIZE_MAX, &report) == PGW_CAPACITY);
+    assert(PGW_core_resource_report(&capacity_seq, 1, true, SIZE_MAX, &report) == PGW_CAPACITY);
     assert(PGW_SizeSeq_unloan(&capacity_seq));
     assert(PGW_SizeSeq_finalize(&capacity_seq));
     unsigned char storage[65];
@@ -805,11 +994,12 @@ static void bounds_and_schema(void)
     PGW_Route route;
     PGW_SampleRef refs[4];
     PGW_WriteResult results[4];
+    PGW_Session session = {0};
     PGW_test_route(&route, 1, &r, &w, refs, results, 4);
     route.writer.representation = &second;
     w.target_schema = second.schema;
-    PGW_Service s = {.route_budget = 1, .sample_budget = 4};
-    assert(PGW_test_service_set_routes(&s, &route, 1) == PGW_OK);
+    PGW_Service s = {.sample_budget = 4};
+    assert(PGW_test_service_set_routes(&s, &session, &route, 1) == PGW_OK);
     assert(PGW_Service_initialize(&s) == PGW_UNSUPPORTED);
     assert(s.lifecycle == PGW_FAULTED);
     other = (PGW_Schema){"test.counter", 1, "different-layout-same-name"};
@@ -817,7 +1007,7 @@ static void bounds_and_schema(void)
     route.writer.representation = &second;
     w.target_schema = second.schema;
     s.lifecycle = PGW_UNINITIALIZED;
-    assert(PGW_test_service_set_routes(&s, &route, 1) == PGW_OK);
+    assert(PGW_test_service_set_routes(&s, &session, &route, 1) == PGW_OK);
     assert(PGW_Service_initialize(&s) == PGW_UNSUPPORTED);
     assert(!strcmp(route.error.operation, "bind"));
     PGW_SampleSeq seq;
@@ -923,6 +1113,8 @@ static void concurrent_capture(void)
 
 int main(void)
 {
+    assert(PGW_Runtime_initialize());
+    assert(DDS_DomainParticipantFactory_get_instance());
     PGW_allocation_monitor(true);
     void *volatile p = malloc(32);
     assert(p);
@@ -958,6 +1150,7 @@ int main(void)
     bounds_and_schema();
     routing();
     route_pause_resume();
+    independent_sessions_and_shutdown_wakeup();
 #if defined(PGW_ENABLE_ROUTE_LATENCY_METRICS)
     route_latency_batches();
 #else
@@ -971,5 +1164,6 @@ int main(void)
     second_schema_and_loan_errors();
     clock_failure_is_not_zero_timestamp();
     concurrent_capture();
+    assert(OSAPI_System_finalize());
     return 0;
 }

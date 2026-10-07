@@ -29,9 +29,13 @@ def generate(gateway, common_idl, output, adapter_manifests=(), resource_header=
     if not common.is_file():
         raise ConfigError(f"common control IDL does not exist: {common}")
     service = validate_gateway_xml(gateway)
+    control = service.find("control")
+    session_names = {session.get("name") for session in service.findall("session")}
+    if control is not None and control.get("session") not in session_names:
+        raise ConfigError("control session is not configured")
     route_names, connection_adapters, stream_adapters, stream_roles = control_catalog(service)
     resources, metrics, minimum_period_ms, max_controller_peers = compile_control_resources(
-        service.find("control"), route_names, connection_adapters,
+        control, route_names, connection_adapters,
         stream_adapters, stream_roles, adapter_manifests)
     if not resources:
         raise ConfigError("controller IDL requires an explicit non-empty control section")

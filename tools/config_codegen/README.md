@@ -33,8 +33,11 @@ slot is bounded loan/replacement storage, not an increased retention depth.
 The intentionally small grammar contains compiled bindings, DDS connections
 with named endpoint references, external native CAN stream catalogs, and routes.
 CAN transports are supplied by the application; the XML never secretly chooses
-a physical interface. Generated native capacities, CAN polling/write budgets,
-route graph, scheduler budgets, and diagnostics period are consumed by the example.
+a physical interface. Generated native capacities, CAN receiver/write budgets,
+explicit session membership, route graph, and sample budgets are consumed by the
+example. The compiler does not define a periodic route scheduler or diagnostics
+period; readiness is listener-driven and configured control telemetry uses
+monotonic time deadlines.
 This is not Routing Service XML or a general runtime configuration loader.
 
 `PGW_ENABLE_REMOTE_CONTROL` is a compile-time option, defaults OFF, and requires

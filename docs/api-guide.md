@@ -13,13 +13,15 @@ search or alphabetical index when you already know a symbol.
 Start with the [core and lifecycle API](reference/group__pgw__core__api.html)
 and the [core contracts guide](docs/core.md). Initialize a `PGW_Registry`,
 register adapters and representations, provision route storage, and attach the
-route catalog to a `PGW_Service`. Then initialize and step the service, stop it,
-and finalize its caller-owned storage. The main entry points are
+route catalog to a `PGW_Service`. Then initialize and start the service; one worker processes each
+session's reader notifications until the application stops it. Finalize its
+caller-owned storage after all session workers have stopped. The main entry points are
 `PGW_Registry_initialize`, `PGW_Registry_register_adapter`,
 `PGW_Registry_register_binding`, `PGW_Route_initialize_storage`,
-`PGW_Service_set_routes`, `PGW_Service_initialize`, `PGW_Service_step`,
-`PGW_Service_stop`, and `PGW_Service_finalize`. For periodic execution, see
-`PGW_Runner` in the core group.
+`PGW_Session_set_routes`, `PGW_Service_set_sessions`,
+`PGW_Service_initialize`, `PGW_Service_start`, `PGW_Service_stop`, and
+`PGW_Service_finalize`. See the [event-driven session runtime](session-runtime.md)
+for listener registration, queue re-arming, callback lifetime, and fairness.
 
 ## Connect CAN
 

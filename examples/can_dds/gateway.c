@@ -28,8 +28,7 @@
 #include "control_resources.h"
 #endif
 extern const PGW_DDSConfig pgw_config_gateway;
-extern const unsigned pgw_config_route_budget, pgw_config_sample_budget;
-extern const unsigned pgw_config_diagnostic_period_steps;
+extern const unsigned pgw_config_sample_budget;
 static PGW_CodecStatus decode(void *context, size_t index, const uint8_t *bytes,
                              size_t length, PGW_Signal *values, size_t capacity, size_t *count)
 {
@@ -112,15 +111,18 @@ int main(int argc, char **argv)
     PGW_Route routes[4] = {{0}};
     PGW_RouteSeq route_sequence;
     bool route_sequence_initialized = false, route_sequence_borrowed = false;
+    PGW_Session sessions[1] = {{0}};
+    PGW_SessionSeq session_sequence;
+    bool session_sequence_initialized = false, session_sequence_borrowed = false;
     PGW_SampleSeq route_samples[4];
     PGW_WriteResultSeq route_results[4];
     bool samples_initialized[4] = {false}, samples_borrowed[4] = {false};
     bool results_initialized[4] = {false}, results_borrowed[4] = {false};
     PGW_SampleRef refs[4][8];
     PGW_WriteResult results[4][8];
-    PGW_Service service = {.route_budget = 4, .sample_budget = 8,
+    PGW_Service service = {.sample_budget = 8,
                           .clock_ns = PGW_Runtime_monotonic_clock};
-    unsigned long steps = 10000;
+    unsigned long duration_ms = 10000;
 #if PGW_DDS_DIAGNOSTICS
     PGW_StreamWriter exporter;
 #endif
@@ -129,10 +131,10 @@ int main(int argc, char **argv)
     bool closed = true;
     if (argc < 2) {
         fprintf(stderr, "usage: %s (--memory | explicitly-selected-CAN-interface)"
-                " [--control-domain id] [steps]\n", argv[0]);
+                " [--control-domain id] [duration-ms]\n", argv[0]);
         return 2;
     }
-    bool steps_seen = false;
+    bool duration_seen = false;
     for (int i = 2; i < argc; ++i) {
         if (!strcmp(argv[i], "--control-domain")) {
 #if defined(PGW_ENABLE_REMOTE_CONTROL)
@@ -158,11 +160,11 @@ int main(int argc, char **argv)
             return 2;
 #endif
         } else {
-            if (steps_seen) return 2;
+            if (duration_seen) return 2;
             char *end;
-            steps = strtoul(argv[i], &end, 10);
-            if (!steps || *end || steps > 100000000) return 2;
-            steps_seen = true;
+            duration_ms = strtoul(argv[i], &end, 10);
+            if (!duration_ms || *end || duration_ms > 100000000) return 2;
+            duration_seen = true;
         }
     }
 #if defined(PGW_ENABLE_REMOTE_CONTROL)
@@ -269,6 +271,15 @@ int main(int argc, char **argv)
                    name, history.instances, history.samples, history.samples_per_instance,
                    history.history_depth, history.blocking_seconds, history.blocking_nanoseconds);
         }
+        if (PGW_CompiledSessionSeq_get_length(&pgw_config_sessions) != 1 ||
+            PGW_CompiledRouteSeq_get_length(&pgw_config_routes) != 4)
+            goto done;
+        const PGW_CompiledSession *compiled_session =
+            PGW_CompiledSessionSeq_get_reference(&pgw_config_sessions, 0);
+        if (!compiled_session || compiled_session->route_offset != 0 ||
+            compiled_session->route_count != 4)
+            goto done;
+        sessions[0].name = compiled_session->name;
     }
 #if PGW_DDS_DIAGNOSTICS
     if (PGW_DDSConnextMicroAdapter.connection->writer(dds, "diagnostics", &exporter) != PGW_OK ||
@@ -294,8 +305,15 @@ int main(int argc, char **argv)
     if (!PGW_RouteSeq_loan_contiguous(&route_sequence, routes, 4, 4)) goto done;
     route_sequence_borrowed = true;
     if (PGW_example_attach_routes(can, dds, &route_sequence) != PGW_OK) goto done;
-    if (PGW_Service_set_routes(&service, &route_sequence) != PGW_OK) goto done;
-    service.route_budget = pgw_config_route_budget;
+    if (PGW_Session_set_routes(&sessions[0], &route_sequence) != PGW_OK)
+        goto done;
+    if (!PGW_SessionSeq_initialize(&session_sequence)) goto done;
+    session_sequence_initialized = true;
+    if (!PGW_SessionSeq_loan_contiguous(&session_sequence, sessions, 1, 1))
+        goto done;
+    session_sequence_borrowed = true;
+    if (PGW_Service_set_sessions(&service, &session_sequence) != PGW_OK)
+        goto done;
     service.sample_budget = pgw_config_sample_budget;
 #if defined(PGW_ENABLE_REMOTE_CONTROL)
     if (control_options.enabled &&
@@ -303,6 +321,7 @@ int main(int argc, char **argv)
                 PGW_CONTROL_RESOURCE_COUNT, &attached_control_resources) != PGW_OK ||
          attached_control_resources != pgw_control_resource_count ||
          PGW_Service_set_control(&service,
+             &sessions[0],
              PGW_DDS_control_endpoint(&control_transport),
              control_resources, attached_control_resources) != PGW_OK))
         goto done;
@@ -315,34 +334,31 @@ int main(int argc, char **argv)
 #endif
 #endif
     if (PGW_Service_initialize(&service) != PGW_OK) goto done;
-    printf("gateway ready: interface=%s arena_bytes=%zu arena_reserved_bytes=%zu steps=%lu\n",
-           argv[1], arena.used, memory_capacity, steps);
-    for (unsigned long i = 0; i < steps; ++i) {
-        if (use_memory && i % 25 == 0 &&
-            PGW_CANMemory_inject(&memory_transport, &memory_baseline) != PGW_OK)
-            goto stopped;
-        PGW_Status polled = PGW_CAN_poll(can, pgw_config_can_receive_budget);
-        if ((polled != PGW_OK && polled != PGW_NO_DATA) ||
-            PGW_Service_step(&service) != PGW_OK) goto stopped;
-#if PGW_DDS_DIAGNOSTICS
-        if (pgw_config_diagnostic_period_steps &&
-            (i + 1) % pgw_config_diagnostic_period_steps == 0) {
-            for (size_t route = 0; route < 4; ++route) {
-                PGW_CounterSnapshot snapshot;
-                uint64_t collected_ns;
-                if (!PGW_Runtime_monotonic_time_ns(&collected_ns) ||
-                    !PGW_Counters_snapshot(&routes[route].counters,
-                        routes[route].id, i + 1, collected_ns, &snapshot) ||
-                    PGW_DDS_export_snapshot(&exporter, &snapshot) != PGW_OK)
-                    PGW_Counters_add(&routes[route].counters, PGW_COUNT_EXPORT_ERRORS, 1);
-            }
+    if (PGW_Service_start(&service) != PGW_OK) goto stopped;
+    printf("gateway ready: interface=%s arena_bytes=%zu arena_reserved_bytes=%zu "
+           "duration_ms=%lu sessions=%u\n",
+           argv[1], arena.used, memory_capacity, duration_ms,
+           (unsigned)PGW_CompiledSessionSeq_get_length(&pgw_config_sessions));
+    uint64_t start_ns, now_ns, next_injection_ns = 0;
+    if (!PGW_Runtime_monotonic_time_ns(&start_ns)) goto stopped;
+    now_ns = start_ns;
+    next_injection_ns = start_ns;
+    while (now_ns - start_ns < (uint64_t)duration_ms * UINT64_C(1000000)) {
+        if (!PGW_Runtime_monotonic_time_ns(&now_ns)) goto stopped;
+        if (use_memory && now_ns >= next_injection_ns) {
+            if (PGW_CANMemory_inject(&memory_transport, &memory_baseline) != PGW_OK)
+                goto stopped;
+            next_injection_ns = now_ns + UINT64_C(25000000);
         }
-#endif
         OSAPI_Thread_sleep(1);
     }
     failed = 0;
 stopped:
-    (void)PGW_Service_stop(&service);
+    if ((service.lifecycle == PGW_READY || service.lifecycle == PGW_RUNNING) &&
+        PGW_Service_stop(&service) != PGW_OK) {
+        closed = false;
+        goto done;
+    }
 #if defined(PGW_ENABLE_REMOTE_CONTROL)
     if (control_options.enabled) {
         PGW_ControlCounters counters;
@@ -361,6 +377,17 @@ stopped:
                    (unsigned long long)counters.telemetry_clock_failures);
     }
 #endif
+#if PGW_DDS_DIAGNOSTICS
+    for (size_t i = 0; i < 4; ++i) {
+        PGW_CounterSnapshot snapshot;
+        uint64_t collected_ns;
+        if (!PGW_Runtime_monotonic_time_ns(&collected_ns) ||
+            !PGW_Counters_snapshot(&routes[i].counters, routes[i].id, 1,
+                                   collected_ns, &snapshot) ||
+            PGW_DDS_export_snapshot(&exporter, &snapshot) != PGW_OK)
+            PGW_Counters_add(&routes[i].counters, PGW_COUNT_EXPORT_ERRORS, 1);
+    }
+#endif
     for (size_t i = 0; i < 4; ++i) {
         PGW_CounterSnapshot snapshot;
         char text[1024];
@@ -372,7 +399,10 @@ stopped:
             PGW_snapshot_json(&snapshot, text, sizeof(text), &length))
             fwrite(text, 1, length, stdout);
     }
-    (void)PGW_Service_finalize(&service);
+    if (PGW_Service_finalize(&service) != PGW_OK) {
+        closed = false;
+        goto done;
+    }
 #if defined(PGW_ENABLE_REMOTE_CONTROL)
     if (control_transport.initialized &&
         PGW_DDS_control_transport_finalize(&control_transport) != PGW_OK) closed = false;
@@ -391,7 +421,30 @@ done:
     if (service.lifecycle == PGW_READY || service.lifecycle == PGW_RUNNING) {
         if (PGW_Service_stop(&service) != PGW_OK ||
             PGW_Service_finalize(&service) != PGW_OK) closed = false;
+    } else if (service.lifecycle == PGW_STOPPED &&
+               PGW_Service_finalize(&service) != PGW_OK) {
+        closed = false;
+    } else if (service.lifecycle == PGW_UNINITIALIZED &&
+               service.sessions_initialized &&
+               PGW_Service_finalize(&service) != PGW_OK) {
+        closed = false;
     }
+    if (service.sessions_initialized) {
+        closed = false;
+        fprintf(stderr, "service sessions remain attached; leaving adapter connections open\n");
+        return 1;
+    }
+    if (sessions[0].routes_initialized) {
+        if (sessions[0].routes_borrowed &&
+            !PGW_RouteSeq_unloan(&sessions[0].routes)) closed = false;
+        if (!PGW_RouteSeq_finalize(&sessions[0].routes)) closed = false;
+        sessions[0].routes_initialized = false;
+        sessions[0].routes_borrowed = false;
+    }
+    if (session_sequence_borrowed &&
+        !PGW_SessionSeq_unloan(&session_sequence)) closed = false;
+    if (session_sequence_initialized &&
+        !PGW_SessionSeq_finalize(&session_sequence)) closed = false;
     for (size_t i = 0; i < 4; ++i)
         if (!release_route_storage(&routes[i])) closed = false;
     if (route_sequence_borrowed && !PGW_RouteSeq_unloan(&route_sequence)) closed = false;

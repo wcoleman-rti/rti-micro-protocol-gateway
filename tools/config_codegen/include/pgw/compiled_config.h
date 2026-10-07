@@ -65,7 +65,20 @@ typedef const PGW_CompiledRoute PGW_CompiledRouteElement;
 typedef struct PGW_CompiledRouteSeq PGW_CompiledRouteSeq;
 
 extern const PGW_CompiledRouteSeq pgw_config_routes;
+typedef struct PGW_CompiledSession {
+    const char *name;
+    size_t route_offset, route_count;
+} PGW_CompiledSession;
+typedef const PGW_CompiledSession PGW_CompiledSessionElement;
+#define REDA_SEQUENCE_USER_API
+#define T PGW_CompiledSessionElement
+#define TSeq PGW_CompiledSessionSeq
+#include <reda/reda_sequence_decl.h>
+#undef T
+#undef TSeq
+typedef struct PGW_CompiledSessionSeq PGW_CompiledSessionSeq;
+extern const PGW_CompiledSessionSeq pgw_config_sessions;
+extern const char *const pgw_config_control_session;
 extern const PGW_CompiledNativeStreamSeq pgw_config_native_streams;
-extern const unsigned pgw_config_route_budget, pgw_config_sample_budget;
-extern const unsigned pgw_config_diagnostic_period_steps;
+extern const unsigned pgw_config_sample_budget;
 #endif

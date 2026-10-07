@@ -16,6 +16,8 @@
 #include "dds_c/dds_c_wh_plugin.h"
 #include "rh_sm/rh_sm_history.h"
 #include "wh_sm/wh_sm_history.h"
+#include "osapi/osapi_mutex.h"
+#include "osapi/osapi_thread.h"
 #if defined(PGW_ENABLE_REMOTE_CONTROL)
 #include "control_manifest.h"
 #endif
@@ -46,10 +48,45 @@ typedef struct PGW_DDSEndpoint {
     bool view_writer_bound;
     bool loaned;
     PGW_SampleSeq *loan;
+    struct DDS_DataReaderListener listener;
+    _Atomic(const PGW_ReaderListener *) listener_target;
+    atomic_uint callbacks_inflight;
+    bool listener_installed;
     PGW_DDSStatistics statistics;
-    bool input_enabled;
-    bool output_enabled;
+    atomic_bool input_enabled;
+    atomic_bool output_enabled;
+    OSAPI_Mutex_T *mutex;
 } PGW_DDSEndpoint;
+
+static void dds_reader_data_available(void *opaque, DDS_DataReader *reader)
+{
+    PGW_DDSEndpoint *endpoint = opaque;
+    if (!endpoint || endpoint->reader != reader) return;
+    atomic_fetch_add_explicit(&endpoint->callbacks_inflight, 1,
+                              memory_order_acq_rel);
+    const PGW_ReaderListener *listener = atomic_load_explicit(
+        &endpoint->listener_target, memory_order_acquire);
+    if (listener) listener->on_data_available(listener->context);
+    atomic_fetch_sub_explicit(&endpoint->callbacks_inflight, 1,
+                              memory_order_release);
+}
+
+static PGW_Status clear_dds_reader_listener(PGW_DDSEndpoint *endpoint)
+{
+    if (!endpoint || !endpoint->reader) return PGW_INVALID;
+    atomic_store_explicit(&endpoint->listener_target, NULL,
+                          memory_order_release);
+    struct DDS_DataReaderListener empty =
+        DDS_DataReaderListener_INITIALIZER;
+    if (DDS_DataReader_set_listener(endpoint->reader, &empty,
+                                    DDS_STATUS_MASK_NONE) != DDS_RETCODE_OK)
+        return PGW_IO_ERROR;
+    while (atomic_load_explicit(&endpoint->callbacks_inflight,
+                                memory_order_acquire))
+        OSAPI_Thread_sleep(1);
+    endpoint->listener_installed = false;
+    return PGW_OK;
+}
 #define REDA_SEQUENCE_USER_API
 #define T PGW_DDSEndpoint
 #define TSeq PGW_DDSEndpointSeq
@@ -64,7 +101,7 @@ typedef struct PGW_DDSConnection {
     size_t storage_bytes;
     bool endpoints_initialized;
     bool endpoints_borrowed;
-    bool control_enabled;
+    atomic_bool control_enabled;
 } PGW_DDSConnection;
 #if defined(PGW_ENABLE_REMOTE_CONTROL)
 static const PGW_ControlAdapterI dds_control;
@@ -176,6 +213,86 @@ static PGW_Status control_take_command(void *opaque, PGW_ControlCommand *command
     return transport->types->take_command(transport->command_reader, command, correlation);
 }
 
+static void dds_control_data_available(void *opaque, DDS_DataReader *reader)
+{
+    PGW_DDSControlTransport *transport = opaque;
+    if (!transport || transport->command_reader != reader) return;
+    atomic_fetch_add_explicit(&transport->command_callbacks_inflight, 1,
+                              memory_order_acq_rel);
+    const PGW_ReaderListener *listener = atomic_load_explicit(
+        &transport->command_listener_target, memory_order_acquire);
+    if (listener) listener->on_data_available(listener->context);
+    atomic_fetch_sub_explicit(&transport->command_callbacks_inflight, 1,
+                              memory_order_release);
+}
+
+static PGW_Status register_control_listener(
+    void *opaque, const PGW_ReaderListener *listener)
+{
+    PGW_DDSControlTransport *transport = opaque;
+    if (!transport || !transport->command_reader || !listener ||
+        !listener->on_data_available ||
+        atomic_load_explicit(&transport->command_listener_target,
+                             memory_order_acquire))
+        return PGW_INVALID;
+    transport->command_listener = (struct DDS_DataReaderListener)
+        DDS_DataReaderListener_INITIALIZER;
+    transport->command_listener.as_listener.listener_data = transport;
+    transport->command_listener.on_data_available =
+        dds_control_data_available;
+    atomic_store_explicit(&transport->command_listener_target, listener,
+                          memory_order_release);
+    if (DDS_DataReader_set_listener(transport->command_reader,
+            &transport->command_listener, DDS_DATA_AVAILABLE_STATUS) !=
+        DDS_RETCODE_OK) {
+        atomic_store_explicit(&transport->command_listener_target, NULL,
+                              memory_order_release);
+        struct DDS_DataReaderListener empty =
+            DDS_DataReaderListener_INITIALIZER;
+        (void)DDS_DataReader_set_listener(transport->command_reader, &empty,
+                                           DDS_STATUS_MASK_NONE);
+        while (atomic_load_explicit(&transport->command_callbacks_inflight,
+                                    memory_order_acquire))
+            OSAPI_Thread_sleep(1);
+        return PGW_IO_ERROR;
+    }
+    listener->on_data_available(listener->context);
+    return PGW_OK;
+}
+
+static PGW_Status unregister_control_listener(
+    void *opaque, const PGW_ReaderListener *listener)
+{
+    PGW_DDSControlTransport *transport = opaque;
+    if (!transport || !transport->command_reader || !listener)
+        return PGW_INVALID;
+    const PGW_ReaderListener *registered = atomic_load_explicit(
+        &transport->command_listener_target, memory_order_acquire);
+    if (!registered) return PGW_OK;
+    if (registered != listener) return PGW_INVALID;
+    atomic_store_explicit(&transport->command_listener_target, NULL,
+                          memory_order_release);
+    struct DDS_DataReaderListener empty =
+        DDS_DataReaderListener_INITIALIZER;
+    if (DDS_DataReader_set_listener(transport->command_reader, &empty,
+                                   DDS_STATUS_MASK_NONE) != DDS_RETCODE_OK)
+        return PGW_IO_ERROR;
+    while (atomic_load_explicit(&transport->command_callbacks_inflight,
+                                memory_order_acquire))
+        OSAPI_Thread_sleep(1);
+    return PGW_OK;
+}
+
+static PGW_Status control_rearm_commands(void *opaque)
+{
+    PGW_DDSControlTransport *transport = opaque;
+    if (!transport) return PGW_INVALID;
+    const PGW_ReaderListener *listener = atomic_load_explicit(
+        &transport->command_listener_target, memory_order_acquire);
+    if (listener) listener->on_data_available(listener->context);
+    return PGW_OK;
+}
+
 static PGW_Status control_write_state(void *opaque, const PGW_ControlState *state)
 {
     PGW_DDSControlTransport *transport = opaque;
@@ -203,12 +320,15 @@ static PGW_Status control_write_telemetry(void *opaque,
 }
 
 static const PGW_ControlEndpointI control_endpoint_iface = {
-    PGW_CONTROL_ABI_VERSION,
-    sizeof(PGW_ControlEndpointI),
-    control_take_command,
-    control_write_state,
-    control_write_result,
-    control_write_telemetry
+    .version = PGW_CONTROL_ABI_VERSION,
+    .size = sizeof(PGW_ControlEndpointI),
+    .register_listener = register_control_listener,
+    .unregister_listener = unregister_control_listener,
+    .take_command = control_take_command,
+    .rearm_commands = control_rearm_commands,
+    .write_state = control_write_state,
+    .write_result = control_write_result,
+    .write_telemetry = control_write_telemetry
 };
 
 static PGW_Status control_validate_reader(DDS_DataReader *reader)
@@ -333,6 +453,10 @@ PGW_Status PGW_DDS_control_transport_initialize(
     configured.telemetry_handle_count = telemetry_selected ? metric_count : 0;
     configured.initialized = true;
     *transport = configured;
+    atomic_init(&transport->command_listener_target, NULL);
+    atomic_init(&transport->command_callbacks_inflight, 0);
+    transport->command_listener = (struct DDS_DataReaderListener)
+        DDS_DataReaderListener_INITIALIZER;
     return PGW_OK;
 }
 
@@ -345,6 +469,12 @@ PGW_ControlEndpoint PGW_DDS_control_endpoint(PGW_DDSControlTransport *transport)
 PGW_Status PGW_DDS_control_transport_finalize(PGW_DDSControlTransport *transport)
 {
     if (!transport || !transport->initialized) return PGW_INVALID;
+    if (atomic_load_explicit(&transport->command_listener_target,
+                             memory_order_acquire))
+        return PGW_INVALID;
+    while (atomic_load_explicit(&transport->command_callbacks_inflight,
+                                memory_order_acquire))
+        OSAPI_Thread_sleep(1);
     *transport = (PGW_DDSControlTransport){0};
     return PGW_OK;
 }
@@ -812,7 +942,16 @@ static PGW_Status release_failed_read(PGW_DDSEndpoint *ep, PGW_SampleSeq *seq,
     ++ep->statistics.loan_errors;
     return PGW_LOAN_ERROR;
 }
-static PGW_Status read_samples(void *state, PGW_SampleSeq *seq, size_t budget)
+
+static void notify_dds_reader(PGW_DDSEndpoint *endpoint)
+{
+    const PGW_ReaderListener *listener = atomic_load_explicit(
+        &endpoint->listener_target, memory_order_acquire);
+    if (listener) listener->on_data_available(listener->context);
+}
+
+static PGW_Status read_samples_impl(void *state, PGW_SampleSeq *seq,
+                                    size_t budget)
 {
     PGW_DDSEndpoint *ep = state;
     DDS_ReturnCode_t rc;
@@ -821,7 +960,9 @@ static PGW_Status read_samples(void *state, PGW_SampleSeq *seq, size_t budget)
         ++ep->statistics.loan_errors;
         return PGW_LOAN_ERROR;
     }
-    if (!ep->connection->control_enabled || !ep->input_enabled)
+    if (!atomic_load_explicit(&ep->connection->control_enabled,
+                              memory_order_acquire) ||
+        !atomic_load_explicit(&ep->input_enabled, memory_order_acquire))
         return PGW_NO_DATA;
     limit = budget < ep->config->capacity ? budget : ep->config->capacity;
     RTI_INT32 maximum = PGW_SampleSeq_get_maximum(seq);
@@ -847,7 +988,10 @@ static PGW_Status read_samples(void *state, PGW_SampleSeq *seq, size_t budget)
         ++valid;
     }
     if (!valid) {
-        return release_failed_read(ep, seq, PGW_NO_DATA);
+        PGW_Status returned = release_failed_read(ep, seq, PGW_NO_DATA);
+        if (returned == PGW_NO_DATA && count == limit)
+            notify_dds_reader(ep);
+        return returned;
     }
     if (!PGW_SampleSeq_set_length(seq, (RTI_INT32)valid)) {
         return release_failed_read(ep, seq, PGW_LOAN_ERROR);
@@ -858,9 +1002,10 @@ static PGW_Status read_samples(void *state, PGW_SampleSeq *seq, size_t budget)
     ep->loan = seq;
     ep->statistics.valid_samples += valid;
     ++ep->statistics.loans;
+    if (count == limit) notify_dds_reader(ep);
     return PGW_OK;
 }
-static PGW_Status return_samples(void *state, PGW_SampleSeq *seq)
+static PGW_Status return_samples_impl(void *state, PGW_SampleSeq *seq)
 {
     PGW_DDSEndpoint *ep = state;
     DDS_ReturnCode_t rc;
@@ -877,6 +1022,72 @@ static PGW_Status return_samples(void *state, PGW_SampleSeq *seq)
         return PGW_LOAN_ERROR;
     }
     return PGW_OK;
+}
+
+static PGW_Status read_samples(void *state, PGW_SampleSeq *seq, size_t budget)
+{
+    PGW_DDSEndpoint *endpoint = state;
+    if (!endpoint || !endpoint->mutex ||
+        !OSAPI_Mutex_take(endpoint->mutex)) return PGW_IO_ERROR;
+    PGW_Status status = read_samples_impl(state, seq, budget);
+    if (!OSAPI_Mutex_give(endpoint->mutex)) return PGW_IO_ERROR;
+    return status;
+}
+
+static PGW_Status return_samples(void *state, PGW_SampleSeq *seq)
+{
+    PGW_DDSEndpoint *endpoint = state;
+    if (!endpoint || !endpoint->mutex ||
+        !OSAPI_Mutex_take(endpoint->mutex)) return PGW_IO_ERROR;
+    PGW_Status status = return_samples_impl(state, seq);
+    if (!OSAPI_Mutex_give(endpoint->mutex)) return PGW_IO_ERROR;
+    return status;
+}
+
+static PGW_Status register_listener(void *state,
+                                    const PGW_ReaderListener *listener)
+{
+    PGW_DDSEndpoint *endpoint = state;
+    if (!endpoint || !endpoint->reader || !listener ||
+        !listener->on_data_available || endpoint->listener_installed ||
+        atomic_load_explicit(&endpoint->listener_target,
+                             memory_order_acquire))
+        return PGW_INVALID;
+    struct DDS_DataReaderListener configured =
+        DDS_DataReaderListener_INITIALIZER;
+    configured.as_listener.listener_data = endpoint;
+    configured.on_data_available = dds_reader_data_available;
+    endpoint->listener = configured;
+    atomic_store_explicit(&endpoint->listener_target, listener,
+                          memory_order_release);
+    if (DDS_DataReader_set_listener(endpoint->reader, &endpoint->listener,
+            DDS_DATA_AVAILABLE_STATUS) != DDS_RETCODE_OK) {
+        atomic_store_explicit(&endpoint->listener_target, NULL,
+                              memory_order_release);
+        struct DDS_DataReaderListener empty =
+            DDS_DataReaderListener_INITIALIZER;
+        (void)DDS_DataReader_set_listener(endpoint->reader, &empty,
+                                           DDS_STATUS_MASK_NONE);
+        while (atomic_load_explicit(&endpoint->callbacks_inflight,
+                                    memory_order_acquire))
+            OSAPI_Thread_sleep(1);
+        return PGW_IO_ERROR;
+    }
+    endpoint->listener_installed = true;
+    listener->on_data_available(listener->context);
+    return PGW_OK;
+}
+
+static PGW_Status unregister_listener(void *state,
+                                      const PGW_ReaderListener *listener)
+{
+    PGW_DDSEndpoint *endpoint = state;
+    if (!endpoint || !endpoint->reader || !listener) return PGW_INVALID;
+    const PGW_ReaderListener *registered = atomic_load_explicit(
+        &endpoint->listener_target, memory_order_acquire);
+    if (!endpoint->listener_installed && !registered) return PGW_OK;
+    if (registered != listener) return PGW_INVALID;
+    return clear_dds_reader_listener(endpoint);
 }
 static PGW_Status bind_writer(void *state, const PGW_Representation *source)
 {
@@ -919,8 +1130,8 @@ static PGW_Status bind_writer(void *state, const PGW_Representation *source)
     ep->direct_write_candidate = direct_candidate;
     return PGW_OK;
 }
-static PGW_Status write_samples(void *state, const PGW_SampleSeq *seq,
-                               PGW_WriteResultSeq *results)
+static PGW_Status write_samples_impl(void *state, const PGW_SampleSeq *seq,
+                                    PGW_WriteResultSeq *results)
 {
     PGW_DDSEndpoint *ep = state;
     if (!ep->source || !seq || !results) return PGW_INVALID;
@@ -930,7 +1141,9 @@ static PGW_Status write_samples(void *state, const PGW_SampleSeq *seq,
     size_t count = (size_t)length;
     if (count > ep->config->capacity) return PGW_CAPACITY;
     if (!PGW_WriteResultSeq_set_length(results, length)) return PGW_INVALID;
-    if (!ep->connection->control_enabled || !ep->output_enabled) {
+    if (!atomic_load_explicit(&ep->connection->control_enabled,
+                              memory_order_acquire) ||
+        !atomic_load_explicit(&ep->output_enabled, memory_order_acquire)) {
         for (size_t i = 0; i < count; ++i) {
             *PGW_WriteResultSeq_get_reference(results, (RTI_INT32)i) =
                 PGW_WRITE_BACKPRESSURE;
@@ -1075,8 +1288,23 @@ static PGW_Status write_samples(void *state, const PGW_SampleSeq *seq,
     }
     return PGW_OK;
 }
+static PGW_Status write_samples(void *state, const PGW_SampleSeq *seq,
+                               PGW_WriteResultSeq *results)
+{
+    PGW_DDSEndpoint *endpoint = state;
+    if (!endpoint || !endpoint->mutex ||
+        !OSAPI_Mutex_take(endpoint->mutex)) return PGW_IO_ERROR;
+    PGW_Status status = write_samples_impl(state, seq, results);
+    if (!OSAPI_Mutex_give(endpoint->mutex)) return PGW_IO_ERROR;
+    return status;
+}
 static const PGW_StreamReaderI reader_i = {
-    PGW_ABI_VERSION, sizeof(PGW_StreamReaderI), read_samples, return_samples
+    .version = PGW_ABI_VERSION,
+    .size = sizeof(PGW_StreamReaderI),
+    .read = read_samples,
+    .return_loan = return_samples,
+    .register_listener = register_listener,
+    .unregister_listener = unregister_listener
 };
 static const PGW_StreamWriterI writer_i = {
     PGW_ABI_VERSION, sizeof(PGW_StreamWriterI), bind_writer, write_samples
@@ -1141,9 +1369,22 @@ PGW_Status PGW_DDS_control_target(PGW_Connection *opaque,
 static PGW_Status close_connection(PGW_Connection *opaque)
 {
     PGW_DDSConnection *connection = (PGW_DDSConnection *)opaque;
-    for (RTI_INT32 i = 0; i < PGW_DDSEndpointSeq_get_length(&connection->endpoints); ++i)
-        if (PGW_DDSEndpointSeq_get_reference(&connection->endpoints, i)->loaned)
-            return PGW_LOAN_ERROR;
+    if (!connection) return PGW_INVALID;
+    if (connection->endpoints_initialized)
+        for (RTI_INT32 i = 0;
+             i < PGW_DDSEndpointSeq_get_length(&connection->endpoints); ++i)
+            if (PGW_DDSEndpointSeq_get_reference(
+                    &connection->endpoints, i)->loaned)
+                return PGW_LOAN_ERROR;
+    if (connection->endpoints_initialized)
+        for (RTI_INT32 i = 0;
+             i < PGW_DDSEndpointSeq_get_length(&connection->endpoints); ++i) {
+            PGW_DDSEndpoint *endpoint =
+                PGW_DDSEndpointSeq_get_reference(&connection->endpoints, i);
+            if (endpoint->listener_installed &&
+                clear_dds_reader_listener(endpoint) != PGW_OK)
+                return PGW_IO_ERROR;
+        }
     if (connection->participant) {
         if (DDS_DomainParticipant_delete_contained_entities(connection->participant) !=
             DDS_RETCODE_OK) return PGW_FATAL;
@@ -1151,6 +1392,17 @@ static PGW_Status close_connection(PGW_Connection *opaque)
                 DDS_DomainParticipantFactory_get_instance(), connection->participant) !=
             DDS_RETCODE_OK) return PGW_FATAL;
         connection->participant = NULL;
+    }
+    if (connection->endpoints_initialized) {
+        for (RTI_INT32 i = 0;
+             i < PGW_DDSEndpointSeq_get_length(&connection->endpoints); ++i) {
+            PGW_DDSEndpoint *endpoint =
+                PGW_DDSEndpointSeq_get_reference(&connection->endpoints, i);
+            if (endpoint->mutex) {
+                if (!OSAPI_Mutex_delete(endpoint->mutex)) return PGW_FATAL;
+                endpoint->mutex = NULL;
+            }
+        }
     }
     if (connection->endpoints_initialized) {
         if (connection->endpoints_borrowed &&
@@ -1171,8 +1423,11 @@ static PGW_Status control_apply(void *state, PGW_ControlAction action)
         PGW_DDSConnection *connection = state;
         if (!connection->participant) return PGW_INVALID;
         bool desired = action == PGW_CONTROL_CONNECTION_UP;
-        if (connection->control_enabled == desired) return PGW_NO_CHANGE;
-        connection->control_enabled = desired;
+        if (atomic_load_explicit(&connection->control_enabled,
+                                 memory_order_acquire) == desired)
+            return PGW_NO_CHANGE;
+        atomic_store_explicit(&connection->control_enabled, desired,
+                              memory_order_release);
         return PGW_OK;
     }
     if (action == PGW_CONTROL_INPUT_ENABLE ||
@@ -1186,9 +1441,11 @@ static PGW_Status control_apply(void *state, PGW_ControlAction action)
             return PGW_INVALID;
         bool desired = action == PGW_CONTROL_INPUT_ENABLE ||
                        action == PGW_CONTROL_OUTPUT_ENABLE;
-        bool *enabled = input ? &endpoint->input_enabled : &endpoint->output_enabled;
-        if (*enabled == desired) return PGW_NO_CHANGE;
-        *enabled = desired;
+        atomic_bool *enabled = input ? &endpoint->input_enabled :
+                                       &endpoint->output_enabled;
+        if (atomic_load_explicit(enabled, memory_order_acquire) == desired)
+            return PGW_NO_CHANGE;
+        atomic_store_explicit(enabled, desired, memory_order_release);
         return PGW_OK;
     }
     return PGW_UNSUPPORTED;
@@ -1252,19 +1509,23 @@ static PGW_Status create_connection(const void *configuration, PGW_Arena *arena,
     status = allocate(arena, 1, sizeof(*connection), (void **)&connection);
     if (status != PGW_OK) return status;
     memset(connection, 0, sizeof(*connection));
-    connection->control_enabled = true;
+    atomic_init(&connection->control_enabled, true);
     PGW_DDSEndpoint *endpoint_storage;
     status = allocate(arena, (size_t)endpoint_count, sizeof(PGW_DDSEndpoint),
                       (void **)&endpoint_storage);
-    if (status != PGW_OK) return status;
+    if (status != PGW_OK) goto fail;
     memset(endpoint_storage, 0, (size_t)endpoint_count * sizeof(PGW_DDSEndpoint));
-    if (!PGW_DDSEndpointSeq_initialize(&connection->endpoints)) return PGW_FATAL;
+    if (!PGW_DDSEndpointSeq_initialize(&connection->endpoints)) {
+        status = PGW_FATAL;
+        goto fail;
+    }
     connection->endpoints_initialized = true;
     if (!PGW_DDSEndpointSeq_loan_contiguous(&connection->endpoints,
             endpoint_storage, endpoint_count, endpoint_count)) {
         (void)PGW_DDSEndpointSeq_finalize(&connection->endpoints);
         connection->endpoints_initialized = false;
-        return PGW_CAPACITY;
+        status = PGW_CAPACITY;
+        goto fail;
     }
     connection->endpoints_borrowed = true;
     if (!PGW_DDSEndpointSeq_set_length(&connection->endpoints, endpoint_count)) {
@@ -1272,11 +1533,12 @@ static PGW_Status create_connection(const void *configuration, PGW_Arena *arena,
         (void)PGW_DDSEndpointSeq_finalize(&connection->endpoints);
         connection->endpoints_initialized = false;
         connection->endpoints_borrowed = false;
-        return PGW_CAPACITY;
+        status = PGW_CAPACITY;
+        goto fail;
     }
     connection->participant = DDS_DomainParticipantFactory_create_participant_from_config(
         DDS_DomainParticipantFactory_get_instance(), config->participant_name);
-    if (!connection->participant) return PGW_FATAL;
+    if (!connection->participant) {status = PGW_FATAL; goto fail;}
     for (RTI_INT32 i = 0; i < endpoint_count; ++i) {
         PGW_DDSEndpoint *ep = PGW_DDSEndpointSeq_get_reference(&connection->endpoints, i);
         const PGW_DDSEndpointConfig *ec =
@@ -1284,8 +1546,12 @@ static PGW_Status create_connection(const void *configuration, PGW_Arena *arena,
         const PGW_DDSBinding *binding = ec->binding;
         ep->config = ec;
         ep->connection = connection;
-        ep->input_enabled = true;
-        ep->output_enabled = true;
+        atomic_init(&ep->listener_target, NULL);
+        atomic_init(&ep->callbacks_inflight, 0);
+        atomic_init(&ep->input_enabled, true);
+        atomic_init(&ep->output_enabled, true);
+        ep->mutex = OSAPI_Mutex_new();
+        if (!ep->mutex) {status = PGW_FATAL; goto fail;}
         ep->type_identity = binding->type_identity();
         if (!ep->type_identity) {status = PGW_INVALID; goto fail;}
         ep->representation = *binding->representation;
@@ -1410,6 +1676,7 @@ PGW_Status PGW_DDS_statistics(PGW_Connection *opaque, const char *name,
     for (RTI_INT32 i = 0; i < PGW_DDSEndpointSeq_get_length(&connection->endpoints); ++i) {
         PGW_DDSEndpoint *ep = PGW_DDSEndpointSeq_get_reference(&connection->endpoints, i);
         if (strcmp(ep->config->name, name)) continue;
+        if (!ep->mutex || !OSAPI_Mutex_take(ep->mutex)) return PGW_IO_ERROR;
         *out = ep->statistics;
         if (ep->reader) {
             struct DDS_SampleLostStatus lost;
@@ -1419,8 +1686,10 @@ PGW_Status PGW_DDS_statistics(PGW_Connection *opaque, const char *name,
             if (DDS_DataReader_get_sample_lost_status(ep->reader, &lost) != DDS_RETCODE_OK ||
                 DDS_DataReader_get_sample_rejected_status(ep->reader, &rejected) != DDS_RETCODE_OK ||
                 DDS_DataReader_get_subscription_matched_status(ep->reader, &matched) != DDS_RETCODE_OK ||
-                DDS_DataReader_get_requested_incompatible_qos_status(ep->reader, &incompatible) != DDS_RETCODE_OK)
+                DDS_DataReader_get_requested_incompatible_qos_status(ep->reader, &incompatible) != DDS_RETCODE_OK) {
+                if (!OSAPI_Mutex_give(ep->mutex)) return PGW_FATAL;
                 return PGW_IO_ERROR;
+            }
             out->lost = lost.total_count;
             out->rejected = rejected.total_count;
             out->matched = matched.current_count;
@@ -1429,12 +1698,14 @@ PGW_Status PGW_DDS_statistics(PGW_Connection *opaque, const char *name,
             struct DDS_PublicationMatchedStatus matched;
             struct DDS_OfferedIncompatibleQosStatus incompatible;
             if (DDS_DataWriter_get_publication_matched_status(ep->writer, &matched) != DDS_RETCODE_OK ||
-                DDS_DataWriter_get_offered_incompatible_qos_status(ep->writer, &incompatible) != DDS_RETCODE_OK)
+                DDS_DataWriter_get_offered_incompatible_qos_status(ep->writer, &incompatible) != DDS_RETCODE_OK) {
+                if (!OSAPI_Mutex_give(ep->mutex)) return PGW_FATAL;
                 return PGW_IO_ERROR;
+            }
             out->matched = matched.current_count;
             out->incompatible_qos = incompatible.total_count;
         }
-        return PGW_OK;
+        return OSAPI_Mutex_give(ep->mutex) ? PGW_OK : PGW_IO_ERROR;
     }
     return PGW_INVALID;
 }

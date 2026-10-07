@@ -12,8 +12,8 @@
 
 # Memory-CAN adapter benchmark
 
-`pgw_can_benchmark [steps] [timing0|1] [metadata0|1]` measures the generated CAN
-codec, adapter, and core routing paths. Steps default to 100,000 and must be
+`pgw_can_benchmark [batches] [timing0|1] [metadata0|1]` measures the generated CAN
+codec, adapter, and core routing paths. Batches default to 100,000 and must be
 within 1..100,000,000. Timing and metadata capture default to 1. This is **not a
 DDS simulation**, live SocketCAN test, physical-bus throughput measurement, or
 wire-latency estimate.
@@ -22,8 +22,9 @@ wire-latency estimate.
 
 Two actual `PGW_CANAdapter` connections use independent bounded memory
 transports. One category route forwards four decoded Engine signals from
-the ingress connection directly through `PGW_Service_step` into the second
-connection's negotiated synchronous writer. Generated descriptors and codecs
+the ingress connection's receiver, through its registered reader listener and
+the session worker, into the second connection's negotiated synchronous
+writer. Generated descriptors and codecs
 come from the maintained example DBC/mapping via `pgw_generate_dbc`.
 CAN catalogs, scratch values, baseline/staging records, private loan slots and
 write sidecars are actual Micro typed sequences. Core route/reference/result
@@ -32,7 +33,7 @@ benchmark does not implement a parallel pointer/count vector abstraction.
 The complete accepted conversion/exclusion inventory is in
 [`adapters/can/README.md`](../adapters/can/README.md#collection-inventory-actual-micro-sequences-and-justified-exclusions).
 
-After READY, the output receives its first raw baseline. Each subsequent step
+After READY, the output receives its first raw baseline. Each subsequent batch
 injects one input Engine frame with changing speed/state values, a signed
 Motorola torque value and boolean command. Unmapped input bytes differ from
 the output baseline. All accepted output frames are checked against an
@@ -40,24 +41,24 @@ independent eight-byte expected vector, including the output baseline's
 reserved bits and unrelated bytes. Each four-command batch produces one
 coalesced output frame.
 
-Every eighth step encounters TX backpressure: the preceding accepted frame
+Every eighth batch encounters TX backpressure: the preceding accepted frame
 was intentionally left in the one-frame TX ring. The dropped batch is not
 retried. The harness then drains and verifies the preceding frame, and
 normal processing continues. A final held frame is drained if the run ends
 between these two phases. The workload checks exact outcomes:
 
-- Routed/attempted samples: `4 * steps`.
-- Backpressured frames: `floor(steps / 8)`; backpressured commands: four times
+- Routed/attempted samples: `4 * batches`.
+- Backpressured frames: `floor(batches / 8)`; backpressured commands: four times
   that count.
-- Accepted/coalesced frames: `steps - floor(steps / 8)`.
+- Accepted/coalesced frames: `batches - floor(batches / 8)`.
 - Accepted commands: four times accepted frames.
-- Received frames: `steps + 1`, including the output baseline.
-- Decoded signals: `4 * steps + 4`, including baseline decoding.
+- Received frames: `batches + 1`, including the output baseline.
+- Decoded signals: `4 * batches + 4`, including baseline decoding.
 - Checked command bytes: eight times accepted frames.
 - Invalid commands, RX dropped samples and outstanding route loans: zero.
 
 There is no warm-up phase. First baseline reception, first routing traffic,
-all backpressure/error-free recovery work and first per-step timing observations
+all backpressure/error-free recovery work and first per-batch timing observations
 occur within the allocation monitoring interval.
 The first baseline's four decoded samples are also borrowed and inspected:
 enabled timestamp capture returns the exact injected timestamp; disabled capture
@@ -86,18 +87,18 @@ are closed. Typed transport/frame/reference arrays remain caller-owned fixed
 objects. This initialization allocation is included in initialization timing
 and the resource report, not hidden as runtime allocation.
 
-When enabled, the fixed 64-bin histogram samples `PGW_Service_step` entry to
-return, including RX dequeue/decode/category demux, core forwarding, CAN patch/
-coalesced transport acceptance and loan return. Harness injection and golden
-byte comparisons are outside this per-step boundary but inside total elapsed
-time. The initial output-baseline poll is outside the step histogram and
-inside total elapsed time. Neither boundary starts at real network arrival or
-ends at physical delivery.
+When enabled, the fixed 64-bin histogram samples immediately before memory-CAN
+injection through receiver dequeue/decode/category demux, reader notification,
+session-worker wake, bounded core forwarding, CAN patch/coalesced transport
+acceptance and loan return. Golden-byte comparisons are outside this per-batch
+boundary but inside total elapsed time. The initial output-baseline read is
+outside the batch histogram and inside total elapsed time. Neither boundary
+starts at real network arrival or ends at physical delivery.
 
 The monotonic host clock is used only for these local execution durations.
 Histogram bins cover powers of two; bucket zero covers 0..1 ns. Reported
 p50/p95/p99 are bucket upper bounds, not exact sample percentiles. Counter-only
-mode disables per-step clock calls and reports histogram count/values zero,
+mode disables per-batch clock calls and reports histogram count/values zero,
 while retaining start/end clocks, functional assertions and allocation checks.
 Timing and counter-only results are intentionally not comparable to each other.
 
@@ -157,14 +158,14 @@ cmake --build build --target pgw_can_benchmark
 ctest --test-dir build -R '^REQ_BENCHMARK_CAN_' --output-on-failure
 
 python3 benchmarks/runner/run.py build/benchmarks/can/pgw_can_benchmark \
-  --steps 100000 --timing 1 --metadata 1 --repeat 3 --results results/can
+  --batches 100000 --timing 1 --metadata 1 --repeat 3 --results results/can
 ```
 
 Use the returned JSON path as the baseline for a matching second run:
 
 ```sh
 python3 benchmarks/runner/run.py build/benchmarks/can/pgw_can_benchmark \
-  --steps 100000 --timing 1 --metadata 1 --repeat 3 --results results/can \
+  --batches 100000 --timing 1 --metadata 1 --repeat 3 --results results/can \
   --compare results/can/RETURNED_BASELINE.json
 ```
 
@@ -172,13 +173,13 @@ Capture a matching disabled-mode baseline separately:
 
 ```sh
 python3 benchmarks/runner/run.py build/benchmarks/can/pgw_can_benchmark \
-  --steps 100000 --timing 1 --metadata 0 --repeat 3 --results results/can
+  --batches 100000 --timing 1 --metadata 0 --repeat 3 --results results/can
 build/benchmarks/can/pgw_can_benchmark 1000 1 0
 ```
 
 The common runner names this workload's result files `can-<timestamp>.json`;
 the measurement `workload` identifies the workload version unambiguously.
-Only compare matching workload/version, step count, timing/coverage, metadata
+Only compare matching workload/version, batch count, timing/coverage, metadata
 mode, build configuration and host. Capture-enabled and disabled modes are
 intentionally marked noncomparable for like-for-like regression checks; paired
 runs still quantify capture overhead as an observational experiment. Metadata

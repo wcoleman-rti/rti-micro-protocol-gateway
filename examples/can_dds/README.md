@@ -61,7 +61,9 @@ build-dds/examples/can_dds/pgw_can_dds_gateway --memory 10000
 build-dds/examples/can_dds/pgw_dds_companion 123.4 500
 ```
 
-Memory CAN injects a bounded example Engine baseline every 25 scheduler steps.
+The gateway starts the event-driven session worker; its application loop injects
+a bounded example Engine baseline every 25 ms. Reader callbacks signal the
+session, which performs bounded routing without application polling.
 DDS is still the real licensed Micro implementation. The companion publishes a
 speed command only after receiving a state, and the gateway prints transmitted
 memory-CAN bytes after stopping. Expected interaction is visible in the separate
@@ -77,8 +79,8 @@ CAN memory sent id=256 bytes=d20400000101abcd
 
 The companion prints received states but does not print a separate “command
 sent” message; the exact patched frame printed by the gateway confirms the
-reverse DDS-command-to-CAN path. The gateway's 10,000-step example run takes
-about ten seconds; the companion exits after its requested polling steps.
+reverse DDS-command-to-CAN path. The gateway's 10,000 ms example run takes about
+ten seconds; the companion exits after its requested number of observed states.
 
 For a real, **explicitly selected** interface:
 
@@ -167,19 +169,23 @@ CAN socket or physical bus works.
 ## Compiled graph and resources
 
 `gateway.xml.in` references MAG-created named entities and declares the native
-CAN stream catalog, category capacities, four bidirectional routes, CAN work
-budgets, scheduler budgets, and a diagnostics period. The executable consumes
-these compiled tables. Its fixed example provisioning allows two categories,
+CAN stream catalog, category capacities, explicit session membership, four
+bidirectional routes, CAN receiver/write budgets, and the bounded session
+sample budget. The executable consumes these compiled tables. Its fixed
+example provisioning allows two categories,
 four routes, and eight references/results per route; incompatible graph growth
 fails initialization rather than allocating more runtime storage.
 
 `PGW_DDS_DIAGNOSTICS=ON` adds a fixed typed route-counter snapshot writer/reader,
-keyed by entity kind (1 = route) and ID, four known route keys, and history resources **before MAG runs**. Readers reserve a bounded second physical sample per key for an outstanding loan while retaining KEEP_LAST depth one; writers remain one/key. The exporter
-publishes at the XML-configured step period with a maximum four snapshots per
-period; it does not replay events. Export failure increments the affected route's
-export counter and does not recursively log or fault business routes. Turning
-the option OFF removes the management inventory and lets MAG recompute resources.
-Operational counters and final fixed-buffer JSON reports remain enabled.
+keyed by entity kind (1 = route) and ID, four known route keys, and history
+resources **before MAG runs**. Readers reserve a bounded second physical sample
+per key for an outstanding loan while retaining KEEP_LAST depth one; writers
+remain one/key. The example exports one bounded set of snapshots at shutdown;
+it does not replay events or configure a periodic route scheduler. Export
+failure increments the affected route's export counter and does not recursively
+log or fault business routes. Turning the option OFF removes the management
+inventory and lets MAG recompute resources. Operational counters and final
+fixed-buffer JSON reports remain enabled.
 
 Startup prints actual factory/participant/endpoint QoS from public getters,
 not presumed XML literal values or inferred DDS bytes. Monotonic collection
@@ -203,7 +209,7 @@ extent to the current core inventory; the real DDS test roundtrips both slots.
 | Generic typed dispatch | Non-CAN `PGWTest::Probe` binding sends/receives native values using the same adapter |
 | Metadata preservation policy | Missing capability rejected at bind; nonportable/negative/oversized/nanosecond-invalid timestamps rejected; actual peer sees `123s + 456ns` |
 | Diagnostic visibility/isolation | Actual typed management reader sees accepted/export-error counters; rejected exporter input does not fault routing |
-| Bounded operation / allocation coverage | 1,000 recorded stress steps and 4,004 local state acceptances; zero post-READY arena requests; libc/OSAPI interception reports observed allocations |
+| Bounded operation / allocation coverage | 1,000 recorded stress iterations and 4,004 local state acceptances; zero post-READY arena requests; libc/OSAPI interception reports observed allocations |
 | Actual companion executable | `dds.companion_processes`: separate owned processes communicate over real DDS and verify exact memory-CAN bytes |
 | Enabled/disabled management inventories | Both configurations clean-built and ran all four DDS/config tests |
 

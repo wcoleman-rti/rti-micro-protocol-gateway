@@ -203,6 +203,9 @@ def control_catalog(root):
     for node in root:
         if node.tag == "route":
             route_names.add(identifier(node.get("id", "")))
+        elif node.tag == "session":
+            for route in node.findall("route"):
+                route_names.add(identifier(route.get("id", "")))
         elif node.tag in ("connection", "native-connection"):
             connection = identifier(node.get("id", ""))
             adapter = identifier(node.get("adapter", ""))
@@ -219,8 +222,9 @@ def compile_control_resources(control_node, route_names, connection_adapters,
                               stream_adapters, stream_roles, adapter_manifests):
     if control_node is None:
         return [], [], 0, 0
-    shape(control_node, (), (
+    shape(control_node, ("session",), (
         "max-controller-peers", "minimum-telemetry-period-ms"))
+    identifier(control_node.get("session"))
     controller_peer_limit = positive(control_node.get("max-controller-peers", "1"))
     if controller_peer_limit > 32:
         raise ConfigError("maximum controller peers must be 1..32")
@@ -373,12 +377,8 @@ def compile_config(gateway, dds=None, inventory=None, remote_control=False,
     root = validate_gateway_xml(gateway)
     if root.tag != "gateway":
         raise ConfigError("root must be gateway")
-    shape(root, ("dds", "route-budget", "sample-budget"), ("diagnostic-period-steps",))
-    positive(root.get("route-budget"))
+    shape(root, ("dds", "sample-budget"))
     positive(root.get("sample-budget"))
-    period = root.get("diagnostic-period-steps", "0")
-    if period != "0":
-        positive(period)
     dds_path = Path(dds) if dds else Path(gateway).parent / root.get("dds")
     model = parse(dds_path)
     if model.tag != "dds":
@@ -399,17 +399,53 @@ def compile_config(gateway, dds=None, inventory=None, remote_control=False,
             if key in participants:
                 raise ConfigError("duplicate DDS participant")
             participants[key] = participant
-    bindings, connections, streams, routes, ids, natives = {}, [], {}, [], set(), []
+    bindings, connections, streams, sessions, routes, ids, natives = (
+        {}, [], {}, [], [], set(), [])
+    session_names = set()
     route_names, connection_adapters, stream_adapters, stream_roles = set(), {}, {}, {}
+    routed_inputs = set()
     phase = 0
     native_limits = {}
     for node in root:
         expected_phase = {"binding": 0, "connection": 1,
-                          "native-connection": 1, "route": 2, "control": 3}.get(node.tag)
+                          "native-connection": 1, "session": 2,
+                          "control": 3}.get(node.tag)
         if expected_phase is None or expected_phase < phase:
             raise ConfigError(f"unknown/out-of-order element {node.tag}")
         phase = expected_phase
         if node.tag == "control":
+            continue
+        if node.tag == "session":
+            shape(node, ("name",))
+            session_name = identifier(node.get("name"))
+            if session_name in ids:
+                raise ConfigError(f"duplicate id {session_name}")
+            ids.add(session_name)
+            session_names.add(session_name)
+            session_routes = []
+            for route in node:
+                if route.tag != "route":
+                    raise ConfigError("session permits only route children")
+                shape(route, ("id", "input", "output"))
+                route_name = identifier(route.get("id"))
+                if route_name in ids:
+                    raise ConfigError(f"duplicate id {route_name}")
+                ids.add(route_name)
+                source, dest = streams.get(route.get("input")), streams.get(route.get("output"))
+                if not source or not dest or source[0] != "reader" or dest[0] != "writer":
+                    raise ConfigError("unresolved/wrong-role route")
+                if source[1:] != dest[1:]:
+                    raise ConfigError("incompatible route schema/fingerprint")
+                if route.get("input") in routed_inputs:
+                    raise ConfigError("an input stream may be consumed by only one route")
+                routed_inputs.add(route.get("input"))
+                compiled_route = dict(route.attrib, session=session_name)
+                session_routes.append(compiled_route)
+                routes.append(compiled_route)
+                route_names.add(route_name)
+            if not session_routes:
+                raise ConfigError("session must contain at least one route")
+            sessions.append({"name": session_name, "routes": session_routes})
             continue
         name = identifier(node.get("id", ""))
         if name in ids:
@@ -561,22 +597,13 @@ def compile_config(gateway, dds=None, inventory=None, remote_control=False,
                 stream_adapters[sn] = connection_adapters[name]
                 stream_roles[sn] = stream.get("role")
                 natives.append(dict(stream.attrib, connection=name))
-        else:
-            shape(node, ("id", "input", "output"))
-            if len(node):
-                raise ConfigError("route children forbidden")
-            source, dest = streams.get(node.get("input")), streams.get(node.get("output"))
-            if not source or not dest or source[0] != "reader" or dest[0] != "writer":
-                raise ConfigError("unresolved/wrong-role route")
-            if source[1:] != dest[1:]:
-                raise ConfigError("incompatible route schema/fingerprint")
-            routes.append(dict(node.attrib))
-            route_names.add(name)
-    if not bindings or not connections:
-        raise ConfigError("bindings and connections required")
+    if not bindings or not connections or not sessions:
+        raise ConfigError("bindings, connections, and explicit sessions required")
     control_node = root.find("control")
     if control_node is not None and not remote_control:
         raise ConfigError("remote control section requires PGW_ENABLE_REMOTE_CONTROL")
+    if control_node is not None and control_node.get("session") not in session_names:
+        raise ConfigError("control session is not configured")
     (control_resources, control_metrics, telemetry_minimum_period_ms,
      controller_peer_limit) = compile_control_resources(
         control_node, route_names, connection_adapters, stream_adapters,
@@ -586,20 +613,22 @@ def compile_config(gateway, dds=None, inventory=None, remote_control=False,
         for binding in bindings.values():
             if binding["schema"] == manifest["schema"] and binding["fingerprint"] != manifest["fingerprint"]:
                 raise ConfigError("stale schema fingerprint")
-    return (bindings, connections, routes, {
-        "route_budget": int(root.get("route-budget")),
-        "sample_budget": int(root.get("sample-budget")),
-        "diagnostic_period_steps": int(period), **native_limits}, natives,
+    return (bindings, connections, sessions, routes, {
+        "sample_budget": int(root.get("sample-budget")), **native_limits}, natives,
             control_resources, control_metrics, telemetry_minimum_period_ms,
-            controller_peer_limit)
+            controller_peer_limit,
+            control_node.get("session") if control_node is not None else None)
 
 
 def emit(config, output):
-    (bindings, connections, routes, settings, natives, control_resources,
-     control_metrics, telemetry_minimum_period_ms, controller_peer_limit) = config
+    (bindings, connections, sessions, routes, settings, natives, control_resources,
+     control_metrics, telemetry_minimum_period_ms, controller_peer_limit,
+     control_session) = config
     lines = ['#include "pgw/dds/connext_micro.h"', '#include "pgw/compiled_config.h"']
     for name, value in settings.items():
         lines.append(f"const unsigned pgw_config_{name} = {value}u;")
+    lines.append("const char *const pgw_config_control_session = " +
+                 (json.dumps(control_session) if control_session else "NULL") + ";")
     if control_resources:
         lines.append("const unsigned pgw_control_max_controller_peers = "
                      f"{controller_peer_limit}u;")
@@ -666,6 +695,17 @@ def emit(config, output):
     else:
         lines.append("const PGW_CompiledRouteSeq pgw_config_routes = "
                      "REDA_DEFINE_SEQUENCE_INITIALIZER(PGW_CompiledRouteElement);")
+    lines.append("static PGW_CompiledSession pgw_sessions[] = {")
+    route_offset = 0
+    for session in sessions:
+        route_count = len(session["routes"])
+        lines.append("    {%s, %du, %du}," %
+                     (json.dumps(session["name"]), route_offset, route_count))
+        route_offset += route_count
+    lines.append("};")
+    lines.append("const PGW_CompiledSessionSeq pgw_config_sessions = "
+                 "REDA_DEFINE_SEQUENCE_INITIALIZER_W_LOAN(pgw_sessions, "
+                 f"{len(sessions)}, {len(sessions)}, PGW_CompiledSessionElement);")
     lines.append("static PGW_CompiledNativeStream pgw_native_streams[] = {")
     for stream in natives:
         lines.append("    {%s, %s, %s, %s, %su, %s}," % (

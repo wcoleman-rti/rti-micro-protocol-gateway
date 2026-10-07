@@ -29,10 +29,19 @@ static int run_can_route_batches(PGW_Service *service, PGW_Connection *can,
                                  PGW_CANMemory *transport,
                                  const PGW_CANFrame *frame, size_t batches)
 {
+    (void)can;
+    if (!PGW_SessionSeq_get_length(&service->sessions)) return 1;
+    PGW_Session *session = PGW_SessionSeq_get_reference(&service->sessions, 0);
     for (size_t i = 0; i < batches; ++i) {
-        if (PGW_CANMemory_inject(transport, frame) != PGW_OK ||
-            PGW_CAN_poll(can, 4) != PGW_OK ||
-            PGW_Service_step(service) != PGW_OK)
+        uint64_t target = atomic_load_explicit(&session->dispatched_routes,
+                                                memory_order_acquire) + 1;
+        if (PGW_CANMemory_inject(transport, frame) != PGW_OK) return 1;
+        for (unsigned attempt = 0; attempt < 2000 &&
+             atomic_load_explicit(&session->dispatched_routes,
+                                  memory_order_acquire) < target; ++attempt)
+            OSAPI_Thread_sleep(1);
+        if (atomic_load_explicit(&session->dispatched_routes,
+                                 memory_order_acquire) < target)
             return 1;
     }
     return 0;

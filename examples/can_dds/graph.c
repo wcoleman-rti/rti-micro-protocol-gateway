@@ -33,6 +33,12 @@
 #include "reda/reda_sequence_defn.h"
 #undef T
 #undef TSeq
+#define REDA_SEQUENCE_USER_API
+#define T PGW_CompiledSessionElement
+#define TSeq PGW_CompiledSessionSeq
+#include "reda/reda_sequence_defn.h"
+#undef T
+#undef TSeq
 
 static const char *native_endpoint(const char *connection, const char *stream, bool reader)
 {

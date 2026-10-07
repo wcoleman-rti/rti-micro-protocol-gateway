@@ -37,17 +37,19 @@ and outcome sequences before service initialization. It adopts views of their
 fixed storage; writers receive `PGW_WriteResultSeq`, not a separate
 pointer/count result span. The core sets its logical length to the sample count.
 
-Routes synchronously consume one bounded batch per selected step. `route_budget`
-limits visited routes, `sample_budget` limits each read, and round-robin cursor
-movement includes faulted/empty routes. Backpressure and invalid commands drop
-the affected samples; fatal read/write/return failures fault that route with
-`PGW_Error` context. Other routes remain runnable. Callers receive the error and
-must not assume service-wide shutdown or retry.
+Routes synchronously consume one bounded batch when their reader is pending.
+`sample_budget` limits each read. On each session wake, pending routes are
+visited in round-robin order, including the scan through paused/faulted routes;
+the starting cursor rotates after each wake. Backpressure and invalid commands
+drop the affected samples; fatal read/write/return failures fault that route
+with `PGW_Error` context. Other routes remain runnable. Dispatch errors are
+recorded asynchronously in session/route status; callers must not assume
+service-wide shutdown or retry.
 Route faults have their own counter, distinct from per-sample fatal write
 outcomes; faulting a route does not double-count a rejected sample.
 `PGW_Route_pause` excludes a ready/running route from routing without changing
-the service's round-robin schedule; `PGW_Route_resume` makes it eligible for
-the next step. Both are synchronous and allocation-free. Repeating either
+the session's round-robin schedule; `PGW_Route_resume` makes it eligible for
+the next wake. Both are synchronous and allocation-free. Repeating either
 action returns `PGW_NO_CHANGE`, allowing a control layer to avoid publishing
 duplicate state changes. A faulted route cannot be resumed.
 
@@ -69,18 +71,20 @@ Metrics are absent, including timing calls and per-route storage, when the
 option is OFF.
 
 With `PGW_ENABLE_REMOTE_CONTROL`, a service may freeze a borrowed control
-resource catalog and nonblocking endpoint before initialization. A step takes at
-most `PGW_CONTROL_MAX_COMMANDS_PER_STEP` commands, applies explicit actions,
-publishes results with source correlation metadata, then visits routes. Route
-actions use the same pause/resume operations above; adapter actions use optional
-versioned operation tables and are checked against their declared capability
-mask. Initialization seeds one state snapshot per selected resource. Failed
-state writes leave only the latest snapshot dirty; a step retries at most one
-dirty resource. Failed result writes are counted and are not retried, so they do
-not imply controller delivery. `PGW_Service_control_counters` copies the
-bounded local counters without adding another DDS endpoint. When the feature is
-compiled but no control catalog is configured, service stepping performs no
-control reads or writes.
+resource catalog and nonblocking endpoint before initialization. The explicitly
+selected session registers a command-reader listener and processes at most
+`PGW_CONTROL_MAX_COMMANDS_PER_BATCH` commands per wake, applies explicit
+actions, publishes results with source correlation metadata, then visits
+pending routes. Route actions use the same pause/resume operations above;
+adapter actions use optional versioned operation tables and are checked
+against their declared capability mask. Initialization seeds one state
+snapshot per selected resource. Failed state writes leave only the latest
+snapshot dirty; a timed `WaitSet` wake retries at most one dirty resource.
+Failed result writes are counted and are not retried, so they do not imply
+controller delivery. `PGW_Service_control_counters` copies the bounded local
+counters without adding another DDS endpoint. When the feature is compiled
+but no control catalog is configured, the session has no control listener or
+control timeout.
 
 Storage comes from caller arrays or a checked, initialization-only arena.
 There is no runtime resizing or fallback allocator. Interface ABI versions,
@@ -88,13 +92,13 @@ required callbacks, capacities, duplicate registrations, and writer-negotiated
 source compatibility are validated before READY. Registries are frozen by the
 embedding application after static registration.
 Adapter/binding registries and route catalogs are `PGW_AdapterSeq`,
-`PGW_RepresentationSeq` and `PGW_RouteSeq`. Their initialization functions
-accept native typed sequence views over caller-provisioned storage.
-Registry registration and traversal
-use native capacity/length/reference APIs; no duplicate gateway count/capacity
-fields are maintained. `PGW_Service_set_routes` adopts the fixed typed route
-sequence storage.
-Service finalization detaches the catalog and each route's sample/outcome views;
+`PGW_RepresentationSeq`, `PGW_RouteSeq` and `PGW_SessionSeq`. Their
+initialization functions accept native typed sequence views over
+caller-provisioned storage. Registry registration and traversal use native
+capacity/length/reference APIs; no duplicate gateway count/capacity fields are
+maintained. `PGW_Session_set_routes` adopts each fixed typed route sequence and
+`PGW_Service_set_sessions` adopts the fixed session catalog. Service
+finalization detaches the catalogs and each route's sample/outcome views;
 reinitialization explicitly adopts storage again.
 `PGW_core_resource_report` sums actual object sizes (including internal padding),
 fixed pointer/result arrays and optional diagnostics storage with checked
@@ -117,9 +121,10 @@ contention drops have independent counters. There are no retry loops and no
 recursive diagnostic events. Severity filtering does not filter operational
 counters. Event time validity is separate from its numeric timestamp. The
 service's observation-clock callback is fallible and never substitutes zero
-when it fails. If a clock-backed event cannot be timestamped, the step returns
-`PGW_IO_ERROR` while preserving already-updated route counters and loan
-behavior. CAN-native timestamps remain separate sample metadata.
+when it fails. If a clock-backed event cannot be timestamped during worker
+dispatch, the session records `PGW_IO_ERROR` while preserving already-updated
+route counters and loan behavior. CAN-native timestamps remain separate sample
+metadata.
 Optional initialization-time event rate configuration bounds publication within
 a monotonic-clock window and counts rate drops separately. Producers must use
 the same observation clock; protocol source timestamps are not event clocks.

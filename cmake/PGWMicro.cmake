@@ -63,9 +63,9 @@ endif()
 string(REGEX MATCH "version \"([^\"]+)\"" _java_match "${_java_out}${_java_err}")
 set(PGW_JRE_VERSION "${CMAKE_MATCH_1}")
 
-set(_pgw_micro_components "")
+set(_pgw_micro_components c)
 if(PGW_ENABLE_DDS)
-    set(_pgw_micro_components c dpde appgen)
+    list(APPEND _pgw_micro_components dpde appgen)
 endif()
 file(REAL_PATH "${RTIMEHOME}" _pgw_requested_root)
 set(_pgw_requested_pil "${RTIME_PIL_ARCH}")
@@ -92,7 +92,7 @@ endif()
 add_library(pgw_micro_infrastructure INTERFACE)
 add_library(PGW::micro_infrastructure ALIAS pgw_micro_infrastructure)
 target_link_libraries(pgw_micro_infrastructure INTERFACE
-    "$<LINK_GROUP:RESCAN,RTIConnextMicroDDS::core,RTIConnextMicroDDS::osapi>")
+    "$<LINK_GROUP:RESCAN,RTIConnextMicroDDS::c_api,RTIConnextMicroDDS::core,RTIConnextMicroDDS::osapi>")
 if(PGW_ENABLE_DDS)
     add_library(pgw_micro_dds INTERFACE)
     add_library(PGW::micro_dds ALIAS pgw_micro_dds)
@@ -119,5 +119,5 @@ MAG=${RTIAPPGEN_VERSION}
 CAN=${PGW_ENABLE_CAN}
 DDS=${PGW_ENABLE_DDS}
 Remote control=${PGW_ENABLE_REMOTE_CONTROL}
-Core runner=${PGW_ENABLE_RUNNER}
+Core runtime=event-driven sessions
 ")
