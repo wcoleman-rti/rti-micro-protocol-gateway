@@ -63,9 +63,9 @@ endif()
 string(REGEX MATCH "version \"([^\"]+)\"" _java_match "${_java_out}${_java_err}")
 set(PGW_JRE_VERSION "${CMAKE_MATCH_1}")
 
-set(_pgw_micro_components "")
+set(_pgw_micro_components c)
 if(PGW_ENABLE_DDS)
-    set(_pgw_micro_components c dpde appgen)
+    list(APPEND _pgw_micro_components dpde appgen)
 endif()
 file(REAL_PATH "${RTIMEHOME}" _pgw_requested_root)
 set(_pgw_requested_pil "${RTIME_PIL_ARCH}")
@@ -85,14 +85,19 @@ endif()
 if(NOT RTIAPPGEN_VERSION STREQUAL "4.3.0" OR NOT RTICODEGEN_VERSION)
     message(FATAL_ERROR "Expected Micro MAG 4.3.0 and a recognized Codegen version")
 endif()
-if(NOT CMAKE_C_LINK_GROUP_USING_RESCAN_SUPPORTED AND NOT CMAKE_LINK_GROUP_USING_RESCAN_SUPPORTED)
-    message(FATAL_ERROR "Micro infrastructure requires linker RESCAN support on this platform")
-endif()
-
 add_library(pgw_micro_infrastructure INTERFACE)
 add_library(PGW::micro_infrastructure ALIAS pgw_micro_infrastructure)
-target_link_libraries(pgw_micro_infrastructure INTERFACE
-    "$<LINK_GROUP:RESCAN,RTIConnextMicroDDS::core,RTIConnextMicroDDS::osapi>")
+if(MSVC)
+    target_link_libraries(pgw_micro_infrastructure INTERFACE
+        RTIConnextMicroDDS::c_api RTIConnextMicroDDS::core RTIConnextMicroDDS::osapi)
+else()
+    if(NOT CMAKE_C_LINK_GROUP_USING_RESCAN_SUPPORTED AND
+       NOT CMAKE_LINK_GROUP_USING_RESCAN_SUPPORTED)
+        message(FATAL_ERROR "Micro infrastructure requires linker RESCAN support on this platform")
+    endif()
+    target_link_libraries(pgw_micro_infrastructure INTERFACE
+        "$<LINK_GROUP:RESCAN,RTIConnextMicroDDS::c_api,RTIConnextMicroDDS::core,RTIConnextMicroDDS::osapi>")
+endif()
 if(PGW_ENABLE_DDS)
     add_library(pgw_micro_dds INTERFACE)
     add_library(PGW::micro_dds ALIAS pgw_micro_dds)
@@ -119,5 +124,5 @@ MAG=${RTIAPPGEN_VERSION}
 CAN=${PGW_ENABLE_CAN}
 DDS=${PGW_ENABLE_DDS}
 Remote control=${PGW_ENABLE_REMOTE_CONTROL}
-Core runner=${PGW_ENABLE_RUNNER}
+Core runtime=event-driven sessions
 ")

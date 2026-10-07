@@ -38,7 +38,7 @@ int main(int argc, char **argv)
     PGW_SampleRef refs[8];
     PGW_WriteResult result;
     PGW_WriteResultSeq result_sequence;
-    PGW_Representation source;
+    PGW_SampleRepresentation source;
     Sample command = {{1001, {.kind = PGW_VALUE_DOUBLE, .data.real = 123.4}}};
     bool send = argc == 2;
     bool observed = false;
@@ -62,8 +62,8 @@ int main(int argc, char **argv)
     if (PGW_DDS_register_model(APPGEN_get_library_seq()) != PGW_OK ||
         PGW_DDSConnextMicroAdapter.create(&pgw_config_companion, &arena, &connection) != PGW_OK)
         goto done;
-    if (PGW_DDSConnextMicroAdapter.connection->reader(connection, "state_powertrain", &reader) != PGW_OK ||
-        PGW_DDSConnextMicroAdapter.connection->writer(connection, "command_powertrain", &writer) != PGW_OK ||
+    if (PGW_DDSConnextMicroAdapter.connection->lookup_stream_reader(connection, "state_powertrain", &reader) != PGW_OK ||
+        PGW_DDSConnextMicroAdapter.connection->lookup_stream_writer(connection, "command_powertrain", &writer) != PGW_OK ||
         !PGW_SampleSeq_initialize(&seq) ||
         !PGW_SampleSeq_loan_contiguous(&seq, refs, 0, 8) ||
         !PGW_WriteResultSeq_initialize(&result_sequence) ||

@@ -165,7 +165,7 @@ typedef struct {
 typedef struct {
     const char *name;           /**< Unique category name. */
     size_t capacity;            /**< Nonzero queued sample capacity. */
-    const PGW_Schema *schema;   /**< Schema advertised for category samples. */
+    const PGW_TypeInfo *schema;   /**< Schema advertised for category samples. */
 } PGW_CANCategory;
 /** @brief Category definition element alias used in sequences. */
 typedef PGW_CANCategory PGW_CANCategoryDefinition;
@@ -181,15 +181,15 @@ typedef struct PGW_CANCategorySeq PGW_CANCategorySeq;
 /** @brief Configuration used to create a CAN connection.
  * This object refers to caller-owned transports, mappings, definitions, and
  * category storage. Keep those resources alive until connection close and
- * configuration finalization. Adapter operations are serialized by the CAN
- * service; concurrent access to one connection is not supported.
+ * configuration finalization. Each connection owns one receiver thread;
+ * receiver queue access and concurrent writers are serialized by the adapter.
  */
 typedef struct {
     uint32_t entity_id;                    /**< Diagnostic entity identifier. */
     PGW_CANTransport transport;            /**< Borrowed transport handle. */
     PGW_CANMapping mapping;                /**< Initialized message/signal mapping. */
     PGW_CANCategorySeq categories;         /**< Borrowed output category definitions. */
-    size_t receive_budget;                 /**< Maximum frames handled per poll. */
+    size_t receive_budget;                 /**< Maximum frames handled per receiver batch. */
     size_t write_capacity;                 /**< Maximum queued write commands. */
     PGW_Diagnostics *diagnostics;           /**< Optional borrowed diagnostic ring. */
     bool disable_metadata_capture;         /**< Suppress per-sample frame metadata. */
@@ -271,18 +271,9 @@ bool PGW_CANFrame_valid(const PGW_CANFrame *);
  *         PGW_CAPACITY on arithmetic overflow.
  */
 PGW_Status PGW_CAN_storage_size(const PGW_CANConfig *config, size_t *bytes);
-/** @brief Poll and decode up to a bounded number of received frames.
- * Processes no more than the smaller of @p budget and configured receive
- * budget. Recognized decoded samples are queued for category readers; the
- * function does not block waiting for input. Calls must be serialized with
- * other operations on the connection.
- * @return PGW_OK when polling completes, PGW_INVALID for a closed/invalid
- *         connection, or a transport receive status. Empty input is normal and
- *         returns PGW_OK.
- */
-PGW_Status PGW_CAN_poll(PGW_Connection *, size_t);
 /** @brief Copy the connection's current CAN statistics.
- * @return PGW_OK on success or PGW_INVALID for a null pointer.
+ * The adapter synchronizes the snapshot with its receive thread and route
+ * writers. @return PGW_OK on success or an error for invalid input/lock failure.
  */
 PGW_Status PGW_CAN_stats(const PGW_Connection *, PGW_CANStats *);
 /** @brief Retrieve the latest received baseline timestamp for a message index.

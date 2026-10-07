@@ -10,18 +10,19 @@
  * the software.
  */
 
-#define _POSIX_C_SOURCE 200809L
+#include "pgw/atomic.h"
 #include "pgw/can_memory.h"
+#include "pgw/runtime.h"
 #include "pgw_codec.h"
 #include "allocation.h"
 #include "osapi/osapi_heap.h"
+#include "osapi/osapi_thread.h"
 #include <assert.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 enum { CAN_ARENA_BYTES = 16384 };
 
@@ -32,17 +33,18 @@ typedef struct {
 
 static uint64_t now_ns(void)
 {
-    struct timespec t;
-    if (clock_gettime(CLOCK_MONOTONIC, &t)) return 0;
-    return (uint64_t)t.tv_sec * UINT64_C(1000000000) + (uint64_t)t.tv_nsec;
+    uint64_t now;
+    if (!PGW_Runtime_monotonic_time_ns(&now)) {
+        fprintf(stderr, "OSAPI monotonic clock unavailable\n");
+        exit(2);
+    }
+    return now;
 }
 
 static bool service_clock(void *context, uint64_t *nanoseconds)
 {
     (void)context;
-    if (!nanoseconds) return false;
-    *nanoseconds = now_ns();
-    return *nanoseconds != 0;
+    return PGW_Runtime_monotonic_time_ns(nanoseconds);
 }
 
 static void observe(Histogram *h, uint64_t duration)
@@ -118,21 +120,21 @@ static void allocation_controls(void)
 
 static int usage(const char *name)
 {
-    fprintf(stderr, "usage: %s [steps:1..100000000] [timing:0|1] [metadata:0|1]\n", name);
+    fprintf(stderr, "usage: %s [batches:1..100000000] [timing:0|1] [metadata:0|1]\n", name);
     return 2;
 }
 
 int main(int argc, char **argv)
 {
-    uint64_t steps = 100000, checked_frames = 0;
+    uint64_t batches = 100000, checked_frames = 0;
     bool timing = true, metadata = true;
     if (argc > 4) return usage(argv[0]);
     if (argc > 1) {
         char *end;
         errno = 0;
-        steps = strtoull(argv[1], &end, 10);
+        batches = strtoull(argv[1], &end, 10);
         if (errno || !argv[1][0] || *end || argv[1][0] == '-' ||
-            !steps || steps > 100000000) return usage(argv[0]);
+            !batches || batches > 100000000) return usage(argv[0]);
     }
     if (argc > 2) {
         if ((argv[2][0] != '0' && argv[2][0] != '1') || argv[2][1])
@@ -145,8 +147,9 @@ int main(int argc, char **argv)
         metadata = argv[3][0] == '1';
     }
     allocation_controls();
+    assert(PGW_Runtime_initialize());
+    assert(DDS_DomainParticipantFactory_get_instance());
     uint64_t init_start = now_ns();
-    assert(init_start);
     const size_t initialization_heap_bytes = (size_t)CAN_ARENA_BYTES * 2;
     void *storage = malloc(initialization_heap_bytes);
     if (!storage) return 3;
@@ -157,7 +160,7 @@ int main(int argc, char **argv)
     PGW_CANFrame rx[2][2], tx[2][1], baseline = {0}, expected = {0};
     PGW_CANMemory memory[2];
     PGW_Connection *connections[2];
-    PGW_Schema schema = {PGW_codec_schema.name, PGW_codec_schema.version,
+    PGW_TypeInfo schema = {PGW_codec_schema.name, PGW_codec_schema.version,
                          PGW_codec_schema.fingerprint};
     PGW_CANCategory categories[2] = {
         {"powertrain", 4, &schema}, {"auxiliary", 4, &schema}
@@ -188,9 +191,9 @@ int main(int argc, char **argv)
     PGW_WriteResultSeq route_result_storage;
     PGW_RouteSeq route_sequence;
     PGW_Route route = {.id = 1};
-    assert(PGW_CANAdapter.connection->reader(connections[0], "powertrain",
+    assert(PGW_CANAdapter.connection->lookup_stream_reader(connections[0], "powertrain",
                                              &route.reader) == PGW_OK);
-    assert(PGW_CANAdapter.connection->writer(connections[1], "powertrain",
+    assert(PGW_CANAdapter.connection->lookup_stream_writer(connections[1], "powertrain",
                                              &route.writer) == PGW_OK);
     assert(PGW_SampleSeq_initialize(&route_sample_storage));
     assert(PGW_SampleSeq_loan_contiguous(&route_sample_storage, references, 0, 4));
@@ -200,16 +203,21 @@ int main(int argc, char **argv)
                                         &route_result_storage) == PGW_OK);
     assert(PGW_RouteSeq_initialize(&route_sequence));
     assert(PGW_RouteSeq_loan_contiguous(&route_sequence, &route, 1, 1));
-    PGW_Service service = {
-        .route_budget = 1, .sample_budget = 4,
-        .clock_ns = service_clock
-    };
-    assert(PGW_Service_set_routes(&service, &route_sequence) == PGW_OK);
+    PGW_Session session = {.name = "can-benchmark"};
+    PGW_SessionSeq session_sequence;
+    assert(PGW_SessionSeq_initialize(&session_sequence));
+    assert(PGW_SessionSeq_loan_contiguous(&session_sequence, &session, 1, 1));
+    assert(PGW_Session_set_routes(&session, &route_sequence) == PGW_OK);
+    PGW_Service service = {.sample_budget = 4, .clock_ns = service_clock};
+    assert(PGW_Service_set_sessions(&service, &session_sequence) == PGW_OK);
+    assert(PGW_SessionSeq_unloan(&session_sequence));
+    assert(PGW_SessionSeq_finalize(&session_sequence));
     assert(PGW_Service_initialize(&service) == PGW_OK);
+    assert(PGW_Service_start(&service) == PGW_OK);
     PGW_StreamReader baseline_reader;
     PGW_SampleSeq baseline_loan;
     PGW_SampleRef baseline_references[4];
-    assert(PGW_CANAdapter.connection->reader(connections[1], "powertrain",
+    assert(PGW_CANAdapter.connection->lookup_stream_reader(connections[1], "powertrain",
                                              &baseline_reader) == PGW_OK);
     assert(PGW_SampleSeq_initialize(&baseline_loan));
     assert(PGW_SampleSeq_loan_contiguous(&baseline_loan, baseline_references, 0, 4));
@@ -222,11 +230,16 @@ int main(int argc, char **argv)
     expected = baseline;
     PGW_allocation_monitor(true);
     uint64_t start = now_ns();
-    assert(start);
     /* The first received baseline and the first routed traffic are monitored. */
     assert(PGW_CANMemory_inject(&memory[1], &baseline) == PGW_OK);
-    assert(PGW_CAN_poll(connections[1], 1) == PGW_OK);
-    assert(baseline_reader.iface->read(baseline_reader.state, &baseline_loan, 4) == PGW_OK);
+    PGW_Status baseline_status = PGW_NO_DATA;
+    for (unsigned attempt = 0; attempt < 2000 &&
+         baseline_status == PGW_NO_DATA; ++attempt) {
+        baseline_status = baseline_reader.iface->read(
+            baseline_reader.state, &baseline_loan, 4);
+        if (baseline_status == PGW_NO_DATA) OSAPI_Thread_sleep(1);
+    }
+    assert(baseline_status == PGW_OK);
     assert(PGW_SampleSeq_get_length(&baseline_loan) == 4);
     for (RTI_INT32 i = 0; i < 4; ++i) {
         PGW_Timestamp timestamp;
@@ -238,7 +251,7 @@ int main(int argc, char **argv)
     }
     assert(baseline_reader.iface->return_loan(baseline_reader.state, &baseline_loan) == PGW_OK);
     bool queued = false;
-    for (uint64_t i = 0; i < steps; ++i) {
+    for (uint64_t i = 0; i < batches; ++i) {
         PGW_CANFrame ingress = {0}, want = baseline, sent;
         uint16_t speed = (uint16_t)(1000 + i % 1000);
         ingress.id = 0x100; ingress.length = 8;
@@ -251,12 +264,23 @@ int main(int argc, char **argv)
                                            (uint32_t)(i % 1000000000)};
         want.data[2] = 0xff; want.data[3] = 0xea;
         want.data[4] = 0xa4; want.data[5] = (uint8_t)(i % 4);
-        assert(PGW_CANMemory_inject(&memory[0], &ingress) == PGW_OK);
+        uint64_t target_dispatch = PGW_ATOMIC_LOAD(
+            &session.dispatched_routes, OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) + 1;
         uint64_t before = timing ? now_ns() : 0;
-        assert(PGW_Service_step(&service) == PGW_OK);
+        assert(PGW_CANMemory_inject(&memory[0], &ingress) == PGW_OK);
+        for (unsigned attempt = 0; attempt < 2000 &&
+             PGW_ATOMIC_LOAD(&session.dispatched_routes,
+                                  OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) < target_dispatch;
+             ++attempt) OSAPI_Thread_sleep(1);
+        assert(PGW_ATOMIC_LOAD(&session.dispatched_routes,
+                                    OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) >= target_dispatch);
         uint64_t after = timing ? now_ns() : 0;
         if (timing) {
-            assert(before && after >= before);
+            if (after < before) {
+                fprintf(stderr, "OSAPI monotonic clock moved backwards: "
+                        "%" PRIu64 " -> %" PRIu64 "\n", before, after);
+                return 4;
+            }
             observe(&histogram, after - before);
         }
         bool blocked = i % 8 == 7;
@@ -293,17 +317,17 @@ int main(int argc, char **argv)
     assert(PGW_CAN_stats(connections[0], &input_stats) == PGW_OK);
     assert(PGW_CAN_stats(connections[1], &output_stats) == PGW_OK);
     PGW_Counters_snapshot(&route.counters, 1, 1, end, &counters);
-    uint64_t blocked_frames = steps / 8;
-    assert(input_stats.received_frames == steps &&
-           input_stats.decoded_samples == steps * 4 &&
+    uint64_t blocked_frames = batches / 8;
+    assert(input_stats.received_frames == batches &&
+           input_stats.decoded_samples == batches * 4 &&
            !input_stats.receive_drops && !input_stats.invalid_commands);
     assert(output_stats.received_frames == 1 && output_stats.decoded_samples == 4 &&
-           output_stats.accepted_commands == (steps - blocked_frames) * 4 &&
+           output_stats.accepted_commands == (batches - blocked_frames) * 4 &&
            output_stats.backpressure_commands == blocked_frames * 4 &&
            !output_stats.invalid_commands && !output_stats.receive_drops);
-    assert(checked_frames == steps - blocked_frames);
+    assert(checked_frames == batches - blocked_frames);
     assert(memory[1].tx_backpressure == blocked_frames);
-    assert(counters.values[PGW_COUNT_RECEIVED] == steps * 4 &&
+    assert(counters.values[PGW_COUNT_RECEIVED] == batches * 4 &&
            counters.values[PGW_COUNT_ACCEPTED] == checked_frames * 4 &&
            counters.values[PGW_COUNT_BACKPRESSURE] == blocked_frames * 4 &&
            counters.values[PGW_COUNT_LOANS] == 0 &&
@@ -335,9 +359,9 @@ int main(int argc, char **argv)
         sizeof(references) + sizeof(results) + sizeof(histogram) +
         sizeof(baseline_reader) + sizeof(baseline_loan) + sizeof(baseline_references);
     printf("{\"format_version\":1,\"workload\":\"memory-can-decode-core-patch-backpressure-v1\","
-        "\"steps\":%" PRIu64 ",\"samples\":%" PRIu64 ",\"timing\":%s,\"metadata\":%s,"
+        "\"batches\":%" PRIu64 ",\"samples\":%" PRIu64 ",\"timing\":%s,\"metadata\":%s,"
         "\"elapsed_ns\":%" PRIu64 ",\"initialization_ns\":%" PRIu64 ","
-        "\"samples_per_second\":%.3f,\"sample_rate_basis\":\"four routed command attempts per step\","
+        "\"samples_per_second\":%.3f,\"sample_rate_basis\":\"four routed command attempts per notification batch\","
         "\"gateway_runtime_allocations\":%" PRIu64 ",\"osapi_runtime_allocations\":%" PRIu64 ","
         "\"allocation_coverage\":\"wrapped libc malloc/calloc/realloc/aligned_alloc/posix_memalign and OSAPI allocate/realloc/allocate_buffer; memory CAN and core; all eight controls checked\","
         "\"received_frames\":%" PRIu64 ",\"decoded_signals\":%" PRIu64 ","
@@ -351,20 +375,20 @@ int main(int argc, char **argv)
         "\"arena_reserved_bytes\":%zu,\"gateway_initialization_heap_bytes\":%zu,"
         "\"gateway_initialization_heap_blocks\":1,\"arena_backing\":\"initialization-only malloc; no declared backing type\","
         "\"schema_fingerprint\":\"%s\","
-        "\"baseline_frames\":1,\"backpressure_period_steps\":8,"
+        "\"baseline_frames\":1,\"backpressure_period_batches\":8,"
         "\"metadata_capture\":{\"receive_timestamp\":%s,\"frame_context\":%s,"
         "\"configurable\":true,\"write_preservation\":false,\"timestamp_access_checks\":4,"
         "\"meaning\":\"injected portable RX timestamps, not native CAN sender timestamps\"},"
-        "\"step_latency_ns\":{\"boundary\":\"PGW_Service_step entry to return: CAN RX dequeue/decode, core forward, CAN stage/send, loan return; not wire latency\","
+        "\"dispatch_latency_ns\":{\"boundary\":\"CAN frame injection to completed bounded session dispatch and loan return; not wire latency\","
         "\"count\":%" PRIu64 ",\"min\":%" PRIu64 ",\"max\":%" PRIu64 ",\"mean\":%.3f,"
         "\"p50_upper\":%" PRIu64 ",\"p95_upper\":%" PRIu64 ",\"p99_upper\":%" PRIu64 ","
         "\"histogram\":\"64 power-of-two buckets, upper-bound percentiles; bucket zero covers 0..1 ns\"}}\n",
-        steps, steps * 4, timing ? "true" : "false", metadata ? "true" : "false",
+        batches, batches * 4, timing ? "true" : "false", metadata ? "true" : "false",
         elapsed, init_ns,
-        elapsed ? steps * 4.0 * 1e9 / elapsed : 0.0,
+        elapsed ? batches * 4.0 * 1e9 / elapsed : 0.0,
         libc_allocations, osapi_allocations,
         input_stats.received_frames + output_stats.received_frames,
-        input_stats.decoded_samples + output_stats.decoded_samples, steps * 4,
+        input_stats.decoded_samples + output_stats.decoded_samples, batches * 4,
         output_stats.accepted_commands, checked_frames, output_stats.backpressure_commands,
         checked_frames * 8, input_stats.queue_high_water,
         input_stats.mutable_bytes + output_stats.mutable_bytes, bound * 2,

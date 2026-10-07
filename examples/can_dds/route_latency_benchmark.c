@@ -7,32 +7,37 @@
  * of any type, including any warranty for fitness for any purpose.
  */
 
-#define _POSIX_C_SOURCE 200809L
+#include "pgw/atomic.h"
 #include "route_latency_benchmark.h"
 #include "pgw/dds/connext_micro.h"
+#include "pgw/runtime.h"
 #include "pgw/signal.h"
 #include "osapi/osapi_thread.h"
 #include <stdio.h>
-#include <time.h>
 
 bool PGW_example_route_latency_clock(void *context, uint64_t *out)
 {
-    struct timespec now;
     (void)context;
-    if (!out || clock_gettime(CLOCK_MONOTONIC, &now) != 0) return false;
-    *out = (uint64_t)now.tv_sec * UINT64_C(1000000000) +
-        (uint64_t)now.tv_nsec;
-    return true;
+    return PGW_Runtime_monotonic_time_ns(out);
 }
 
 static int run_can_route_batches(PGW_Service *service, PGW_Connection *can,
                                  PGW_CANMemory *transport,
                                  const PGW_CANFrame *frame, size_t batches)
 {
+    (void)can;
+    if (!PGW_SessionSeq_get_length(&service->sessions)) return 1;
+    PGW_Session *session = PGW_SessionSeq_get_reference(&service->sessions, 0);
     for (size_t i = 0; i < batches; ++i) {
-        if (PGW_CANMemory_inject(transport, frame) != PGW_OK ||
-            PGW_CAN_poll(can, 4) != PGW_OK ||
-            PGW_Service_step(service) != PGW_OK)
+        uint64_t target = PGW_ATOMIC_LOAD(&session->dispatched_routes,
+                                                OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) + 1;
+        if (PGW_CANMemory_inject(transport, frame) != PGW_OK) return 1;
+        for (unsigned attempt = 0; attempt < 2000 &&
+             PGW_ATOMIC_LOAD(&session->dispatched_routes,
+                                  OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) < target; ++attempt)
+            OSAPI_Thread_sleep(1);
+        if (PGW_ATOMIC_LOAD(&session->dispatched_routes,
+                                 OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) < target)
             return 1;
     }
     return 0;
@@ -43,7 +48,7 @@ static int verify_routed_dds_state(PGW_Connection *companion)
     PGW_StreamReader reader;
     PGW_SampleSeq samples;
     PGW_SampleRef references[8];
-    if (PGW_DDSConnextMicroConnection.reader(
+    if (PGW_DDSConnextMicroConnection.lookup_stream_reader(
             companion, "state_powertrain", &reader) != PGW_OK ||
         !PGW_SampleSeq_initialize(&samples) ||
         !PGW_SampleSeq_loan_contiguous(&samples, references, 0, 8))
@@ -86,12 +91,12 @@ static int verify_routed_dds_state(PGW_Connection *companion)
 
 int PGW_example_benchmark_routed_translation(
     PGW_Service *service, PGW_Route *route,
-    const PGW_Representation *canonical_source, PGW_Connection *can,
+    const PGW_SampleRepresentation *canonical_source, PGW_Connection *can,
     PGW_Connection *gateway, PGW_Connection *companion,
     PGW_CANMemory *transport, const PGW_CANFrame *frame)
 {
     const size_t batches_per_path = 1000;
-    const PGW_Representation *source = route->reader.representation;
+    const PGW_SampleRepresentation *source = route->reader.representation;
     if (!source || !source->access || !source->access->view ||
         !canonical_source || !canonical_source->access ||
         !canonical_source->access->copy_value ||
@@ -101,7 +106,7 @@ int PGW_example_benchmark_routed_translation(
 
     PGW_SampleAccessI fallback_access = *canonical_source->access;
     fallback_access.view = NULL;
-    PGW_Representation fallback = *canonical_source;
+    PGW_SampleRepresentation fallback = *canonical_source;
     fallback.access = &fallback_access;
     fallback.view_contract = NULL;
     route->reader.representation = canonical_source;

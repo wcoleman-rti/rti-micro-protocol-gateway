@@ -10,10 +10,12 @@
  * the software.
  */
 
-#define _POSIX_C_SOURCE 200809L
+#include "pgw/atomic.h"
 #include "pgw/dds/connext_micro.h"
+#include "pgw/runtime.h"
 #include "pgw/can_memory.h"
 #include "pgw/runtime.h"
+#include "pgw/compiled_config.h"
 #include "pgw_codec.h"
 #include "probe_binding.h"
 #include "ddsAppgen.h"
@@ -21,32 +23,30 @@
 #if defined(PGW_ENABLE_REMOTE_CONTROL)
 #include "control_binding.h"
 #include "control_resources.h"
-#include "pgw/compiled_config.h"
 #endif
 #include "graph.h"
 #include "allocation.h"
 #include "signalsSupport.h"
 #include "osapi/osapi_thread.h"
+#include "osapi/osapi_system.h"
 #if defined(PGW_ENABLE_ROUTE_LATENCY_METRICS)
 #include "route_latency_benchmark.h"
 #endif
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-#include <stdatomic.h>
-#include <time.h>
 
 extern const PGW_DDSConfig pgw_config_gateway, pgw_config_companion;
 #if defined(PGW_ENABLE_REMOTE_CONTROL)
 extern const size_t pgw_control_resource_count;
 #endif
-static atomic_bool frozen;
-static atomic_uint_fast64_t runtime_arena_calls;
+static PGW_ATOMIC(RTI_UINT32) frozen;
+static PGW_ATOMIC(RTI_UINT64) runtime_arena_calls;
 PGW_Status __real_PGW_Arena_allocate(PGW_Arena *, size_t, size_t, void **);
 PGW_Status __wrap_PGW_Arena_allocate(PGW_Arena *arena, size_t bytes,
                                     size_t alignment, void **out)
 {
-    if (atomic_load(&frozen)) atomic_fetch_add(&runtime_arena_calls, 1);
+    if (PGW_ATOMIC_LOAD_SEQ(&frozen)) PGW_ATOMIC_ADD_SEQ(&runtime_arena_calls, 1);
     return __real_PGW_Arena_allocate(arena, bytes, alignment, out);
 }
 #define CHECK(expression) do { if (!(expression)) { \
@@ -77,17 +77,13 @@ static const PGW_SampleAccessI signal_access = {
 static const PGW_SampleAccessI probe_access = {
     PGW_ABI_VERSION, sizeof(PGW_SampleAccessI), probe_copy, probe_timestamp, NULL
 };
-static PGW_Representation benchmark_signal_representation;
+static PGW_SampleRepresentation benchmark_signal_representation;
 static const PGW_SampleAccessI probe_payload_only = {
     PGW_ABI_VERSION, sizeof(PGW_SampleAccessI), probe_copy, NULL, NULL
 };
 static bool benchmark_clock_ns(uint64_t *out)
 {
-    struct timespec time;
-    if (!out || clock_gettime(CLOCK_MONOTONIC, &time) != 0) return false;
-    *out = (uint64_t)time.tv_sec * UINT64_C(1000000000) +
-        (uint64_t)time.tv_nsec;
-    return true;
+    return PGW_Runtime_monotonic_time_ns(out);
 }
 
 static PGW_CodecStatus decode(void *context, size_t index, const uint8_t *bytes,
@@ -137,6 +133,18 @@ static int wait_matches(PGW_Connection *gateway, PGW_Connection *companion)
     return 1;
 }
 
+static bool wait_route_counter(const PGW_Route *route, PGW_CounterId counter,
+                               uint64_t expected)
+{
+    for (unsigned attempt = 0; attempt < 1000; ++attempt) {
+        if (PGW_ATOMIC_LOAD(&route->counters.values[counter],
+                                 OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) >= expected)
+            return true;
+        OSAPI_Thread_sleep(1);
+    }
+    return false;
+}
+
 static int benchmark_write_batch(PGW_StreamWriter *writer,
                                  const PGW_SampleSeq *samples,
                                  PGW_WriteResultSeq *results,
@@ -169,8 +177,8 @@ static int benchmark_dds_write_paths(PGW_Connection *gateway,
     PGW_WriteResult output_result, ingress_result;
     PGW_WriteResultSeq output_results, ingress_results;
     PGW_SampleAccessI fallback_access;
-    PGW_Representation fallback_representation, direct_alias;
-    PGW_Schema direct_alias_schema = {
+    PGW_SampleRepresentation fallback_representation, direct_alias;
+    PGW_TypeInfo direct_alias_schema = {
         "generated.type.alias", 99,
         "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
     };
@@ -179,11 +187,11 @@ static int benchmark_dds_write_paths(PGW_Connection *gateway,
         .value = {1001, {.kind = PGW_VALUE_DOUBLE, .data.real = 123.4}}
     };
     uint64_t direct_times[5], converted_times[5];
-    if (PGW_DDSConnextMicroAdapter.connection->reader(
+    if (PGW_DDSConnextMicroAdapter.connection->lookup_stream_reader(
             gateway, "command_powertrain", &source_reader) != PGW_OK ||
-        PGW_DDSConnextMicroAdapter.connection->writer(
+        PGW_DDSConnextMicroAdapter.connection->lookup_stream_writer(
             gateway, "state_powertrain", &output) != PGW_OK ||
-        PGW_DDSConnextMicroAdapter.connection->writer(
+        PGW_DDSConnextMicroAdapter.connection->lookup_stream_writer(
             companion, "command_powertrain", &ingress) != PGW_OK)
         return 1;
 
@@ -294,6 +302,7 @@ static int benchmark_dds_write_paths(PGW_Connection *gateway,
 
 int main(void)
 {
+    CHECK(PGW_Runtime_initialize());
     const size_t memory_capacity = 262144;
     void *memory = malloc(memory_capacity);
     CHECK(memory);
@@ -305,13 +314,13 @@ int main(void)
     PGW_CANFrame rx[8], tx[8], sent;
     PGW_CANFrame baseline = {.id = 256, .length = 8,
         .data = {0x10, 0x27, 0x00, 0x00, 0x01, 0x01, 0xab, 0xcd}};
-    PGW_Schema signal_schema = {PGW_codec_schema.name, PGW_codec_schema.version,
+    PGW_TypeInfo signal_schema = {PGW_codec_schema.name, PGW_codec_schema.version,
                                PGW_codec_schema.fingerprint};
-    PGW_Schema alternate_route_schema = {
+    PGW_TypeInfo alternate_route_schema = {
         "can.signal.alternate", 2,
         "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
     };
-    PGW_Representation canonical_route_source, cross_schema_route_source;
+    PGW_SampleRepresentation canonical_route_source, cross_schema_route_source;
     PGW_CANCategory categories[2];
     PGW_CANCategorySeq category_sequence;
     PGW_CANConfig can_config = {
@@ -320,12 +329,14 @@ int main(void)
         .write_capacity = pgw_config_can_write_capacity};
     PGW_Route routes[4] = {{0}};
     PGW_RouteSeq route_sequence;
+        PGW_Session session = {0};
+        PGW_SessionSeq session_sequence;
     PGW_SampleSeq route_sample_storage[4];
     PGW_WriteResultSeq route_result_storage[4];
     PGW_SampleRef route_refs[4][8];
     PGW_WriteResult route_results[4][8];
     PGW_Service service = {
-        .route_budget = 4, .sample_budget = 8,
+        .sample_budget = 8,
 #if defined(PGW_ENABLE_ROUTE_LATENCY_METRICS)
         .clock_ns = PGW_example_route_latency_clock,
 #endif
@@ -336,22 +347,22 @@ int main(void)
     PGW_SampleRef refs[8];
     PGW_WriteResult result;
     PGW_WriteResultSeq result_sequence;
-    PGW_Representation signal_rep = {&signal_schema, "test.signal", sizeof(SignalSample),
+    PGW_SampleRepresentation signal_rep = {&signal_schema, "test.signal", sizeof(SignalSample),
                                      _Alignof(SignalSample), &signal_access, NULL};
-    PGW_Representation probe_rep = *PGW_probe_binding.representation;
+    PGW_SampleRepresentation probe_rep = *PGW_probe_type_binding.representation;
     SignalSample update = {.value = {1001, {.kind = PGW_VALUE_DOUBLE,
                                             .data.real = 123.4}}};
     ProbeSample probe = {.value = {1, 42}, .timestamp = {true, true, 123, 456}};
     {
         const PGW_AdapterI *slots[1];
-        PGW_RepresentationRef binding_slots[1];
+        PGW_SampleRepresentationRef binding_slots[1];
         PGW_AdapterSeq adapter_sequence;
-        PGW_RepresentationSeq binding_sequence;
+        PGW_SampleRepresentationSeq binding_sequence;
         PGW_Registry registry = {0};
         CHECK(PGW_AdapterSeq_initialize(&adapter_sequence));
         CHECK(PGW_AdapterSeq_loan_contiguous(&adapter_sequence, slots, 0, 1));
-        CHECK(PGW_RepresentationSeq_initialize(&binding_sequence));
-        CHECK(PGW_RepresentationSeq_loan_contiguous(&binding_sequence, binding_slots, 0, 1));
+        CHECK(PGW_SampleRepresentationSeq_initialize(&binding_sequence));
+        CHECK(PGW_SampleRepresentationSeq_loan_contiguous(&binding_sequence, binding_slots, 0, 1));
         CHECK(PGW_Registry_initialize(&registry, &adapter_sequence, &binding_sequence) == PGW_OK);
         CHECK(PGW_DDS_register_adapter(&registry) == PGW_OK);
         CHECK(PGW_Registry_find_adapter(&registry, "connext_micro") == &PGW_DDSConnextMicroAdapter);
@@ -359,8 +370,8 @@ int main(void)
         CHECK(PGW_Registry_finalize(&registry) == PGW_OK);
         CHECK(PGW_AdapterSeq_unloan(&adapter_sequence));
         CHECK(PGW_AdapterSeq_finalize(&adapter_sequence));
-        CHECK(PGW_RepresentationSeq_unloan(&binding_sequence));
-        CHECK(PGW_RepresentationSeq_finalize(&binding_sequence));
+        CHECK(PGW_SampleRepresentationSeq_unloan(&binding_sequence));
+        CHECK(PGW_SampleRepresentationSeq_finalize(&binding_sequence));
     }
     PGW_allocation_monitor(true);
     {
@@ -385,7 +396,7 @@ int main(void)
             .endpoints = endpoint_sequence, .endpoints_initialized = true};
         PGW_Connection *unused = NULL;
         size_t used = arena.used;
-        endpoint_storage[0].binding = NULL;
+        endpoint_storage[0].type_binding = NULL;
         CHECK(PGW_DDSConnextMicroAdapter.create(&invalid, &arena, &unused) == PGW_INVALID);
         CHECK(arena.used == used && !unused);
         endpoint_storage[0] = *PGW_DDSEndpointConfigSeq_get_reference(
@@ -720,27 +731,35 @@ int main(void)
     cross_schema_route_source = canonical_route_source;
     cross_schema_route_source.schema = &alternate_route_schema;
     routes[0].reader.representation = &cross_schema_route_source;
-    CHECK(PGW_Service_set_routes(&service, &route_sequence) == PGW_OK);
+    CHECK(PGW_CompiledSessionSeq_get_length(&pgw_config_sessions) == 1);
+    const PGW_CompiledSession *compiled_session =
+        PGW_CompiledSessionSeq_get_reference(&pgw_config_sessions, 0);
+    CHECK(compiled_session && compiled_session->route_offset == 0 &&
+          compiled_session->route_count == 4);
+    session.name = compiled_session->name;
+    CHECK(PGW_Session_set_routes(&session, &route_sequence) == PGW_OK);
+    CHECK(PGW_SessionSeq_initialize(&session_sequence));
+    CHECK(PGW_SessionSeq_loan_contiguous(&session_sequence, &session, 1, 1));
+    CHECK(PGW_Service_set_sessions(&service, &session_sequence) == PGW_OK);
     CHECK(PGW_Service_initialize(&service) == PGW_OK);
+    CHECK(PGW_Service_start(&service) == PGW_OK);
     {
         void *control;
-        atomic_store(&frozen, true);
+        PGW_ATOMIC_STORE_SEQ(&frozen, true);
         CHECK(PGW_Arena_allocate(&arena, 1, 1, &control) == PGW_OK);
-        CHECK(atomic_load(&runtime_arena_calls) == 1);
-        atomic_store(&frozen, false);
-        atomic_store(&runtime_arena_calls, 0);
+        CHECK(PGW_ATOMIC_LOAD_SEQ(&runtime_arena_calls) == 1);
+        PGW_ATOMIC_STORE_SEQ(&frozen, false);
+        PGW_ATOMIC_STORE_SEQ(&runtime_arena_calls, 0);
     }
-    CHECK(PGW_DDSConnextMicroAdapter.connection->reader(companion, "state_powertrain", &reader) == PGW_OK);
+    CHECK(PGW_DDSConnextMicroAdapter.connection->lookup_stream_reader(companion, "state_powertrain", &reader) == PGW_OK);
     CHECK(PGW_SampleSeq_initialize(&loan));
     CHECK(PGW_WriteResultSeq_initialize(&result_sequence));
     CHECK(PGW_WriteResultSeq_loan_contiguous(&result_sequence, &result, 0, 1));
     CHECK(PGW_SampleSeq_loan_contiguous(&loan, refs, 0, 8));
     size_t ready_arena_used = arena.used;
-    atomic_store(&frozen, true);
+    PGW_ATOMIC_STORE_SEQ(&frozen, true);
     PGW_allocation_monitor(true);
     CHECK(PGW_CANMemory_inject(&transport, &baseline) == PGW_OK);
-    CHECK(PGW_CAN_poll(can, 4) == PGW_OK);
-    CHECK(PGW_Service_step(&service) == PGW_OK);
     bool received = false;
     unsigned state_keys = 0;
     for (unsigned attempt = 0; attempt < 100 && !received; ++attempt) {
@@ -782,15 +801,14 @@ int main(void)
         PGW_StreamWriter exporter;
         PGW_StreamReader subscriber;
         PGW_CounterSnapshot snapshot;
-        CHECK(PGW_DDSConnextMicroAdapter.connection->writer(gateway, "diagnostics", &exporter) == PGW_OK);
-        CHECK(exporter.iface->bind(exporter.state, PGW_diagnostics_binding.representation) == PGW_OK);
-        CHECK(PGW_DDSConnextMicroAdapter.connection->reader(companion, "diagnostics", &subscriber) == PGW_OK);
+        CHECK(PGW_DDSConnextMicroAdapter.connection->lookup_stream_writer(gateway, "diagnostics", &exporter) == PGW_OK);
+        CHECK(exporter.iface->bind(exporter.state, PGW_diagnostics_type_binding.representation) == PGW_OK);
+        CHECK(PGW_DDSConnextMicroAdapter.connection->lookup_stream_reader(companion, "diagnostics", &subscriber) == PGW_OK);
         CHECK(PGW_Counters_snapshot(&routes[0].counters, 1, 17, 0, &snapshot));
         CHECK(snapshot.values[PGW_COUNT_ACCEPTED] == 4);
         snapshot.entity_id = 5;
         CHECK(PGW_DDS_export_snapshot(&exporter, &snapshot) == PGW_INVALID);
         PGW_Counters_add(&routes[0].counters, PGW_COUNT_EXPORT_ERRORS, 1);
-        CHECK(PGW_Service_step(&service) == PGW_OK);
         CHECK(PGW_Counters_snapshot(&routes[0].counters, 1, 18, 0, &snapshot));
         snapshot.values[PGW_COUNT_FATAL] = 2;
         snapshot.values[PGW_COUNT_ROUTE_FAULTS] = 1;
@@ -817,7 +835,7 @@ int main(void)
         CHECK(received);
     }
 #endif
-    CHECK(PGW_DDSConnextMicroAdapter.connection->writer(companion, "command_powertrain", &command) == PGW_OK);
+    CHECK(PGW_DDSConnextMicroAdapter.connection->lookup_stream_writer(companion, "command_powertrain", &command) == PGW_OK);
     CHECK(command.iface->bind(command.state, &signal_rep) == PGW_OK);
     CHECK(PGW_SampleSeq_set_length(&loan, 1));
     refs[0] = (const PGW_Sample *)&update;
@@ -826,7 +844,6 @@ int main(void)
     CHECK(PGW_SampleSeq_set_length(&loan, 0));
     received = false;
     for (unsigned attempt = 0; attempt < 100 && !received; ++attempt) {
-        CHECK(PGW_Service_step(&service) == PGW_OK);
         if (PGW_CANMemory_take_sent(&transport, &sent) == PGW_OK) received = true;
         OSAPI_Thread_sleep(10);
     }
@@ -845,7 +862,6 @@ int main(void)
                                              &lifecycle, &DDS_HANDLE_NIL) == DDS_RETCODE_OK);
         received = false;
         for (unsigned attempt = 0; attempt < 100 && !received; ++attempt) {
-            CHECK(PGW_Service_step(&service) == PGW_OK);
             CHECK(PGW_CANMemory_take_sent(&transport, &sent) == PGW_NO_DATA);
             CHECK(PGW_DDS_statistics(gateway, "command_powertrain", &statistics) == PGW_OK);
             received = statistics.lifecycle_samples > 0;
@@ -853,8 +869,8 @@ int main(void)
         }
         CHECK(received);
     }
-    CHECK(PGW_DDSConnextMicroAdapter.connection->writer(gateway, "probe", &probe_writer) == PGW_OK);
-    CHECK(PGW_DDSConnextMicroAdapter.connection->reader(companion, "probe", &probe_reader) == PGW_OK);
+    CHECK(PGW_DDSConnextMicroAdapter.connection->lookup_stream_writer(gateway, "probe", &probe_writer) == PGW_OK);
+    CHECK(PGW_DDSConnextMicroAdapter.connection->lookup_stream_reader(companion, "probe", &probe_reader) == PGW_OK);
     probe_rep.access = &probe_access;
     CHECK(probe_writer.iface->bind(probe_writer.state, &signal_rep) == PGW_UNSUPPORTED);
     probe_rep.access = &probe_payload_only;
@@ -918,8 +934,8 @@ int main(void)
     }
     for (unsigned step = 0; step < 1000; ++step) {
         CHECK(PGW_CANMemory_inject(&transport, &baseline) == PGW_OK);
-        CHECK(PGW_CAN_poll(can, 4) == PGW_OK);
-        CHECK(PGW_Service_step(&service) == PGW_OK);
+        CHECK(wait_route_counter(&routes[0], PGW_COUNT_ACCEPTED,
+            UINT64_C(4) + (uint64_t)(step + 1) * 4));
     }
     {
         PGW_CounterSnapshot snapshot;
@@ -928,11 +944,11 @@ int main(void)
         CHECK(snapshot.values[PGW_COUNT_LOANS] == 0);
         CHECK(snapshot.values[PGW_COUNT_FATAL] == 0);
     }
-    CHECK(arena.used == ready_arena_used && atomic_load(&runtime_arena_calls) == 0);
+    CHECK(arena.used == ready_arena_used && PGW_ATOMIC_LOAD_SEQ(&runtime_arena_calls) == 0);
     {
         uint64_t libc = PGW_allocation_calls(), osapi = PGW_osapi_allocation_calls();
         PGW_allocation_monitor(false);
-        atomic_store(&frozen, false);
+        PGW_ATOMIC_STORE_SEQ(&frozen, false);
         printf("Runtime allocation coverage: gateway arena requests=0; "
                "observed libc=%llu OSAPI=%llu (process-wide middleware-inclusive; "
                "libc internal and kernel allocation not intercepted)\n",
@@ -945,6 +961,8 @@ int main(void)
 #endif
     CHECK(PGW_Service_stop(&service) == PGW_OK);
     CHECK(PGW_Service_finalize(&service) == PGW_OK);
+    CHECK(PGW_SessionSeq_unloan(&session_sequence));
+    CHECK(PGW_SessionSeq_finalize(&session_sequence));
     CHECK(PGW_RouteSeq_unloan(&route_sequence));
     CHECK(PGW_RouteSeq_finalize(&route_sequence));
     for (RTI_INT32 i = 0; i < 4; ++i) {

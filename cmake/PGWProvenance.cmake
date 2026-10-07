@@ -54,7 +54,7 @@ function(pgw_generate_provenance)
         _pgw_provenance_string("${CMAKE_C_FLAGS_${_configuration}}"
             build flags "${_configuration}")
     endforeach()
-    foreach(_option IN ITEMS PGW_ENABLE_CAN PGW_ENABLE_DDS PGW_ENABLE_REMOTE_CONTROL PGW_ENABLE_RUNNER
+    foreach(_option IN ITEMS PGW_ENABLE_CAN PGW_ENABLE_DDS PGW_ENABLE_REMOTE_CONTROL
             PGW_BUILD_TESTS PGW_BUILD_EXAMPLES PGW_BUILD_BENCHMARKS
             PGW_WARNINGS_AS_ERRORS PGW_GENERATOR_WARNINGS_AS_ERRORS)
         if(${_option})

@@ -71,7 +71,7 @@ PGW_Status PGW_signal_from_dds(const void *opaque, void *out, size_t size)
     return PGW_OK;
 }
 
-PGW_Status PGW_signal_bind_view(void *state, const PGW_Representation *source)
+PGW_Status PGW_signal_bind_view(void *state, const PGW_SampleRepresentation *source)
 {
     (void)state;
     if (!source || !source->access ||
@@ -86,7 +86,7 @@ PGW_Status PGW_signal_bind_view(void *state, const PGW_Representation *source)
         view->context_identity == &PGW_CAN_METADATA_IDENTITY)
         return PGW_OK;
     if (view->kind == PGW_SAMPLE_VIEW_NATIVE && !view->value_size &&
-        view->type_identity == PGW_signal_dds_binding_powertrain.type_identity() &&
+        view->type_identity == PGW_signal_dds_type_binding_powertrain.type_identity() &&
         view->context_identity == &PGW_DDS_METADATA_IDENTITY)
         return PGW_OK;
     return PGW_UNSUPPORTED;
@@ -108,7 +108,7 @@ PGW_Status PGW_signal_from_view(const PGW_SampleView *view, void *out, size_t si
     }
     if (view->kind == PGW_SAMPLE_VIEW_NATIVE) {
         if (view->type_identity !=
-                PGW_signal_dds_binding_powertrain.type_identity() ||
+                PGW_signal_dds_type_binding_powertrain.type_identity() ||
             view->context_identity != &PGW_DDS_METADATA_IDENTITY)
             return PGW_UNSUPPORTED;
         const PGW_DDSMetadata *metadata = view->context;

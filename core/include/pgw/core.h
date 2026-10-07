@@ -20,10 +20,13 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "rti_me_c.h"
+#include "pgw/atomic.h"
 #include "pgw/sequence.h"
 #include "pgw/diagnostics.h"
+#include "osapi/osapi_mutex.h"
 
-#define PGW_ABI_VERSION 2u
+#define PGW_ABI_VERSION 4u
 
 /** @brief Result codes shared by the gateway core and adapters.
  *
@@ -54,12 +57,13 @@ typedef struct {
     const char *operation;   /**< Non-owned operation label. */
 } PGW_Error;
 
-/** @brief Lifecycle states used by services and routes.
+/** @brief Lifecycle states used by services, sessions, and routes.
  *
- * Initialization progresses through INITIALIZING to READY; stepping moves a
- * service to RUNNING. Routes may be paused and resumed while the service is
- * ready or running. A route that encounters a fatal operation enters FAULTED.
- * A stopped service must be finalized before reinitialization;
+ * Initialization progresses through INITIALIZING to ENABLED; starting workers
+ * moves a service and its sessions to STARTED. Routes may be paused and
+ * resumed while the service is enabled or started. A route that encounters a
+ * fatal operation enters FAULTED. A stopped service must be finalized before
+ * reinitialization;
  * finalization releases sequence loans but does not free caller storage, which
  * must be explicitly adopted again. A service whose lifecycle is FAULTED
  * cannot be recovered through this lifecycle API.
@@ -67,22 +71,23 @@ typedef struct {
 typedef enum {
     PGW_UNINITIALIZED, /**< Storage has not been initialized. */
     PGW_INITIALIZING,  /**< Initialization is in progress. */
-    PGW_READY,          /**< Initialized and ready to step. */
-    PGW_RUNNING,        /**< Service has performed or is performing steps. */
+    PGW_ENABLED,         /**< Configured and ready to start. */
+    PGW_STARTED,         /**< Service/session workers run; route is active. */
     PGW_STOPPED,        /**< Service has been stopped. */
     PGW_FAULTED,        /**< Route or service encountered an unrecoverable failure. */
     PGW_PAUSED          /**< Route is temporarily excluded from service stepping. */
-} PGW_Lifecycle;
+} PGW_EntityState;
 
-/** @brief Schema identity used to match data representations.
- * Names and fingerprints are non-owned, null-terminated strings and must
- * remain valid while the schema is in use.
+/** @brief Static logical type identity used to match sample representations.
+ *
+ * It carries a name, version, and fingerprint, but no field-level description.
+ * Its strings must remain valid while the type is in use.
  */
 typedef struct {
     const char *name;         /**< Schema name. */
     uint32_t version;         /**< Schema version. */
     const char *fingerprint;  /**< Stable schema fingerprint. */
-} PGW_Schema;
+} PGW_TypeInfo;
 
 /** @brief Timestamp associated with a sample or frame.
  * If @c valid is false, the time is unavailable. @c portable indicates whether
@@ -163,20 +168,44 @@ typedef struct {
     PGW_Status (*view)(const PGW_Sample *, PGW_SampleView *);
 } PGW_SampleAccessI;
 
-/** @brief Describes a sample's schema and native in-memory representation.
- * The schema, name, and access table are borrowed and must outlive every use of
+/** @brief Describes a sample's logical type and local C representation.
+ * The type identity, name, and access table are borrowed and must outlive every use of
  * this representation. Alignment must be a nonzero power of two. If access
  * provides view, view_contract must declare that view's immutable payload and
  * context shape before a destination writer binds.
  */
 typedef struct {
-    const PGW_Schema *schema;          /**< Schema identity. */
-    const char *name;                  /**< Binding name used for lookup. */
+    const PGW_TypeInfo *schema;          /**< Schema identity. */
+    const char *name;                  /**< Representation name used for lookup. */
     size_t sample_size;                /**< Native sample size in bytes. */
     size_t sample_alignment;           /**< Required native sample alignment. */
     const PGW_SampleAccessI *access;   /**< Optional type-erased access methods. */
     const PGW_SampleViewDescriptor *view_contract; /**< Static contract for optional borrowed views. */
-} PGW_Representation;
+} PGW_SampleRepresentation;
+
+typedef struct PGW_Session PGW_Session;
+struct PGW_Service;
+
+/** @brief Single-worker asynchronous condition dispatcher over Micro DDS_WaitSet.
+ *
+ * The wait set blocks the owned OSAPI worker and returns active conditions.
+ * PGW dispatches the corresponding route/control handler on that worker. The
+ * first implementation is serialized and does not create a thread pool.
+ */
+typedef struct {
+    DDS_WaitSet *waitset;                    /**< Owned underlying DDS wait set. */
+    DDS_GuardCondition *wake_condition;      /**< Lifecycle, control, and stop wake. */
+    struct DDS_ConditionSeq active_conditions; /**< Bounded active-condition result. */
+    struct OSAPI_Thread *worker;             /**< One session-owned worker. */
+    size_t attached_conditions;              /**< Number of attached conditions. */
+    bool conditions_initialized;
+    bool wake_attached;
+    bool initialized;
+    bool started;
+} PGW_AsyncWaitSet;
+
+/** @brief Callback invoked for a registered asynchronous wait-set condition. */
+typedef PGW_Status (*PGW_AsyncWaitSetHandler)(void *);
 
 /** @brief Per-sample result returned by a stream writer.
  * A write can accept some samples and apply backpressure or reject others;
@@ -210,11 +239,28 @@ typedef enum {
 /** @brief Sequence of one PGW_WriteResult per stream-writer input sample. */
 typedef struct PGW_WriteResultSeq PGW_WriteResultSeq;
 
+/** @brief Reader-to-route readiness notification.
+ *
+ * This callback only records coalesced readiness and triggers the owning
+ * route's dispatcher condition. It is thread-safe, nonblocking,
+ * allocation-free, and does not read samples, route data, or retain endpoint
+ * state.
+ */
+typedef struct {
+    void (*on_data_available)(void *context);
+    void *context;
+} PGW_ReaderListener;
+
 /** @brief Stream-reader operations supplied by an adapter.
  *
  * @c read fills a caller-provided sample sequence, up to @c maximum, and may
  * loan its backing storage; each successful loan must be returned exactly once
- * with @c return_loan before the sequence is reused or finalized.
+ * with @c return_loan before the sequence is reused or finalized. Register
+ * the listener before workers start and unregister it synchronously before
+ * session storage is finalized. If input remains after a bounded read, the
+ * adapter must notify before returning; the core does not infer unread
+ * transport data from a full batch. Synchronize producer/consumer state so a
+ * concurrent enqueue cannot be stranded.
  */
 typedef struct {
     uint32_t version;  /**< Must equal @ref PGW_ABI_VERSION. */
@@ -232,6 +278,12 @@ typedef struct {
      * @return PGW_OK on success; PGW_LOAN_ERROR or another status on failure.
      */
     PGW_Status (*return_loan)(void *, PGW_SampleSeq *);
+    /** Register/unregister one session-owned listener. A consuming reader may
+     * be registered to only one route. Unregister prevents future callbacks
+     * and waits for callbacks already using the listener to finish.
+     */
+    PGW_Status (*register_listener)(void *, const PGW_ReaderListener *);
+    PGW_Status (*unregister_listener)(void *, const PGW_ReaderListener *);
 } PGW_StreamReaderI;
 
 /** @brief Stream-writer operations supplied by an adapter.
@@ -248,7 +300,7 @@ typedef struct {
      * for rejecting incompatible schemas or unsupported view contracts.
      * @return PGW_OK on success, otherwise an applicable PGW_Status.
      */
-    PGW_Status (*bind)(void *, const PGW_Representation *);
+    PGW_Status (*bind)(void *, const PGW_SampleRepresentation *);
     /** Write samples and produce one result per input sample.
      * The state argument identifies adapter-owned writer state; samples is a
      * borrowed input sequence whose references must not be retained; results
@@ -263,14 +315,14 @@ typedef struct {
 typedef struct {
     void *state;                                /**< Adapter-owned state. */
     const PGW_StreamReaderI *iface;             /**< Borrowed operation table. */
-    const PGW_Representation *representation;   /**< Bound sample representation. */
+    const PGW_SampleRepresentation *representation;   /**< Bound sample representation. */
 } PGW_StreamReader;
 
 /** @brief Handle to a writer and its adapter-owned state and representation. */
 typedef struct {
     void *state;                                /**< Adapter-owned state. */
     const PGW_StreamWriterI *iface;             /**< Borrowed operation table. */
-    const PGW_Representation *representation;   /**< Bound sample representation. */
+    const PGW_SampleRepresentation *representation;   /**< Bound sample representation. */
 } PGW_StreamWriter;
 
 /** @brief Opaque adapter-created connection handle.
@@ -289,10 +341,12 @@ struct PGW_ControlAdapterI;
 typedef struct {
     uint32_t version;  /**< Must equal @ref PGW_ABI_VERSION. */
     size_t size;       /**< Must equal sizeof(PGW_ConnectionI). */
-    /** Look up a named reader endpoint. */
-    PGW_Status (*reader)(PGW_Connection *, const char *, PGW_StreamReader *);
-    /** Look up a named writer endpoint. */
-    PGW_Status (*writer)(PGW_Connection *, const char *, PGW_StreamWriter *);
+    /** Look up a named input stream reader; does not create the endpoint. */
+    PGW_Status (*lookup_stream_reader)(PGW_Connection *, const char *,
+                                       PGW_StreamReader *);
+    /** Look up a named output stream writer; does not create the endpoint. */
+    PGW_Status (*lookup_stream_writer)(PGW_Connection *, const char *,
+                                       PGW_StreamWriter *);
     /** Close the connection and release its resources. */
     PGW_Status (*close)(PGW_Connection *);
 } PGW_ConnectionI;
@@ -352,9 +406,9 @@ typedef const PGW_AdapterI *PGW_AdapterRef;
 typedef struct PGW_AdapterSeq PGW_AdapterSeq;
 
 /** @brief Non-owning reference to a representation descriptor. */
-typedef const PGW_Representation *PGW_RepresentationRef;
-#define T PGW_RepresentationRef
-#define TSeq PGW_RepresentationSeq
+typedef const PGW_SampleRepresentation *PGW_SampleRepresentationRef;
+#define T PGW_SampleRepresentationRef
+#define TSeq PGW_SampleRepresentationSeq
 #define REDA_SEQUENCE_API REDA_SEQUENCE_API_UNTYPED
 #define TSeq_initialize
 #define TSeq_finalize
@@ -372,7 +426,7 @@ typedef const PGW_Representation *PGW_RepresentationRef;
 #undef REDA_SEQUENCE_API
 #undef concatenate
 /** @brief Sequence of borrowed representation descriptor references. */
-typedef struct PGW_RepresentationSeq PGW_RepresentationSeq;
+typedef struct PGW_SampleRepresentationSeq PGW_SampleRepresentationSeq;
 
 /** @brief Registry borrowing caller-provided adapter and representation buffers.
  * Initialize with sequences that have preallocated contiguous storage and
@@ -383,11 +437,11 @@ typedef struct PGW_RepresentationSeq PGW_RepresentationSeq;
  */
 typedef struct {
     PGW_AdapterSeq adapters;          /**< Borrowed adapter-pointer storage. */
-    PGW_RepresentationSeq bindings;   /**< Borrowed representation-pointer storage. */
+    PGW_SampleRepresentationSeq representations; /**< Borrowed sample representations. */
     bool frozen;                      /**< Reject registration when true. */
     bool initialized;                 /**< Internal sequence initialization state. */
     bool adapters_borrowed;           /**< Internal adapter-buffer loan state. */
-    bool bindings_borrowed;           /**< Internal binding-buffer loan state. */
+    bool representations_borrowed;    /**< Internal representation-buffer loan state. */
 } PGW_Registry;
 
 #if defined(PGW_ENABLE_ROUTE_LATENCY_METRICS)
@@ -395,18 +449,18 @@ typedef struct {
 
 /** @brief Atomic, fixed-size route batch-latency aggregation. */
 typedef struct {
-    atomic_uint_fast64_t batches;       /**< Completed non-empty writer calls. */
-    atomic_uint_fast64_t timed_batches; /**< Batches with valid start/end clock readings. */
-    atomic_uint_fast64_t samples;       /**< Input samples in completed writer calls. */
-    atomic_uint_fast64_t accepted;
-    atomic_uint_fast64_t backpressure;
-    atomic_uint_fast64_t invalid;
-    atomic_uint_fast64_t fatal;
-    atomic_uint_fast64_t clock_failures; /**< Failed or backwards clock readings. */
-    atomic_uint_fast64_t total_ns;      /**< Sum of valid batch durations; wraps modulo 2^64. */
-    atomic_uint_fast64_t minimum_ns;
-    atomic_uint_fast64_t maximum_ns;
-    atomic_uint_fast64_t histogram[PGW_ROUTE_LATENCY_HISTOGRAM_BUCKETS];
+    PGW_ATOMIC(RTI_UINT64) batches;       /**< Completed non-empty writer calls. */
+    PGW_ATOMIC(RTI_UINT64) timed_batches; /**< Batches with valid start/end clock readings. */
+    PGW_ATOMIC(RTI_UINT64) samples;       /**< Input samples in completed writer calls. */
+    PGW_ATOMIC(RTI_UINT64) accepted;
+    PGW_ATOMIC(RTI_UINT64) backpressure;
+    PGW_ATOMIC(RTI_UINT64) invalid;
+    PGW_ATOMIC(RTI_UINT64) fatal;
+    PGW_ATOMIC(RTI_UINT64) clock_failures; /**< Failed or backwards clock readings. */
+    PGW_ATOMIC(RTI_UINT64) total_ns;      /**< Sum of valid batch durations; wraps modulo 2^64. */
+    PGW_ATOMIC(RTI_UINT64) minimum_ns;
+    PGW_ATOMIC(RTI_UINT64) maximum_ns;
+    PGW_ATOMIC(RTI_UINT64) histogram[PGW_ROUTE_LATENCY_HISTOGRAM_BUCKETS];
 } PGW_RouteLatencyStats;
 
 /** @brief Non-transactional copy of per-route batch latency statistics.
@@ -448,8 +502,17 @@ typedef struct {
     PGW_RouteLatencyStats latency;       /**< Fixed-size batch latency statistics. */
     bool latency_initialized;            /**< Internal latency atomic initialization state. */
 #endif
-    PGW_Lifecycle lifecycle;             /**< Current route lifecycle state. */
+    PGW_ATOMIC(RTI_INT32) lifecycle;      /**< Synchronized route lifecycle state. */
     PGW_Error error;                     /**< Last recorded route fault. */
+    PGW_Session *session;                 /**< Owning session, set during service initialization. */
+    PGW_ReaderListener listener;          /**< Core-owned notification registration. */
+    DDS_GuardCondition *ready_condition;  /**< Route-specific dispatcher condition. */
+    PGW_AsyncWaitSetHandler ready_handler; /**< Handler registered for that condition. */
+    void *ready_context;                  /**< Borrowed handler context (the route). */
+    PGW_ATOMIC(RTI_UINT64) ready_generation; /**< Coalesced reader-ready generation. */
+    PGW_ATOMIC(RTI_UINT64) dispatched_generation; /**< Last generation consumed by its worker. */
+    bool listener_registered;              /**< Internal adapter listener state. */
+    bool ready_attached;                  /**< Condition attached to the session dispatcher. */
     bool storage_initialized;            /**< Internal sequence state. */
     bool samples_borrowed;               /**< Internal sample-buffer loan state. */
     bool results_borrowed;               /**< Internal result-buffer loan state. */
@@ -476,9 +539,55 @@ typedef struct {
 /** @brief Sequence of caller-owned route objects borrowed by a service. */
 typedef struct PGW_RouteSeq PGW_RouteSeq;
 
+/** @brief One serialized event-driven route group.
+ *
+ * Configure a non-empty borrowed route sequence before service initialization.
+ * Each route has one unique consuming reader and belongs to exactly one
+ * session. The session owns one @ref PGW_AsyncWaitSet and one shared wake
+ * condition; each reader has a route-specific readiness condition and handler.
+ * Active routes are visited in rotating order, with at most one sample-budget
+ * batch per ready route per wait result. Adapters re-notify if input remains
+ * after a bounded read.
+ */
+struct PGW_Session {
+    const char *name;                    /**< Stable, non-empty configured session name. */
+    PGW_RouteSeq routes;                 /**< Borrowed route array assigned to this session. */
+    PGW_AsyncWaitSet async_waitset;      /**< Session-owned condition dispatcher. */
+    struct PGW_Service *service;         /**< Owning service while initialized. */
+    size_t cursor;                       /**< Internal rotating route-dispatch cursor. */
+    PGW_ATOMIC(RTI_UINT64) wakeups;        /**< Successful session WaitSet wakes. */
+    PGW_ATOMIC(RTI_UINT64) dispatched_routes; /**< Completed ready-route dispatches. */
+    PGW_ATOMIC(RTI_INT32) lifecycle;       /**< Current session lifecycle state. */
+    PGW_ATOMIC(RTI_INT32) error;          /**< Last route-dispatch or worker error. */
+    PGW_ATOMIC(RTI_UINT32) stopping;      /**< Internal worker stop request. */
+    bool routes_initialized;              /**< Internal route-sequence state. */
+    bool routes_borrowed;                 /**< Internal route-buffer loan state. */
+};
+
+#define T PGW_Session
+#define TSeq PGW_SessionSeq
+#define REDA_SEQUENCE_API REDA_SEQUENCE_API_UNTYPED
+#define TSeq_initialize
+#define TSeq_finalize
+#define TSeq_get_length
+#define TSeq_get_maximum
+#define TSeq_set_length
+#define TSeq_get_reference
+#define TSeq_loan_contiguous
+#define TSeq_unloan
+#define TSeq_get_contiguous_buffer
+#define TSeq_has_ownership
+#include "reda/reda_sequence_decl.h"
+#undef T
+#undef TSeq
+#undef REDA_SEQUENCE_API
+#undef concatenate
+/** @brief Sequence of caller-owned session objects borrowed by a service. */
+typedef struct PGW_SessionSeq PGW_SessionSeq;
+
 #if defined(PGW_ENABLE_REMOTE_CONTROL)
-#define PGW_CONTROL_ABI_VERSION 1u
-#define PGW_CONTROL_MAX_COMMANDS_PER_STEP 4u
+#define PGW_CONTROL_ABI_VERSION 2u
+#define PGW_CONTROL_MAX_COMMANDS_PER_BATCH 4u
 
 typedef enum {
     PGW_CONTROL_CONNECTION_UP,
@@ -591,8 +700,15 @@ typedef struct PGW_ControlAdapterI {
 typedef struct {
     uint32_t version;
     size_t size;
+    /** Register/unregister command readiness on the explicitly selected
+     * session. Unregister waits for callbacks already using the listener.
+     */
+    PGW_Status (*register_listener)(void *, const PGW_ReaderListener *);
+    PGW_Status (*unregister_listener)(void *, const PGW_ReaderListener *);
     PGW_Status (*take_command)(void *, PGW_ControlCommand *,
                                PGW_ControlCorrelation *);
+    /** Re-notify if a bounded command batch leaves commands available. */
+    PGW_Status (*rearm_commands)(void *);
     PGW_Status (*write_state)(void *, const PGW_ControlState *);
     PGW_Status (*write_result)(void *, const PGW_ControlResult *);
     PGW_Status (*write_telemetry)(void *, const PGW_ControlTelemetry *);
@@ -646,27 +762,35 @@ typedef struct {
 } PGW_ControlCounters;
 #endif
 
-/** @brief Bounded round-robin service over caller-configured routes.
- * Configure routes before initialization. Service and route storage are
- * caller-owned; all buffers borrowed through the routes must outlive service
- * finalization. Calls are not internally synchronized; serialize lifecycle
- * calls and steps, or use PGW_Runner as the sole stepping thread.
+/** @brief Event-driven service over explicitly configured sessions.
+ *
+ * Configure every session and its routes before initialization. Service,
+ * session, route, and sample storage are caller-owned; all borrowed buffers
+ * outlive service finalization. Each session serializes its own route access.
+ * Endpoint adapters synchronize endpoints shared across sessions. Lifecycle
+ * calls are serialized by the owner; route pause/resume and diagnostic/counter
+ * snapshots may be used concurrently with workers.
  */
-typedef struct {
-    PGW_RouteSeq routes;             /**< Borrowed route array, set before initialize. */
-    size_t cursor;                   /**< Internal round-robin cursor. */
-    size_t route_budget;             /**< Maximum routes visited per step. */
+typedef struct PGW_Service {
+    PGW_SessionSeq sessions;         /**< Borrowed explicit session array. */
     size_t sample_budget;            /**< Maximum samples processed per route. */
     PGW_Diagnostics *diagnostics;    /**< Optional borrowed event sink. */
-    PGW_Lifecycle lifecycle;         /**< Current service lifecycle state. */
+    PGW_ATOMIC(RTI_INT32) lifecycle;  /**< Current service lifecycle state. */
+    OSAPI_Mutex_T *state_mutex;       /**< Serializes route state transitions. */
     /** Clock callback for diagnostic event timestamps and optional latency metrics.
      * Must be monotonic; required by PGW_ENABLE_ROUTE_LATENCY_METRICS builds.
      */
     bool (*clock_ns)(void *, uint64_t *);
     void *clock_state;               /**< Context passed to @c clock_ns. */
-    bool routes_initialized;         /**< Internal route-sequence state. */
+    bool sessions_initialized;       /**< Internal session-sequence state. */
+    bool sessions_borrowed;          /**< Internal session-buffer loan state. */
 #if defined(PGW_ENABLE_REMOTE_CONTROL)
     PGW_ControlEndpoint control;         /**< Optional preconfigured control transport. */
+    PGW_Session *control_session;         /**< Session that serializes control and timer events. */
+    PGW_ReaderListener control_listener;  /**< Core-owned command readiness callback. */
+    PGW_ATOMIC(RTI_UINT64) control_generation; /**< Coalesced command-ready generation. */
+    bool control_listener_registered;     /**< Internal listener registration state. */
+    OSAPI_Mutex_T *control_mutex;         /**< Protects control state and counter snapshots. */
     PGW_ControlResource *control_resources; /**< Borrowed selected resources. */
     size_t control_resource_count;       /**< Number of selected resources. */
     size_t control_state_retry_cursor;   /**< Internal dirty-state retry position. */
@@ -679,9 +803,9 @@ typedef struct {
 #endif
 } PGW_Service;
 
-/** @brief Byte-level core storage estimate for configured route capacities. */
+/** @brief Byte-level core storage estimate for configured sessions and routes. */
 typedef struct {
-    size_t objects_bytes;             /**< Service and route objects. */
+    size_t objects_bytes;             /**< Service, session, and route objects. */
     size_t sample_references_bytes;   /**< Sample-reference arrays. */
     size_t write_results_bytes;       /**< Per-route write-result arrays. */
     size_t diagnostics_bytes;         /**< Optional diagnostic object and events. */
@@ -721,14 +845,15 @@ bool PGW_size_add(size_t, size_t, size_t *);
  * @return True on success, false for a null output or arithmetic overflow.
  */
 bool PGW_size_multiply(size_t, size_t, size_t *);
-/** @brief Estimate core object, sample, result, and optional diagnostic storage.
+/** @brief Estimate core object, session, sample, result, and diagnostic storage.
  * Parameters: @c capacities is a non-empty sequence with one nonzero sample
- * capacity per route; @c diagnostics requests storage for a diagnostic ring;
+ * capacity per route; @c sessions is the nonzero number of sessions;
+ * @c diagnostics requests storage for a diagnostic ring;
  * @c events is its event capacity and must be zero when diagnostics is false;
  * @c out receives the report on success.
  * @return PGW_OK, PGW_INVALID for invalid arguments, or PGW_CAPACITY on overflow.
  */
-PGW_Status PGW_core_resource_report(const PGW_SizeSeq *, bool, size_t,
+PGW_Status PGW_core_resource_report(const PGW_SizeSeq *, size_t, bool, size_t,
                                    PGW_CoreResourceReport *);
 /** @brief Allocate an aligned region from a caller-owned arena.
  * @c arena is advanced by the allocation and any alignment padding; @c bytes
@@ -739,17 +864,17 @@ PGW_Status PGW_core_resource_report(const PGW_SizeSeq *, bool, size_t,
  */
 PGW_Status PGW_Arena_allocate(PGW_Arena *, size_t, size_t, void **);
 /** @brief Compare schema identity by non-empty name, version, and fingerprint. */
-bool PGW_schema_equal(const PGW_Schema *, const PGW_Schema *);
+bool PGW_type_info_equal(const PGW_TypeInfo *, const PGW_TypeInfo *);
 /** @brief Initialize a registry by borrowing the input sequence buffers.
  * Registration buffers must be contiguous and have capacity reserved in
- * advance. @p adapters and @p bindings remain caller-owned and must outlive
+ * advance. @p adapters and @p representations remain caller-owned and must outlive
  * the registry. Serialize initialization, registration, lookup, and
  * finalization with respect to one another.
  * @return PGW_OK, PGW_INVALID for invalid/already initialized input, or
  *         PGW_FATAL if sequence initialization fails.
  */
 PGW_Status PGW_Registry_initialize(PGW_Registry *, const PGW_AdapterSeq *,
-                                  const PGW_RepresentationSeq *);
+                                  const PGW_SampleRepresentationSeq *);
 /** @brief Return registry loans and finalize its sequences.
  * @return PGW_OK on success; PGW_INVALID for an invalid state or
  *         PGW_LOAN_ERROR if a loan/finalization fails.
@@ -766,11 +891,11 @@ PGW_Status PGW_Registry_register_adapter(PGW_Registry *, const PGW_AdapterI *);
  * @return PGW_OK, PGW_INVALID for incompatible/duplicate/frozen input, or
  *         PGW_CAPACITY when the preallocated registry is full.
  */
-PGW_Status PGW_Registry_register_binding(PGW_Registry *, const PGW_Representation *);
+PGW_Status PGW_Registry_register_representation(PGW_Registry *, const PGW_SampleRepresentation *);
 /** @brief Find an adapter by exact name; returns null when absent or invalid. */
 const PGW_AdapterI *PGW_Registry_find_adapter(const PGW_Registry *, const char *);
 /** @brief Find a representation by exact name; returns null when absent or invalid. */
-const PGW_Representation *PGW_Registry_find_binding(const PGW_Registry *, const char *);
+const PGW_SampleRepresentation *PGW_Registry_find_representation(const PGW_Registry *, const char *);
 /** @brief Initialize route sample/result sequences over caller-provided buffers.
  * Both source sequences must be empty and contiguous; result capacity must be
  * at least the sample capacity. Their buffers are borrowed and must remain
@@ -788,13 +913,19 @@ PGW_Status PGW_Route_pause(PGW_Route *);
  * PGW_NO_CHANGE; a faulted route returns PGW_FATAL.
  */
 PGW_Status PGW_Route_resume(PGW_Route *);
-/** @brief Configure a service to borrow a non-empty contiguous route array.
- * Call only while the service is UNINITIALIZED. The route array and all nested
+/** @brief Configure a session to borrow a non-empty contiguous route array.
+ * Call only while the session is uninitialized. The route array and nested
  * route storage remain caller-owned through service finalization.
  * @return PGW_OK, PGW_INVALID for an invalid state/sequence, PGW_FATAL if
  *         sequence initialization fails, or PGW_CAPACITY if the loan fails.
  */
-PGW_Status PGW_Service_set_routes(PGW_Service *, const PGW_RouteSeq *);
+PGW_Status PGW_Session_set_routes(PGW_Session *, const PGW_RouteSeq *);
+/** @brief Configure a service to borrow a non-empty contiguous session array.
+ * Every session must have routes configured before service initialization.
+ * @return PGW_OK, PGW_INVALID for an invalid state/sequence, PGW_FATAL if
+ *         sequence initialization fails, or PGW_CAPACITY if the loan fails.
+ */
+PGW_Status PGW_Service_set_sessions(PGW_Service *, const PGW_SessionSeq *);
 #if defined(PGW_ENABLE_ROUTE_LATENCY_METRICS)
 /** @brief Copy bounded route batch-latency statistics.
  *
@@ -812,36 +943,36 @@ PGW_Status PGW_Route_latency_snapshot(const PGW_Route *,
  * Configure only before initialization. The resource array and adapter
  * contexts remain caller-owned; all callbacks are synchronous and nonblocking.
  */
-PGW_Status PGW_Service_set_control(PGW_Service *, PGW_ControlEndpoint,
+PGW_Status PGW_Service_set_control(PGW_Service *, PGW_Session *,
+                                  PGW_ControlEndpoint,
                                   PGW_ControlResource *, size_t);
 /** @brief Copy bounded control write/processing counters. */
-PGW_Status PGW_Service_control_counters(const PGW_Service *,
+PGW_Status PGW_Service_control_counters(PGW_Service *,
                                        PGW_ControlCounters *);
 /** @brief Select static telemetry metrics and freeze the runtime period.
- * A zero period disables publication. Nonzero periods must meet the service
- * XML minimum and require the service's monotonic clock callback.
+ * A zero period disables publication. Nonzero periods must meet the configured
+ * minimum and require the service's monotonic clock callback. The control
+ * session's timed WaitSet wait delivers telemetry deadlines.
  */
 PGW_Status PGW_Service_set_telemetry(PGW_Service *, PGW_ControlTelemetryMetric *,
     size_t, uint32_t, uint32_t);
 #endif
-/** @brief Initialize a configured service and its routes.
- * Requires configured route storage and nonzero route/sample budgets. Validates
- * route interfaces and storage, then asks each writer to negotiate its source
- * representation. Builds with
+/** @brief Initialize sessions, readiness conditions, and routes.
+ * Requires configured session/route storage and a nonzero sample budget.
+ * Validates route interfaces and storage, binds readiness and asks each writer
+ * to negotiate its source representation. Builds with
  * PGW_ENABLE_ROUTE_LATENCY_METRICS also require a monotonic clock callback.
  * @return PGW_OK on success or a status describing invalid configuration,
  *         unsupported counters, or a route initialization failure.
  */
 PGW_Status PGW_Service_initialize(PGW_Service *);
-/** @brief Process one bounded service iteration.
- * Successfully acquired reader loans are returned before this call completes;
- * a loan-return failure is reported as a route failure. Per-sample write
- * results distinguish accepted, backpressured, invalid, and fatal data.
- * @return PGW_OK when processing completes (including no input), or the
- *         status of a failed route/loan/clock operation.
+/** @brief Start one serialized worker for each configured session.
+ * All workers wait for readiness conditions and are woken by session-owned
+ * shutdown conditions. On partial start failure, already-started workers are
+ * stopped and joined before an error is returned.
  */
-PGW_Status PGW_Service_step(PGW_Service *);
-/** @brief Stop a READY or RUNNING service and stop its routes.
+PGW_Status PGW_Service_start(PGW_Service *);
+/** @brief Wake and join all session workers and stop their routes.
  * @return PGW_OK on success; PGW_INVALID for an unsupported lifecycle state.
  */
 PGW_Status PGW_Service_stop(PGW_Service *);

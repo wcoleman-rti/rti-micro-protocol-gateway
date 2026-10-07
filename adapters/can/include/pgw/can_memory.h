@@ -16,20 +16,23 @@
  * @{
  */
 
+#include "pgw/atomic.h"
 #include "pgw/can.h"
+#include "osapi/osapi_mutex.h"
 
 /** @brief In-memory CAN transport with caller-backed receive/transmit rings.
  *
- * This transport is cooperative and single-owner: injection, gateway calls,
- * taking sent frames, and finalization must be serialized. Ring buffers are
- * borrowed, not allocated or freed here. Transport close finalizes both rings.
+ * Injection, the connection-owned receiver, writers, sent-frame retrieval, and
+ * finalization synchronize on an internal OSAPI mutex. Ring buffers are borrowed, not
+ * allocated or freed here. Transport close finalizes both rings.
  */
 typedef struct {
     PGW_CANFrameSeq rx;                     /**< Receive ring over caller storage. */
     PGW_CANFrameSeq tx;                     /**< Transmit ring over caller storage. */
     size_t rx_head, rx_count, tx_head, tx_count; /**< Internal ring indices/counts. */
     uint64_t rx_overflow, tx_backpressure;    /**< RX-overflow and TX-backpressure totals. */
-    PGW_Status receive_failure, send_failure; /**< Optional injected transport failure statuses. */
+    PGW_ATOMIC(RTI_INT32) receive_failure, send_failure; /**< Optional injected transport failures. */
+    OSAPI_Mutex_T *mutex;                    /**< Synchronizes concurrent ring access. */
     bool rx_initialized, rx_borrowed;         /**< Internal RX sequence state. */
     bool tx_initialized, tx_borrowed;         /**< Internal TX sequence state. */
     bool closed;                              /**< True after finalize/transport close. */

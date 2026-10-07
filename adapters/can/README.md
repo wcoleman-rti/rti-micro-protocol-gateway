@@ -24,7 +24,7 @@ opaque references are cast back only inside their owning adapter.
 ## Initialization and bindings
 
 Construct a `PGW_CANConfig` with an immutable mapping, named categories with
-their exact `PGW_Schema` fingerprints, transport, receive-frame budget, and
+their exact `PGW_TypeInfo` fingerprints, transport, receive-frame budget, and
 maximum writer batch. Call `PGW_CAN_storage_size` for a conservative arena
 bound, then `PGW_CANAdapter.create`. Configuration tables and callback/context
 objects must outlive the connection. Failed arena provisioning restores
@@ -65,7 +65,7 @@ Adopt the generated immutable tables as real Micro typed-sequence views:
 
 ```c
 PGW_CANConfig config = {0};
-PGW_Schema schema = {PGW_codec_schema.name, PGW_codec_schema.version,
+PGW_TypeInfo schema = {PGW_codec_schema.name, PGW_codec_schema.version,
                      PGW_codec_schema.fingerprint};
 PGW_CANCategory categories[2] = {
     {"powertrain", 4, &schema}, {"auxiliary", 3, &schema}
@@ -104,10 +104,20 @@ silently changing each other's access callbacks.
 
 ## Receive, loans and metadata
 
-`PGW_CAN_poll(connection, budget)` consumes at most the smaller of the caller's
-budget and the configured frame budget. A reader invokes one such poll before
-borrowing its category queue. Unknown, malformed, control/error and echo frames
-still consume budget, before signal expansion/demultiplexing.
+Each connection owns one receiver thread. It receives at most the configured
+frame budget per receiver turn, then decodes and demultiplexes frames into the
+existing bounded typed category queues. When a reader queue may contain data,
+the adapter invokes that reader's registered listener; the callback only
+signals session readiness. The session worker performs the bounded read and
+route dispatch. The adapter does not require application polling or a second
+sample queue.
+
+Queue publication, bounded reads, re-arming, listener registration and
+unregistration are synchronized with the receiver. If a read leaves category
+samples queued, the adapter notifies again before returning. Unregistration
+quiesces any in-flight receiver notification before the session can finalize
+its callback context. Unknown, malformed, control/error and echo frames still
+consume the receiver's frame budget, before signal expansion/demultiplexing.
 
 Configured valid frames are decoded into fixed scratch storage and become the
 message baseline even when category queues overflow. Newly decoded signals
@@ -116,7 +126,7 @@ usable. Inactive multiplex branches are absent, not fabricated zero updates.
 Unconfigured frames are counted and ignored. RTR/error frames are counted
 diagnostic/control inputs, never DBC payloads.
 
-Loan slots are distinct from RX queues, so further polling cannot overwrite
+Loan slots are distinct from RX queues, so the receiver cannot overwrite
 borrowed samples. Readers require an initialized sequence with the caller/core's
 fixed reference array already attached and fill within that capacity.
 Exactly one `return_loan` is
@@ -229,62 +239,14 @@ shutdown, dropping any remaining queued frames. `stats.mutable_bytes` records
 actual arena consumption. `queue_high_water`
 is the largest occupancy of any category queue, not aggregate occupancy.
 Immutable descriptor/string/choice tables, externally owned transport rings,
-SocketCAN kernel queues and SDK infrastructure are separate resources. Runtime
-paths perform no allocation, libc formatting or blocking I/O.
+SocketCAN kernel queues and OSAPI receiver-thread/mutex objects are separate
+resources. Runtime paths perform no allocation, libc formatting or blocking I/O.
 
-## Collection inventory: actual Micro sequences and justified exclusions
+## Resource and test details
 
-Every sequence below embeds its own actual installed Micro native typed
-sequence, declared and instantiated directly by the owning component with
-RTI's installed `reda_sequence_decl.h` and `reda_sequence_defn.h` templates.
-Fixed buffers are attached during initialization. Runtime changes only bounded
-logical lengths; allocating copies, growth and fallback are absent.
-
-| Collection | Representation / behavior |
-|---|---|
-| Mapping message definitions | `PGW_CANMessageDefinitionSeq`, readonly borrowed generated descriptors |
-| Mapping signal definitions | `PGW_CANSignalDefinitionSeq`, readonly borrowed generated descriptors |
-| Configured category definitions | `PGW_CANCategorySeq`, readonly borrowed typed configuration records |
-| Connection endpoint/category catalog | Private `PGW_CANCategoryStateSeq`, fixed complete endpoint state records |
-| Received baselines, successful shadows, batch staging | Private `PGW_CANMessageSeq`, one record per message with three distinct frame-role fields |
-| Decode scratch values | Private `PGW_CANDecodedSeq`, fixed maximum signal expansion, active decoded length |
-| Write-to-message result sidecar | Private `PGW_CANIndexSeq`, fixed batch bound and current input length |
-| Per-category RX ring slots | Private `PGW_CANSampleSeq`, typed fixed backing slots with separate head/count occupancy |
-| Memory transport RX/TX ring slots | `PGW_CANFrameSeq`, typed caller-owned backing slots with separate head/count occupancy |
-| Private borrowed sample slots | Private `PGW_CANLoanSeq` per category, current loan length reset on return |
-| Opaque sample references | Core `PGW_SampleSeq`; caller-owned fixed pointer slots, adapter never unloans them |
-| Synchronous per-sample outcomes | Core `PGW_WriteResultSeq`, passed directly to the writer instead of pointer/capacity arguments |
-| SocketCAN configured filter catalog | `PGW_CANSocketFilterSeq`, readonly borrowed definitions; kernel API conversion remains bounded |
-| Benchmark routes/results/references | Core `PGW_RouteSeq`, `PGW_WriteResultSeq`, `PGW_SampleSeq`, adopted by `PGW_Service_set_routes` / `PGW_Route_initialize_storage` |
-
-Deliberate exclusions:
-
-- Memory transport RX/TX and per-category RX queues are **true circular FIFO
-  queues** with head/wrap/full/drop semantics, not plain vectors. Their storage
-  is a typed native sequence; its logical length covers the fixed slot array,
-  while head/count describe live FIFO occupancy. Replacing the FIFO semantics
-  with linear sequence ordering would change overflow/order behavior.
-- CAN payload byte arrays and length/DLC describe a native wire record, not
-  object catalogs. Preserve the fixed 64-byte payload and protocol lengths.
-- Pure generated codecs, message/signal/choice definitions and their
-  immutable array/count symbols retain their SDK-free ABI. Adapter-owned
-  sequence views wrap these tables without introducing Micro into the codec.
-- Generated decode output and raw input bytes retain pointer/length/capacity
-  arguments at that pure-codec ABI boundary; native sequence buffers/maxima
-  supply the adapter's bounded views.
-- Linux `setsockopt` filters and `recvmsg`/`send` use vendor/kernel-native
-  buffer/byte-count interfaces, not an invented sequence ABI.
-- Arena byte budgets, scheduler budgets, maximum batch limits, scalar stream
-  capacity declarations, strings and callback context pointers are not
-  pointer-plus-cardinality collections.
-
-No other maintained CAN catalog, staging table, scratch vector or stored loan
-vector retains an independent raw pointer/count/capacity collection. Sequence
-descriptors are included in actual arena footprint and conservative sizing.
-
-## Verification and deliberate gaps
-
-Build/run the requirement tests from the project:
+The CAN memory and SocketCAN implementations use bounded fixed-capacity
+storage. Resource limits, frame budgets, queue behavior, and sample-loan
+lifetime are described above. To run adapter tests:
 
 ```sh
 cmake -S . -B build -DPGW_ENABLE_CAN=ON -DPGW_BUILD_TESTS=ON \
@@ -293,29 +255,7 @@ cmake --build build --target pgw_can_test pgw_can_socket_test
 ctest --test-dir build -R '^can\.' --output-on-failure
 ```
 
-The selected Python must have the generator's pinned cantools dependency.
-Tests generate real codecs from the example DBC; no runtime Python is used.
-
-| Requirement | Test / assertion |
-|---|---|
-| CAN-GOLDEN / CAN-COALESCE | Exact Intel/Motorola signed decode and coalesced patch bytes; unrelated bits preserved |
-| CAN-BASELINE | Prebaseline command rejected; RX replaces successful shadow even during category overflow |
-| CAN-BUDGET / CAN-DROP | Unknown frame consumes receive budget; bounded queues count exact dropped signal expansion; RX/TX ring overflow |
-| CAN-MUX | Extended FD active branch decoded; inactive command and selector changes rejected |
-| CAN-PARTIAL | Mixed valid/invalid samples and batches spanning two messages have exact separate accepted/backpressure results |
-| CAN-RETRY | Backpressure and I/O failure do not contaminate next successful shadow |
-| CAN-INVALID | Malformed sizes, RTR/error, wrong tag, NaN/Infinity, range and unknown keys rejected |
-| CAN-LOAN / CAN-METADATA | Caller-owned attached sequences remain attached after return, double loans/returns, close guard, captured receive timestamp |
-| CAN-METADATA-DISABLED | Valid payloads and partial command results with capture disabled; requested timestamp access explicitly returns NO_DATA |
-| CAN-NOALLOC | First traffic, overload and failures under malloc/calloc/realloc/aligned_alloc link interception, with a deliberate coverage probe |
-| CAN-SOCKET-ERROR | Nonexistent interface, closed-fd RX/TX errno, invalid ID/filter count; no CAN traffic |
-
-Live SocketCAN traffic, kernel echo/overflow behavior and real FD transmission
-remain dedicated-interface integration checks, not simulated passes. These
-tests never open shared `vcan0`, mutate an interface or send physical traffic.
-Successful isolated-vcan traffic remains an external integration requirement;
-see [`docs/vcan-integration.md`](../../docs/vcan-integration.md) for setup and
-the verification boundary.
-There is no general CAN conformance, physical loss, J1939, ISO-TP or WCET claim.
-Allocation interception covers linked libc entry points in the memory gateway
-path, not kernel queues, every SDK/private allocator, or whole-process behavior.
+The tests generate codecs from the example DBC; no runtime Python is used. The
+project [test guide](../../docs/testing.md) lists coverage. Live SocketCAN
+verification requires a dedicated interface; see
+[`docs/vcan-integration.md`](../../docs/vcan-integration.md).

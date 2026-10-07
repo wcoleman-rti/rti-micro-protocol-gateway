@@ -13,6 +13,6 @@
 #ifndef PGW_DIAGNOSTICS_BINDING_H
 #define PGW_DIAGNOSTICS_BINDING_H
 #include "pgw/dds/connext_micro.h"
-extern const PGW_DDSBinding PGW_diagnostics_binding;
+extern const PGW_DDSTypeBinding PGW_diagnostics_type_binding;
 PGW_Status PGW_DDS_export_snapshot(PGW_StreamWriter *, const PGW_CounterSnapshot *);
 #endif

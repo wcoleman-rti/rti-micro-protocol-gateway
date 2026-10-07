@@ -12,11 +12,18 @@
 
 cmake_minimum_required(VERSION 3.24)
 project(pgw_package_consumer LANGUAGES C)
-find_package(PGW 0.1 CONFIG REQUIRED COMPONENTS
-    core diagnostics_local adapter_can can_memory can_socketcan
-    adapter_dds_connext_micro binding_signal)
+find_package(PGW 0.1 CONFIG REQUIRED
+    COMPONENTS core adapter_can can_memory adapter_dds_connext_micro binding_signal
+    OPTIONAL_COMPONENTS diagnostics_local can_socketcan)
 add_executable(pgw_package_consumer main.c)
 target_link_libraries(pgw_package_consumer PRIVATE
-    PGW::core PGW::diagnostics_local
-    PGW::adapter_can PGW::can_memory PGW::can_socketcan
+    PGW::core PGW::adapter_can PGW::can_memory
     PGW::adapter_dds_connext_micro PGW::binding_signal)
+if(TARGET PGW::diagnostics_local)
+    target_link_libraries(pgw_package_consumer PRIVATE PGW::diagnostics_local)
+    target_compile_definitions(pgw_package_consumer PRIVATE PGW_HAS_DIAGNOSTICS_LOCAL=1)
+endif()
+if(TARGET PGW::can_socketcan)
+    target_link_libraries(pgw_package_consumer PRIVATE PGW::can_socketcan)
+    target_compile_definitions(pgw_package_consumer PRIVATE PGW_HAS_CAN_SOCKETCAN=1)
+endif()

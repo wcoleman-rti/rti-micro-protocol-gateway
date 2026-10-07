@@ -16,7 +16,7 @@
 #include "pgw/can.h"
 PGW_Status PGW_example_attach_routes(PGW_Connection *, PGW_Connection *,
                                     PGW_RouteSeq *);
-PGW_Status PGW_example_can_categories(const PGW_Schema *, PGW_CANCategorySeq *);
+PGW_Status PGW_example_can_categories(const PGW_TypeInfo *, PGW_CANCategorySeq *);
 #if defined(PGW_ENABLE_REMOTE_CONTROL)
 PGW_Status PGW_example_control_resources(PGW_Connection *, PGW_Connection *,
     PGW_Route *, size_t, PGW_ControlResource *, size_t, size_t *);

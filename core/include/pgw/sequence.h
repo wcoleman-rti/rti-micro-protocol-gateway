@@ -21,7 +21,7 @@
 
 /** @brief Opaque sample delivered by a stream reader.
  * Its concrete representation is adapter-defined. Use the bound
- * PGW_Representation access operations when the value must be inspected
+ * PGW_SampleRepresentation access operations when the value must be inspected
  * without knowing its native type.
  */
 typedef struct PGW_Sample PGW_Sample;

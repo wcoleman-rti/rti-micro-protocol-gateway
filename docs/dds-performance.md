@@ -35,13 +35,13 @@ cmake -S . -B build-dds \
 cmake --build build-dds --target pgw_dds_benchmark
 ctest --test-dir build-dds -R REQ_BENCHMARK_DDS --output-on-failure
 python benchmarks/runner/run.py build-dds/benchmarks/dds/pgw_dds_benchmark \
-  --steps 10000 --timing 1 --metadata 1 --repeat 3 --timeout 90 \
+  --batches 10000 --timing 1 --metadata 1 --repeat 3 --timeout 90 \
   --results results/dds
 python benchmarks/runner/run.py build-dds/benchmarks/dds/pgw_dds_benchmark \
-  --steps 1000 --timing 0 --metadata 0 --results results/dds
+  --batches 1000 --timing 0 --metadata 0 --results results/dds
 ```
 
-Executable arguments are `steps timing [preserve_probe_timestamp]`: steps
+Executable arguments are `batches timing [preserve_probe_timestamp]`: batches
 1..100000, timing 0/1, preservation 0/1, defaults 1000/1/0. The runner's
 `--metadata` selects preservation, not metadata capture. Capture remains enabled.
 Management endpoints/export can separately be disabled with
@@ -61,18 +61,20 @@ in [vcan-integration.md](vcan-integration.md).
 
 ## Workload and accounting
 
-Each iteration injects one real Engine CAN frame, decodes four powertrain
-signals, forwards them through the actual local DDS writer, and waits for the
-companion's correlated speed state. The companion writes a speed command over
-DDS; the gateway patches the existing CAN baseline and dequeues the resulting
-frame. Assertions verify the new speed bytes and preservation of the other six
-bytes. Every eighth iteration deliberately fills the single-slot CAN TX ring:
+Each batch injects one real Engine CAN frame. Its connection receiver decodes
+four powertrain signals, notifies the typed reader listener, and the session
+worker forwards them through the actual local DDS writer. The harness waits for
+the companion's correlated speed state. The companion writes a speed command
+over DDS; the gateway patches the existing CAN baseline and dequeues the
+resulting frame. Assertions verify the new speed bytes and preservation of the
+other six bytes. Every eighth batch deliberately fills the single-slot CAN TX ring:
 the command must report backpressure and the owned filler is removed.
 
-One independent, non-CAN Probe is written and observed each iteration. In
+One independent, non-CAN Probe is written and observed each batch. In
 preservation mode its explicit portable source timestamp is checked exactly.
 That synthetic protocol timestamp is never the observation clock. Management
-snapshots are exported/read at the compiled XML period when enabled.
+snapshots are exported/read on a 100 ms monotonic timer when enabled; this
+benchmark timer is separate from session reader-readiness dispatch.
 
 JSON separates offered/decoded states, local DDS accepted states/commands,
 local CAN accepted commands, peer state/Probe/management observations, and
@@ -85,7 +87,7 @@ Deliberate CAN backpressure, invalid commands, RX signal drops, and outstanding
 loans are independently reported.
 
 `samples_per_second` uses four decoded states plus one offered command per
-iteration; Probe and management are excluded. This cooperative, peer-gated
+batch; Probe and management are excluded. This cooperative, peer-gated
 workload is not a maximum sustainable DDS throughput measurement.
 
 ## Timing and bounded storage
@@ -99,14 +101,15 @@ durations. The host benchmark harness uses its own monotonic clock for its
 latency measurements. Clock failure is reported; no synthetic zero timestamp is
 treated as valid.
 
-* Local: immediately before CAN poll/dequeue/decode through one service step,
-  local DDS acceptance, and route loan return. It is not wire latency.
+* Local: immediately before memory-CAN injection through receiver
+  dequeue/decode, reader notification, bounded session dispatch, local DDS
+  acceptance, and route loan return. It is not wire latency.
 * Roundtrip: the same start through companion observation, DDS command,
-  gateway application, and memory-CAN TX dequeue. It includes cooperative
-  polling/sleep. Blocked iterations end at the explicitly observed drop;
+  event-driven gateway application, and memory-CAN TX dequeue. Peer-read
+  waiting/sleep remains in this end-to-end measurement. Blocked batches end at the explicitly observed drop;
   this histogram therefore is not a delivered-only latency distribution.
 * Elapsed workload excludes initialization and initial matching, but includes
-  Probe, management, polling, and intentional backpressure.
+  Probe, management, peer-read attempts, and intentional backpressure.
 
 Both histograms use fixed 64-element arrays. Bucket i covers durations below
 `2^(i+1)` nanoseconds (bucket 0 includes zero); reported percentiles are bucket
@@ -140,13 +143,13 @@ reader per-key limits outside the supported one/two-slot policy.
 
 Five libc and three OSAPI allocation controls plus an arena control verify
 the interceptors before measurement. Initialization monitoring starts after
-OSAPI initialization/control verification and covers MAG/model/entity/binding
-construction. After READY the arena is frozen and monitoring includes initial
-endpoint matching, the first business/Probe/management traffic, all iterations,
+OSAPI initialization/control verification and covers MAG/model/entity/type-binding
+construction. After service initialization the arena is frozen and monitoring includes initial
+endpoint matching, the first business/Probe/management traffic, all batches,
 resource/status/snapshot reads, and service STOP.
 
 Discovery starts during participant initialization; matching is a separately
-reported post-READY phase, not a claim that discovery first begins then.
+reported post-initialization phase, not a claim that discovery first begins then.
 The process contains only the declared peers, not later undeclared-peer churn.
 
 The arena must receive zero runtime requests and must not grow. Libc/OSAPI

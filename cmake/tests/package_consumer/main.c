@@ -12,9 +12,13 @@
 
 #include <pgw/core.h>
 #include <pgw/runtime.h>
+#if defined(PGW_HAS_DIAGNOSTICS_LOCAL)
 #include <pgw/local_sink.h>
+#endif
 #include <pgw/can_memory.h>
+#if defined(PGW_HAS_CAN_SOCKETCAN)
 #include <pgw/can_socketcan.h>
+#endif
 #include <pgw/dds/connext_micro.h>
 #include <pgw/signal.h>
 #include <osapi/osapi_system.h>
@@ -60,13 +64,15 @@ int main(void)
     ConsumerRecord records[1] = {{7, 42}};
     ConsumerRecordSeq records_seq;
     PGW_AdapterRef adapter_refs[2];
-    PGW_RepresentationRef representation_refs[1];
+    PGW_SampleRepresentationRef representation_refs[1];
     PGW_AdapterSeq adapter_sequence;
-    PGW_RepresentationSeq representation_sequence;
+    PGW_SampleRepresentationSeq representation_sequence;
     PGW_Registry registry = {0};
     PGW_CANMemory memory;
     PGW_CANFrame rx[1], tx[1];
+#if defined(PGW_HAS_CAN_SOCKETCAN)
     PGW_CANSocket socket = {.fd = -1};
+#endif
     PGW_Route uninitialized_route = {0};
     PGW_SampleView sample_view = {
         .kind = PGW_SAMPLE_VIEW_CANONICAL,
@@ -79,9 +85,11 @@ int main(void)
         sizeof(PGW_DDSRemoteControlOptions), false, 0, 0
     };
 #endif
-    PGW_Status (*volatile sink_initialize)(PGW_LocalSink *, int, char *, size_t)
-        = PGW_LocalSink_initialize;
+#if defined(PGW_HAS_DIAGNOSTICS_LOCAL)
+    PGW_Status (*volatile sink_initialize)(PGW_LocalSink *, int, char *, size_t) =
+        PGW_LocalSink_initialize;
     (void)sink_initialize;
+#endif
     if (!sample_view.value || sample_view.kind != PGW_SAMPLE_VIEW_CANONICAL)
         return 7;
 #if defined(PGW_ENABLE_ROUTE_LATENCY_METRICS)
@@ -111,8 +119,8 @@ int main(void)
         !ConsumerRecordSeq_finalize(&records_seq) ||
         !PGW_AdapterSeq_initialize(&adapter_sequence) ||
         !PGW_AdapterSeq_loan_contiguous(&adapter_sequence, adapter_refs, 0, 2) ||
-        !PGW_RepresentationSeq_initialize(&representation_sequence) ||
-        !PGW_RepresentationSeq_loan_contiguous(&representation_sequence,
+        !PGW_SampleRepresentationSeq_initialize(&representation_sequence) ||
+        !PGW_SampleRepresentationSeq_loan_contiguous(&representation_sequence,
                                                representation_refs, 0, 1) ||
         PGW_Registry_initialize(&registry, &adapter_sequence, &representation_sequence) != PGW_OK ||
         PGW_Registry_register_adapter(&registry, &PGW_CANAdapter) != PGW_OK ||
@@ -121,8 +129,8 @@ int main(void)
         PGW_Registry_finalize(&registry) != PGW_OK ||
         !PGW_AdapterSeq_unloan(&adapter_sequence) ||
         !PGW_AdapterSeq_finalize(&adapter_sequence) ||
-        !PGW_RepresentationSeq_unloan(&representation_sequence) ||
-        !PGW_RepresentationSeq_finalize(&representation_sequence)) {
+        !PGW_SampleRepresentationSeq_unloan(&representation_sequence) ||
+        !PGW_SampleRepresentationSeq_finalize(&representation_sequence)) {
         return 4;
     }
     if (PGW_CANMemory_initialize(&memory, rx, 1, tx, 1) != PGW_OK ||
@@ -132,9 +140,13 @@ int main(void)
         return 2;
     }
     PGW_CANTransport memory_transport = PGW_CANMemory_transport(&memory);
+#if defined(PGW_HAS_CAN_SOCKETCAN)
     PGW_CANTransport socket_transport = PGW_CANSocket_transport(&socket);
+#endif
     (void)memory_transport;
+#if defined(PGW_HAS_CAN_SOCKETCAN)
     (void)socket_transport;
+#endif
     if (PGW_CANMemory_finalize(&memory) != PGW_OK) return 3;
     return OSAPI_System_finalize() ? 0 : 3;
 }

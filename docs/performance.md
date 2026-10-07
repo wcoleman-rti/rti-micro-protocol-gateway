@@ -23,15 +23,21 @@ Runs persist JSON with source/executable fingerprints, build options, host,
 workload and instrumentation settings, declared input fingerprints and verified
 SDK/compiler/JRE/generator provenance. Source fingerprinting excludes generated
 build trees, the local tool environment and results. No warm-up is hidden:
-allocation monitoring and elapsed measurement include first use after READY.
+allocation monitoring and elapsed measurement include first use after service
+initialization.
 
-The initial workload forwards four opaque keyed values per scheduler step.
-It reports accepted samples/s separately from steps, initialization duration,
-fixed fixture bytes, OSAPI/libc allocation calls, sampled process RSS and CPU time.
+The initial workload forwards four opaque keyed values per asynchronous
+dispatch batch. It reports accepted samples/s separately from dispatches,
+initialization duration, fixed fixture bytes, OSAPI/libc allocation calls,
+sampled process RSS and CPU time.
 The driver samples `/proc/<owned-pid>/status` every 10 ms; short runs may have no
 samples, explicitly reported as unavailable. `getrusage_maxrss_kib` is retained
-separately and may include an inherited launcher high-water mark.
-Step timing measures scheduler entry-to-return, **not network or wire latency**.
+separately and may include an inherited launcher high-water mark. On platforms
+without `getrusage`, `process_usage_available` is false and those numeric fields
+are zero.
+Step timing uses the RTI OSAPI monotonic ticktime and measures
+notification-to-completed-dispatch, **not network or wire latency**. Resolution
+is target-dependent, so zero-length intervals are possible.
 Percentiles are upper bounds from 64 power-of-two buckets, not exact quantiles.
 Timing-disabled runs quantify measurement overhead but are noncomparable to
 timing-enabled runs in regression comparisons.

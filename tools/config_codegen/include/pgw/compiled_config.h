@@ -16,19 +16,19 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "reda/reda_sequence.h"
-typedef struct PGW_CompiledNativeStream {
+typedef struct PGW_CompiledAdapterStream {
     const char *connection, *name, *endpoint, *binding;
     size_t capacity;
     bool reader;
-} PGW_CompiledNativeStream;
-typedef const PGW_CompiledNativeStream PGW_CompiledNativeStreamElement;
+} PGW_CompiledAdapterStream;
+typedef const PGW_CompiledAdapterStream PGW_CompiledAdapterStreamElement;
 #define REDA_SEQUENCE_USER_API
-#define T PGW_CompiledNativeStreamElement
-#define TSeq PGW_CompiledNativeStreamSeq
+#define T PGW_CompiledAdapterStreamElement
+#define TSeq PGW_CompiledAdapterStreamSeq
 #include <reda/reda_sequence_decl.h>
 #undef T
 #undef TSeq
-typedef struct PGW_CompiledNativeStreamSeq PGW_CompiledNativeStreamSeq;
+typedef struct PGW_CompiledAdapterStreamSeq PGW_CompiledAdapterStreamSeq;
 
 typedef struct PGW_CompiledControlResource {
     uint32_t id;
@@ -65,7 +65,20 @@ typedef const PGW_CompiledRoute PGW_CompiledRouteElement;
 typedef struct PGW_CompiledRouteSeq PGW_CompiledRouteSeq;
 
 extern const PGW_CompiledRouteSeq pgw_config_routes;
-extern const PGW_CompiledNativeStreamSeq pgw_config_native_streams;
-extern const unsigned pgw_config_route_budget, pgw_config_sample_budget;
-extern const unsigned pgw_config_diagnostic_period_steps;
+typedef struct PGW_CompiledSession {
+    const char *name;
+    size_t route_offset, route_count;
+} PGW_CompiledSession;
+typedef const PGW_CompiledSession PGW_CompiledSessionElement;
+#define REDA_SEQUENCE_USER_API
+#define T PGW_CompiledSessionElement
+#define TSeq PGW_CompiledSessionSeq
+#include <reda/reda_sequence_decl.h>
+#undef T
+#undef TSeq
+typedef struct PGW_CompiledSessionSeq PGW_CompiledSessionSeq;
+extern const PGW_CompiledSessionSeq pgw_config_sessions;
+extern const char *const pgw_config_control_session;
+extern const PGW_CompiledAdapterStreamSeq pgw_config_adapter_streams;
+extern const unsigned pgw_config_sample_budget;
 #endif

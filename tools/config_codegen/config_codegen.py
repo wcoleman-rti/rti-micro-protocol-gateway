@@ -203,7 +203,10 @@ def control_catalog(root):
     for node in root:
         if node.tag == "route":
             route_names.add(identifier(node.get("id", "")))
-        elif node.tag in ("connection", "native-connection"):
+        elif node.tag == "session":
+            for route in node.findall("route"):
+                route_names.add(identifier(route.get("id", "")))
+        elif node.tag == "connection":
             connection = identifier(node.get("id", ""))
             adapter = identifier(node.get("adapter", ""))
             connection_adapters[connection] = adapter
@@ -219,8 +222,9 @@ def compile_control_resources(control_node, route_names, connection_adapters,
                               stream_adapters, stream_roles, adapter_manifests):
     if control_node is None:
         return [], [], 0, 0
-    shape(control_node, (), (
+    shape(control_node, ("session",), (
         "max-controller-peers", "minimum-telemetry-period-ms"))
+    identifier(control_node.get("session"))
     controller_peer_limit = positive(control_node.get("max-controller-peers", "1"))
     if controller_peer_limit > 32:
         raise ConfigError("maximum controller peers must be 1..32")
@@ -373,12 +377,8 @@ def compile_config(gateway, dds=None, inventory=None, remote_control=False,
     root = validate_gateway_xml(gateway)
     if root.tag != "gateway":
         raise ConfigError("root must be gateway")
-    shape(root, ("dds", "route-budget", "sample-budget"), ("diagnostic-period-steps",))
-    positive(root.get("route-budget"))
+    shape(root, ("dds", "sample-budget"))
     positive(root.get("sample-budget"))
-    period = root.get("diagnostic-period-steps", "0")
-    if period != "0":
-        positive(period)
     dds_path = Path(dds) if dds else Path(gateway).parent / root.get("dds")
     model = parse(dds_path)
     if model.tag != "dds":
@@ -399,23 +399,59 @@ def compile_config(gateway, dds=None, inventory=None, remote_control=False,
             if key in participants:
                 raise ConfigError("duplicate DDS participant")
             participants[key] = participant
-    bindings, connections, streams, routes, ids, natives = {}, [], {}, [], set(), []
+    bindings, connections, streams, sessions, routes, ids, adapter_streams = (
+        {}, [], {}, [], [], set(), [])
+    session_names = set()
     route_names, connection_adapters, stream_adapters, stream_roles = set(), {}, {}, {}
+    routed_inputs = set()
     phase = 0
-    native_limits = {}
+    adapter_limits = {}
     for node in root:
-        expected_phase = {"binding": 0, "connection": 1,
-                          "native-connection": 1, "route": 2, "control": 3}.get(node.tag)
+        expected_phase = {"type-binding": 0, "connection": 1,
+                          "session": 2,
+                          "control": 3}.get(node.tag)
         if expected_phase is None or expected_phase < phase:
             raise ConfigError(f"unknown/out-of-order element {node.tag}")
         phase = expected_phase
         if node.tag == "control":
             continue
+        if node.tag == "session":
+            shape(node, ("name",))
+            session_name = identifier(node.get("name"))
+            if session_name in ids:
+                raise ConfigError(f"duplicate id {session_name}")
+            ids.add(session_name)
+            session_names.add(session_name)
+            session_routes = []
+            for route in node:
+                if route.tag != "route":
+                    raise ConfigError("session permits only route children")
+                shape(route, ("id", "input", "output"))
+                route_name = identifier(route.get("id"))
+                if route_name in ids:
+                    raise ConfigError(f"duplicate id {route_name}")
+                ids.add(route_name)
+                source, dest = streams.get(route.get("input")), streams.get(route.get("output"))
+                if not source or not dest or source[0] != "reader" or dest[0] != "writer":
+                    raise ConfigError("unresolved/wrong-role route")
+                if source[1:] != dest[1:]:
+                    raise ConfigError("incompatible route schema/fingerprint")
+                if route.get("input") in routed_inputs:
+                    raise ConfigError("an input stream may be consumed by only one route")
+                routed_inputs.add(route.get("input"))
+                compiled_route = dict(route.attrib, session=session_name)
+                session_routes.append(compiled_route)
+                routes.append(compiled_route)
+                route_names.add(route_name)
+            if not session_routes:
+                raise ConfigError("session must contain at least one route")
+            sessions.append({"name": session_name, "routes": session_routes})
+            continue
         name = identifier(node.get("id", ""))
         if name in ids:
             raise ConfigError(f"duplicate id {name}")
         ids.add(name)
-        if node.tag == "binding":
+        if node.tag == "type-binding":
             binding_generation_attributes = (
                 "schema-version", "representation-name", "native-type",
                 "native-header", "support-header", "conversion",
@@ -426,7 +462,7 @@ def compile_config(gateway, dds=None, inventory=None, remote_control=False,
             shape(node, ("id", "symbol", "type", "schema", "fingerprint"),
                   binding_generation_attributes)
             if len(node):
-                raise ConfigError("binding children forbidden")
+                raise ConfigError("type-binding children forbidden")
             identifier(node.get("symbol"))
             if not re.fullmatch(r"[0-9a-f]{64}", node.get("fingerprint")):
                 raise ConfigError("fingerprint must be SHA256")
@@ -437,22 +473,22 @@ def compile_config(gateway, dds=None, inventory=None, remote_control=False,
             if generation_attributes.intersection(node.attrib) and \
                     not generation_attributes.issubset(node.attrib):
                 raise ConfigError(
-                    f"binding {name} must provide a complete generated DDS binding declaration")
+                    f"type-binding {name} must provide a complete generated DDS binding declaration")
             if node.get("native-type"):
                 identifier(node.get("native-type"))
             if node.get("conversion") not in (None, "fieldwise", "callbacks"):
-                raise ConfigError(f"binding {name} has unsupported conversion mode")
+                raise ConfigError(f"type-binding {name} has unsupported conversion mode")
             converter_attributes = {"dds-to-native", "native-to-dds"}
             if node.get("conversion") == "callbacks" and \
                     not converter_attributes.issubset(node.attrib):
                 raise ConfigError(
-                    f"binding {name} callback conversion needs DDS/native converter names")
+                    f"type-binding {name} callback conversion needs DDS/native converter names")
             if node.get("conversion") == "fieldwise" and \
                     converter_attributes.intersection(node.attrib):
                 raise ConfigError(
-                    f"binding {name} fieldwise conversion cannot specify converter callbacks")
+                    f"type-binding {name} fieldwise conversion cannot specify converter callbacks")
             if bool(node.get("dds-to-native")) != bool(node.get("native-to-dds")):
-                raise ConfigError(f"binding {name} must specify both converter callbacks")
+                raise ConfigError(f"type-binding {name} must specify both converter callbacks")
             if node.get("dds-to-native"):
                 identifier(node.get("dds-to-native"))
             if node.get("native-to-dds"):
@@ -471,17 +507,45 @@ def compile_config(gateway, dds=None, inventory=None, remote_control=False,
                 identifier(node.get("write-view"))
             if bool(node.get("bind-view")) != bool(node.get("write-view")):
                 raise ConfigError(
-                    f"binding {name} must specify bind-view and write-view together")
+                    f"type-binding {name} must specify bind-view and write-view together")
             if node.get("direct-native-write") in ("true", "1") and \
                     node.get("conversion") == "callbacks" and not node.get("validate-native"):
                 raise ConfigError(
                     f"binding {name} callback direct-write needs a validation callback")
             if node.get("supports-timestamp", "false") not in ("true", "false", "1", "0"):
-                raise ConfigError(f"binding {name} has invalid supports-timestamp value")
+                raise ConfigError(f"type-binding {name} has invalid supports-timestamp value")
             bindings[name] = dict(node.attrib)
         elif node.tag == "connection":
-            shape(node, ("id", "participant", "adapter"))
             connection_adapters[name] = identifier(node.get("adapter"))
+            if node.get("participant") is None:
+                shape(node, ("id", "adapter", "receive-budget", "write-capacity"))
+                if node.get("adapter") != "can":
+                    raise ConfigError("adapter connection must specify a participant")
+                if not len(node):
+                    raise ConfigError("empty adapter connection")
+                adapter_limits[name + "_receive_budget"] = positive(node.get("receive-budget"))
+                adapter_limits[name + "_write_capacity"] = positive(node.get("write-capacity"))
+                for stream in node:
+                    shape(stream, ("name", "endpoint", "type-binding", "role", "capacity"))
+                    if stream.tag != "stream" or len(stream):
+                        raise ConfigError("connection permits only leaf streams")
+                    sn = name + "::" + identifier(stream.get("name"))
+                    identifier(stream.get("endpoint"))
+                    binding = bindings.get(stream.get("type-binding"))
+                    if not binding or sn in streams:
+                        raise ConfigError("unresolved type-binding/duplicate stream")
+                    positive(stream.get("capacity"))
+                    streams[sn] = (stream.get("role"), binding["schema"], binding["fingerprint"])
+                    stream_adapters[sn] = connection_adapters[name]
+                    stream_roles[sn] = stream.get("role")
+                    adapter_streams.append(dict(stream.attrib, connection=name))
+                continue
+            shape(node, ("id", "participant", "adapter"),
+                  ("receive-budget", "write-capacity"))
+            if node.get("receive-budget") is not None or \
+                    node.get("write-capacity") is not None:
+                raise ConfigError(
+                    "receive-budget and write-capacity are adapter-only connection attributes")
             participant = participants.get(node.get("participant"))
             if participant is None:
                 raise ConfigError("unresolved participant")
@@ -506,15 +570,15 @@ def compile_config(gateway, dds=None, inventory=None, remote_control=False,
             for stream in node:
                 if stream.tag != "stream" or len(stream):
                     raise ConfigError("connection permits only leaf streams")
-                shape(stream, ("name", "endpoint", "binding", "role", "capacity"),
+                shape(stream, ("name", "endpoint", "type-binding", "role", "capacity"),
                       ("preserve-source-timestamp",))
                 sn = name + "::" + identifier(stream.get("name"))
                 if sn in streams:
                     raise ConfigError("duplicate stream")
-                binding = bindings.get(stream.get("binding"))
+                binding = bindings.get(stream.get("type-binding"))
                 endpoint = endpoints.get(stream.get("endpoint"))
                 if not binding or not endpoint:
-                    raise ConfigError("unresolved binding/endpoint")
+                    raise ConfigError("unresolved type-binding/endpoint")
                 if stream.get("endpoint") in adopted:
                     raise ConfigError("endpoint adopted twice")
                 adopted.add(stream.get("endpoint"))
@@ -538,45 +602,14 @@ def compile_config(gateway, dds=None, inventory=None, remote_control=False,
             if not entries:
                 raise ConfigError("empty connection")
             connections.append((name, node.get("participant"), entries))
-        elif node.tag == "native-connection":
-            shape(node, ("id", "adapter", "receive-budget", "write-capacity"))
-            connection_adapters[name] = identifier(node.get("adapter"))
-            if node.get("adapter") != "can":
-                raise ConfigError("unregistered native adapter")
-            if not len(node):
-                raise ConfigError("empty native connection")
-            native_limits[name + "_receive_budget"] = positive(node.get("receive-budget"))
-            native_limits[name + "_write_capacity"] = positive(node.get("write-capacity"))
-            for stream in node:
-                shape(stream, ("name", "endpoint", "binding", "role", "capacity"))
-                if stream.tag != "stream" or len(stream):
-                    raise ConfigError("native connection permits only leaf streams")
-                sn = name + "::" + identifier(stream.get("name"))
-                identifier(stream.get("endpoint"))
-                binding = bindings.get(stream.get("binding"))
-                if not binding or sn in streams:
-                    raise ConfigError("unresolved binding/duplicate native stream")
-                positive(stream.get("capacity"))
-                streams[sn] = (stream.get("role"), binding["schema"], binding["fingerprint"])
-                stream_adapters[sn] = connection_adapters[name]
-                stream_roles[sn] = stream.get("role")
-                natives.append(dict(stream.attrib, connection=name))
-        else:
-            shape(node, ("id", "input", "output"))
-            if len(node):
-                raise ConfigError("route children forbidden")
-            source, dest = streams.get(node.get("input")), streams.get(node.get("output"))
-            if not source or not dest or source[0] != "reader" or dest[0] != "writer":
-                raise ConfigError("unresolved/wrong-role route")
-            if source[1:] != dest[1:]:
-                raise ConfigError("incompatible route schema/fingerprint")
-            routes.append(dict(node.attrib))
-            route_names.add(name)
-    if not bindings or not connections:
-        raise ConfigError("bindings and connections required")
+    if not bindings or (not connections and not adapter_streams) or not sessions:
+        raise ConfigError(
+            "type bindings, connections/adapter streams, and explicit sessions required")
     control_node = root.find("control")
     if control_node is not None and not remote_control:
         raise ConfigError("remote control section requires PGW_ENABLE_REMOTE_CONTROL")
+    if control_node is not None and control_node.get("session") not in session_names:
+        raise ConfigError("control session is not configured")
     (control_resources, control_metrics, telemetry_minimum_period_ms,
      controller_peer_limit) = compile_control_resources(
         control_node, route_names, connection_adapters, stream_adapters,
@@ -586,20 +619,22 @@ def compile_config(gateway, dds=None, inventory=None, remote_control=False,
         for binding in bindings.values():
             if binding["schema"] == manifest["schema"] and binding["fingerprint"] != manifest["fingerprint"]:
                 raise ConfigError("stale schema fingerprint")
-    return (bindings, connections, routes, {
-        "route_budget": int(root.get("route-budget")),
-        "sample_budget": int(root.get("sample-budget")),
-        "diagnostic_period_steps": int(period), **native_limits}, natives,
+    return (bindings, connections, sessions, routes, {
+        "sample_budget": int(root.get("sample-budget")), **adapter_limits}, adapter_streams,
             control_resources, control_metrics, telemetry_minimum_period_ms,
-            controller_peer_limit)
+            controller_peer_limit,
+            control_node.get("session") if control_node is not None else None)
 
 
 def emit(config, output):
-    (bindings, connections, routes, settings, natives, control_resources,
-     control_metrics, telemetry_minimum_period_ms, controller_peer_limit) = config
+    (bindings, connections, sessions, routes, settings, adapter_streams, control_resources,
+     control_metrics, telemetry_minimum_period_ms, controller_peer_limit,
+     control_session) = config
     lines = ['#include "pgw/dds/connext_micro.h"', '#include "pgw/compiled_config.h"']
     for name, value in settings.items():
         lines.append(f"const unsigned pgw_config_{name} = {value}u;")
+    lines.append("const char *const pgw_config_control_session = " +
+                 (json.dumps(control_session) if control_session else "NULL") + ";")
     if control_resources:
         lines.append("const unsigned pgw_control_max_controller_peers = "
                      f"{controller_peer_limit}u;")
@@ -630,7 +665,7 @@ def emit(config, output):
         lines.append("const unsigned pgw_control_telemetry_minimum_period_ms = "
                      f"{telemetry_minimum_period_ms}u;")
     for symbol in sorted({b["symbol"] for b in bindings.values()}):
-        lines.append(f"extern const PGW_DDSBinding {symbol};")
+        lines.append(f"extern const PGW_DDSTypeBinding {symbol};")
     for name, participant, entries in connections:
         lines.append(f"static PGW_DDSEndpointConfig {name}_endpoints[] = {{")
         for entry in entries:
@@ -666,21 +701,32 @@ def emit(config, output):
     else:
         lines.append("const PGW_CompiledRouteSeq pgw_config_routes = "
                      "REDA_DEFINE_SEQUENCE_INITIALIZER(PGW_CompiledRouteElement);")
-    lines.append("static PGW_CompiledNativeStream pgw_native_streams[] = {")
-    for stream in natives:
+    lines.append("static PGW_CompiledSession pgw_sessions[] = {")
+    route_offset = 0
+    for session in sessions:
+        route_count = len(session["routes"])
+        lines.append("    {%s, %du, %du}," %
+                     (json.dumps(session["name"]), route_offset, route_count))
+        route_offset += route_count
+    lines.append("};")
+    lines.append("const PGW_CompiledSessionSeq pgw_config_sessions = "
+                 "REDA_DEFINE_SEQUENCE_INITIALIZER_W_LOAN(pgw_sessions, "
+                 f"{len(sessions)}, {len(sessions)}, PGW_CompiledSessionElement);")
+    lines.append("static PGW_CompiledAdapterStream pgw_adapter_streams[] = {")
+    for stream in adapter_streams:
         lines.append("    {%s, %s, %s, %s, %su, %s}," % (
-            *(json.dumps(stream[k]) for k in ("connection", "name", "endpoint", "binding")),
+            *(json.dumps(stream[k]) for k in ("connection", "name", "endpoint", "type-binding")),
             stream["capacity"], "true" if stream["role"] == "reader" else "false"))
-    if not natives:
+    if not adapter_streams:
         lines.append("    {NULL, NULL, NULL, NULL, 0, false}")
     lines.append("};")
-    if natives:
-        lines.append("const PGW_CompiledNativeStreamSeq pgw_config_native_streams = "
-                     "REDA_DEFINE_SEQUENCE_INITIALIZER_W_LOAN(pgw_native_streams, "
-                     f"{len(natives)}, {len(natives)}, PGW_CompiledNativeStreamElement);")
+    if adapter_streams:
+        lines.append("const PGW_CompiledAdapterStreamSeq pgw_config_adapter_streams = "
+                     "REDA_DEFINE_SEQUENCE_INITIALIZER_W_LOAN(pgw_adapter_streams, "
+                     f"{len(adapter_streams)}, {len(adapter_streams)}, PGW_CompiledAdapterStreamElement);")
     else:
-        lines.append("const PGW_CompiledNativeStreamSeq pgw_config_native_streams = "
-                     "REDA_DEFINE_SEQUENCE_INITIALIZER(PGW_CompiledNativeStreamElement);")
+        lines.append("const PGW_CompiledAdapterStreamSeq pgw_config_adapter_streams = "
+                     "REDA_DEFINE_SEQUENCE_INITIALIZER(PGW_CompiledAdapterStreamElement);")
     Path(output).write_text("\n".join(lines) + "\n")
 
 

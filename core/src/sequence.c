@@ -52,8 +52,8 @@
 #undef REDA_SEQUENCE_API
 #undef concatenate
 
-#define T PGW_RepresentationRef
-#define TSeq PGW_RepresentationSeq
+#define T PGW_SampleRepresentationRef
+#define TSeq PGW_SampleRepresentationSeq
 #define REDA_SEQUENCE_API REDA_SEQUENCE_API_UNTYPED
 #define TSeq_initialize
 #define TSeq_finalize
@@ -92,6 +92,25 @@
 
 #define T PGW_Route
 #define TSeq PGW_RouteSeq
+#define REDA_SEQUENCE_API REDA_SEQUENCE_API_UNTYPED
+#define TSeq_initialize
+#define TSeq_finalize
+#define TSeq_get_length
+#define TSeq_get_maximum
+#define TSeq_set_length
+#define TSeq_get_reference
+#define TSeq_loan_contiguous
+#define TSeq_unloan
+#define TSeq_get_contiguous_buffer
+#define TSeq_has_ownership
+#include "reda/reda_sequence_defn.h"
+#undef T
+#undef TSeq
+#undef REDA_SEQUENCE_API
+#undef concatenate
+
+#define T PGW_Session
+#define TSeq PGW_SessionSeq
 #define REDA_SEQUENCE_API REDA_SEQUENCE_API_UNTYPED
 #define TSeq_initialize
 #define TSeq_finalize

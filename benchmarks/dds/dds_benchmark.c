@@ -11,6 +11,7 @@
  */
 
 #define _POSIX_C_SOURCE 200809L
+#include "pgw/atomic.h"
 #include "pgw/dds/connext_micro.h"
 #include "pgw/can_memory.h"
 #include "pgw/runtime.h"
@@ -28,34 +29,35 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
-#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
-#include <time.h>
 #include <unistd.h>
 
 extern const PGW_DDSConfig pgw_config_gateway, pgw_config_companion;
 typedef struct { uint64_t buckets[64], count, minimum, maximum, sum; } Histogram;
 typedef struct { PGW_Signal value; } SignalSample;
 typedef struct { PGW_ProbeValue value; PGW_Timestamp timestamp; } ProbeSample;
-static atomic_bool frozen;
-static atomic_uint_fast64_t runtime_arena_calls;
+static PGW_ATOMIC(RTI_UINT32) frozen;
+static PGW_ATOMIC(RTI_UINT64) runtime_arena_calls;
 PGW_Status __real_PGW_Arena_allocate(PGW_Arena *, size_t, size_t, void **);
 PGW_Status __wrap_PGW_Arena_allocate(PGW_Arena *arena, size_t bytes,
                                     size_t alignment, void **out)
 {
-    if (atomic_load(&frozen)) atomic_fetch_add(&runtime_arena_calls, 1);
+    if (PGW_ATOMIC_LOAD_SEQ(&frozen)) PGW_ATOMIC_ADD_SEQ(&runtime_arena_calls, 1);
     return __real_PGW_Arena_allocate(arena, bytes, alignment, out);
 }
 static uint64_t now_ns(void)
 {
-    struct timespec time;
-    assert(!clock_gettime(CLOCK_MONOTONIC, &time));
-    return (uint64_t)time.tv_sec * UINT64_C(1000000000) + (uint64_t)time.tv_nsec;
+    uint64_t now;
+    if (!PGW_Runtime_monotonic_time_ns(&now)) {
+        fprintf(stderr, "OSAPI monotonic clock unavailable\n");
+        exit(2);
+    }
+    return now;
 }
 static void observe(Histogram *histogram, uint64_t duration)
 {
@@ -148,11 +150,11 @@ static void allocation_controls(void)
     PGW_allocation_monitor(false);
     unsigned char storage[16];
     PGW_Arena arena = {storage, sizeof(storage), 0};
-    atomic_store(&frozen, true);
+    PGW_ATOMIC_STORE_SEQ(&frozen, true);
     assert(PGW_Arena_allocate(&arena, 1, 1, &pointer) == PGW_OK);
-    assert(atomic_load(&runtime_arena_calls) == 1);
-    atomic_store(&runtime_arena_calls, 0);
-    atomic_store(&frozen, false);
+    assert(PGW_ATOMIC_LOAD_SEQ(&runtime_arena_calls) == 1);
+    PGW_ATOMIC_STORE_SEQ(&runtime_arena_calls, 0);
+    PGW_ATOMIC_STORE_SEQ(&frozen, false);
 }
 /* This lock is shared with the DDS test harness across all project build trees. */
 static int reserve_domain(void)
@@ -183,6 +185,17 @@ static uint64_t counter(const PGW_Route *route, PGW_CounterId id)
     PGW_CounterSnapshot snapshot;
     assert(PGW_Counters_snapshot(&route->counters, route->id, 0, 0, &snapshot));
     return snapshot.values[id];
+}
+static bool wait_session_dispatches(const PGW_Session *session,
+                                   uint64_t expected)
+{
+    for (unsigned attempt = 0; attempt < 2000; ++attempt) {
+        if (PGW_ATOMIC_LOAD(&session->dispatched_routes,
+                                 OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) >= expected)
+            return true;
+        OSAPI_Thread_sleep(1);
+    }
+    return false;
 }
 static void wait_matches(PGW_Connection *gateway, PGW_Connection *companion)
 {
@@ -225,19 +238,20 @@ static void write_one(PGW_StreamWriter *writer, PGW_SampleSeq *sequence,
 }
 static int usage(const char *name)
 {
-    fprintf(stderr, "usage: %s [steps:1..100000] [timing:0|1] [probe-timestamp-preservation:0|1]\n", name);
+    fprintf(stderr, "usage: %s [batches:1..100000] [timing:0|1] [probe-timestamp-preservation:0|1]\n", name);
     return 2;
 }
 int main(int argc, char **argv)
 {
-    uint64_t steps = 1000;
+    uint64_t batches = 1000;
     bool timing = true, preserve = false;
     if (argc > 4) return usage(argv[0]);
     if (argc > 1) {
         char *end;
         errno = 0;
-        steps = strtoull(argv[1], &end, 10);
-        if (errno || !argv[1][0] || argv[1][0] == '-' || *end || !steps || steps > 100000)
+        batches = strtoull(argv[1], &end, 10);
+        if (errno || !argv[1][0] || argv[1][0] == '-' || *end ||
+            !batches || batches > 100000)
             return usage(argv[0]);
     }
     for (int i = 2; i < argc; ++i)
@@ -285,7 +299,7 @@ int main(int argc, char **argv)
     PGW_CANMemory memory;
     PGW_CANFrame rx[8], tx[1];
     assert(PGW_CANMemory_initialize(&memory, rx, 8, tx, 1) == PGW_OK);
-    PGW_Schema schema = {PGW_codec_schema.name, PGW_codec_schema.version, PGW_codec_schema.fingerprint};
+    PGW_TypeInfo schema = {PGW_codec_schema.name, PGW_codec_schema.version, PGW_codec_schema.fingerprint};
     PGW_CANCategory categories[2];
     PGW_CANCategorySeq category_sequence;
     PGW_CANConfig can_config = {.entity_id = 1, .transport = PGW_CANMemory_transport(&memory),
@@ -317,20 +331,31 @@ int main(int argc, char **argv)
     assert(PGW_RouteSeq_initialize(&route_sequence));
     assert(PGW_RouteSeq_loan_contiguous(&route_sequence, routes, 4, 4));
     assert(PGW_example_attach_routes(can, gateway, &route_sequence) == PGW_OK);
-    PGW_Service service = {.route_budget = pgw_config_route_budget,
-        .sample_budget = pgw_config_sample_budget,
+    assert(PGW_CompiledSessionSeq_get_length(&pgw_config_sessions) == 1);
+    const PGW_CompiledSession *compiled_session =
+        PGW_CompiledSessionSeq_get_reference(&pgw_config_sessions, 0);
+    assert(compiled_session && compiled_session->route_count == 4);
+    PGW_Session session = {.name = compiled_session->name};
+    assert(PGW_Session_set_routes(&session, &route_sequence) == PGW_OK);
+    PGW_SessionSeq session_sequence;
+    assert(PGW_SessionSeq_initialize(&session_sequence));
+    assert(PGW_SessionSeq_loan_contiguous(&session_sequence, &session, 1, 1));
+    PGW_Service service = {.sample_budget = pgw_config_sample_budget,
         .clock_ns = PGW_Runtime_monotonic_clock};
-    assert(PGW_Service_set_routes(&service, &route_sequence) == PGW_OK);
+    assert(PGW_Service_set_sessions(&service, &session_sequence) == PGW_OK);
+    assert(PGW_SessionSeq_unloan(&session_sequence));
+    assert(PGW_SessionSeq_finalize(&session_sequence));
     assert(PGW_Service_initialize(&service) == PGW_OK);
+    assert(PGW_Service_start(&service) == PGW_OK);
     PGW_StreamReader state_reader, probe_reader;
     PGW_StreamWriter command_writer, probe_writer;
-    assert(PGW_DDSConnextMicroConnection.reader(companion, "state_powertrain", &state_reader) == PGW_OK);
-    assert(PGW_DDSConnextMicroConnection.writer(companion, "command_powertrain", &command_writer) == PGW_OK);
-    assert(PGW_DDSConnextMicroConnection.reader(companion, "probe", &probe_reader) == PGW_OK);
-    assert(PGW_DDSConnextMicroConnection.writer(gateway, "probe", &probe_writer) == PGW_OK);
-    PGW_Representation signal_rep = {&schema, "benchmark.signal", sizeof(SignalSample),
+    assert(PGW_DDSConnextMicroConnection.lookup_stream_reader(companion, "state_powertrain", &state_reader) == PGW_OK);
+    assert(PGW_DDSConnextMicroConnection.lookup_stream_writer(companion, "command_powertrain", &command_writer) == PGW_OK);
+    assert(PGW_DDSConnextMicroConnection.lookup_stream_reader(companion, "probe", &probe_reader) == PGW_OK);
+    assert(PGW_DDSConnextMicroConnection.lookup_stream_writer(gateway, "probe", &probe_writer) == PGW_OK);
+    PGW_SampleRepresentation signal_rep = {&schema, "benchmark.signal", sizeof(SignalSample),
                                      _Alignof(SignalSample), &signal_access, NULL};
-    PGW_Representation probe_rep = *PGW_probe_binding.representation;
+    PGW_SampleRepresentation probe_rep = *PGW_probe_type_binding.representation;
     probe_rep.access = &probe_access;
     assert(command_writer.iface->bind(command_writer.state, &signal_rep) == PGW_OK);
     assert(probe_writer.iface->bind(probe_writer.state, &probe_rep) == PGW_OK);
@@ -349,9 +374,9 @@ int main(int argc, char **argv)
     PGW_StreamReader diagnostic_reader;
     PGW_SampleSeq diagnostic_loan;
     PGW_SampleRef diagnostic_refs[4];
-    assert(PGW_DDSConnextMicroConnection.writer(gateway, "diagnostics", &exporter) == PGW_OK);
-    assert(exporter.iface->bind(exporter.state, PGW_diagnostics_binding.representation) == PGW_OK);
-    assert(PGW_DDSConnextMicroConnection.reader(companion, "diagnostics", &diagnostic_reader) == PGW_OK);
+    assert(PGW_DDSConnextMicroConnection.lookup_stream_writer(gateway, "diagnostics", &exporter) == PGW_OK);
+    assert(exporter.iface->bind(exporter.state, PGW_diagnostics_type_binding.representation) == PGW_OK);
+    assert(PGW_DDSConnextMicroConnection.lookup_stream_reader(companion, "diagnostics", &diagnostic_reader) == PGW_OK);
     initialize_sequence(&diagnostic_loan, diagnostic_refs, 4);
 #endif
     size_t route_capacities[] = {8, 8, 8, 8};
@@ -359,7 +384,8 @@ int main(int argc, char **argv)
     PGW_CoreResourceReport core_resources;
     assert(PGW_SizeSeq_initialize(&capacity_sequence));
     assert(PGW_SizeSeq_loan_contiguous(&capacity_sequence, route_capacities, 4, 4));
-    assert(PGW_core_resource_report(&capacity_sequence, false, 0, &core_resources) == PGW_OK);
+    assert(PGW_core_resource_report(&capacity_sequence, 1, false, 0,
+                                    &core_resources) == PGW_OK);
     assert(PGW_SizeSeq_unloan(&capacity_sequence));
     assert(PGW_SizeSeq_finalize(&capacity_sequence));
     uint64_t initialization_ns = now_ns() - initialization_start;
@@ -369,21 +395,26 @@ int main(int argc, char **argv)
     Histogram local = {.minimum = UINT64_MAX}, roundtrip = {.minimum = UINT64_MAX};
     uint64_t peer_states = 0, peer_probes = 0, peer_diagnostics = 0, exports = 0;
     uint64_t sent_frames = 0, blocked = 0, polls = 0;
-    atomic_store(&frozen, true);
+    PGW_ATOMIC_STORE_SEQ(&frozen, true);
     PGW_allocation_monitor(true);
     uint64_t matching_start = now_ns();
     wait_matches(gateway, companion);
     uint64_t matching_ns = now_ns() - matching_start;
     uint64_t discovery_libc = PGW_allocation_calls(), discovery_osapi = PGW_osapi_allocation_calls();
     uint64_t start = now_ns();
-    for (uint64_t step = 0; step < steps; ++step) {
-        uint16_t raw = (uint16_t)(1000 + step % 1000);
+#if PGW_DDS_DIAGNOSTICS
+    const uint64_t diagnostic_period_ns = UINT64_C(100000000);
+    uint64_t next_diagnostic_ns = start + diagnostic_period_ns;
+#endif
+    for (uint64_t batch = 0; batch < batches; ++batch) {
+        uint16_t raw = (uint16_t)(1000 + batch % 1000);
         PGW_CANFrame baseline = {.id = 256, .length = 8,
             .data = {(uint8_t)raw, (uint8_t)(raw >> 8), 0, 0, 1, 1, 0xab, 0xcd}};
-        assert(PGW_CANMemory_inject(&memory, &baseline) == PGW_OK);
+        uint64_t target_dispatch = PGW_ATOMIC_LOAD(
+            &session.dispatched_routes, OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) + 1;
         uint64_t before = timing ? now_ns() : 0;
-        assert(PGW_CAN_poll(can, pgw_config_can_receive_budget) == PGW_OK);
-        assert(PGW_Service_step(&service) == PGW_OK);
+        assert(PGW_CANMemory_inject(&memory, &baseline) == PGW_OK);
+        assert(wait_session_dispatches(&session, target_dispatch));
         if (timing) observe(&local, now_ns() - before);
         bool observed = false;
         for (unsigned attempt = 0; attempt < 2000 && !observed; ++attempt) {
@@ -406,17 +437,19 @@ int main(int argc, char **argv)
             if (!observed) OSAPI_Thread_sleep(1);
         }
         assert(observed);
-        bool saturate = (step + 1) % 8 == 0;
+        bool saturate = (batch + 1) % 8 == 0;
         if (saturate) {
             assert(can_config.transport.iface->send(can_config.transport.state, &baseline) == PGW_OK);
             ++blocked;
         }
         SignalSample command = {{1001, {.kind = PGW_VALUE_DOUBLE, .data.real = (raw + 100) * 0.1}}};
+        target_dispatch = PGW_ATOMIC_LOAD(&session.dispatched_routes,
+                                                OSAPI_ATOMIC_MEMORY_ORDER_ACQUIRE) + 1;
         write_one(&command_writer, &command_sequence, &command_ref, &command, &write_results);
+        assert(wait_session_dispatches(&session, target_dispatch));
         observed = false;
         for (unsigned attempt = 0; attempt < 2000 && !observed; ++attempt) {
             PGW_CANFrame frame;
-            assert(PGW_Service_step(&service) == PGW_OK);
             ++polls;
             if (saturate) {
                 if (counter(&routes[2], PGW_COUNT_BACKPRESSURE) == blocked) {
@@ -436,7 +469,7 @@ int main(int argc, char **argv)
         }
         assert(observed);
         if (timing) observe(&roundtrip, now_ns() - before);
-        ProbeSample probe = {{1, (int32_t)step}, {true, true, 123, (uint32_t)step + 1}};
+        ProbeSample probe = {{1, (int32_t)batch}, {true, true, 123, (uint32_t)batch + 1}};
         write_one(&probe_writer, &probe_sequence, &probe_write_ref, &probe, &write_results);
         observed = false;
         for (unsigned attempt = 0; attempt < 2000 && !observed; ++attempt) {
@@ -448,11 +481,11 @@ int main(int argc, char **argv)
                 PGW_Timestamp timestamp;
                 assert(probe_reader.representation->access->copy_value(
                     *PGW_SampleSeq_get_reference(&probe_loan, 0), &value, sizeof(value)) == PGW_OK);
-                assert(value.id == 1 && value.reading == (int32_t)step);
+                assert(value.id == 1 && value.reading == (int32_t)batch);
                 assert(probe_reader.representation->access->source_timestamp(
                     *PGW_SampleSeq_get_reference(&probe_loan, 0), &timestamp) == PGW_OK);
                 if (preserve) assert(timestamp.valid && timestamp.seconds == 123 &&
-                                     timestamp.nanoseconds == (uint32_t)step + 1);
+                                     timestamp.nanoseconds == (uint32_t)batch + 1);
                 ++peer_probes;
                 assert(probe_reader.iface->return_loan(probe_reader.state, &probe_loan) == PGW_OK);
                 observed = true;
@@ -461,12 +494,16 @@ int main(int argc, char **argv)
         }
         assert(observed);
 #if PGW_DDS_DIAGNOSTICS
-        if (pgw_config_diagnostic_period_steps && (step + 1) % pgw_config_diagnostic_period_steps == 0) {
+        uint64_t diagnostic_now = now_ns();
+        if (diagnostic_now >= next_diagnostic_ns) {
+            do {
+                next_diagnostic_ns += diagnostic_period_ns;
+            } while (next_diagnostic_ns <= diagnostic_now);
             for (size_t i = 0; i < 4; ++i) {
                 PGW_CounterSnapshot snapshot;
                 uint64_t collected_ns;
                 assert(PGW_Runtime_monotonic_time_ns(&collected_ns));
-                assert(PGW_Counters_snapshot(&routes[i].counters, routes[i].id, step + 1,
+                assert(PGW_Counters_snapshot(&routes[i].counters, routes[i].id, batch + 1,
                                             collected_ns, &snapshot));
                 PGW_Status status = PGW_DDS_export_snapshot(&exporter, &snapshot);
                 if (status == PGW_OK) ++exports;
@@ -487,7 +524,7 @@ int main(int argc, char **argv)
                         assert(diagnostic_reader.representation->access->copy_value(
                             *PGW_SampleSeq_get_reference(&diagnostic_loan, i), &value, sizeof(value)) == PGW_OK);
                         assert(value.entity_id >= 1 && value.entity_id <= 4 &&
-                               value.sequence == step + 1);
+                               value.sequence == batch + 1);
                         seen |= 1u << (value.entity_id - 1);
                     }
                     assert(diagnostic_reader.iface->return_loan(diagnostic_reader.state,
@@ -505,18 +542,18 @@ int main(int argc, char **argv)
     assert(PGW_CAN_stats(can, &can_stats) == PGW_OK);
     assert(PGW_DDS_statistics(companion, "command_powertrain", &commands) == PGW_OK);
     assert(PGW_DDS_statistics(companion, "state_powertrain", &peer_state_status) == PGW_OK);
-    assert(can_stats.received_frames == steps && can_stats.decoded_samples == steps * 4);
-    assert(can_stats.accepted_commands == steps - blocked && can_stats.backpressure_commands == blocked);
-    assert(commands.accepted == steps && sent_frames == steps - blocked && peer_probes == steps);
-    assert(counter(&routes[0], PGW_COUNT_RECEIVED) == steps * 4);
-    assert(counter(&routes[0], PGW_COUNT_ACCEPTED) == steps * 4);
+    assert(can_stats.received_frames == batches && can_stats.decoded_samples == batches * 4);
+    assert(can_stats.accepted_commands == batches - blocked && can_stats.backpressure_commands == blocked);
+    assert(commands.accepted == batches && sent_frames == batches - blocked && peer_probes == batches);
+    assert(counter(&routes[0], PGW_COUNT_RECEIVED) == batches * 4);
+    assert(counter(&routes[0], PGW_COUNT_ACCEPTED) == batches * 4);
     for (size_t i = 0; i < 4; ++i)
         assert(!counter(&routes[i], PGW_COUNT_LOANS) && !counter(&routes[i], PGW_COUNT_FATAL));
     assert(PGW_Service_stop(&service) == PGW_OK);
     uint64_t libc_calls = PGW_allocation_calls(), osapi_calls = PGW_osapi_allocation_calls();
-    assert(arena.used == ready_bytes && !atomic_load(&runtime_arena_calls));
+    assert(arena.used == ready_bytes && !PGW_ATOMIC_LOAD_SEQ(&runtime_arena_calls));
     PGW_allocation_monitor(false);
-    atomic_store(&frozen, false);
+    PGW_ATOMIC_STORE_SEQ(&frozen, false);
     uint64_t local_states = counter(&routes[0], PGW_COUNT_ACCEPTED);
     uint64_t invalid = counter(&routes[2], PGW_COUNT_INVALID);
     assert(PGW_Service_finalize(&service) == PGW_OK);
@@ -546,9 +583,9 @@ int main(int argc, char **argv)
     struct rusage usage_stats;
     assert(!getrusage(RUSAGE_SELF, &usage_stats));
     printf("{\"format_version\":1,\"workload\":\"actual-micro-mag-can-dds-roundtrip-v1\","
-        "\"steps\":%" PRIu64 ",\"samples\":%" PRIu64 ",\"timing\":%s,"
+        "\"batches\":%" PRIu64 ",\"samples\":%" PRIu64 ",\"timing\":%s,"
         "\"elapsed_ns\":%" PRIu64 ",\"initialization_ns\":%" PRIu64 ",\"initial_matching_ns\":%" PRIu64 ","
-        "\"samples_per_second\":%.3f,\"sample_rate_basis\":\"four decoded states plus one DDS command offered per step; excludes Probe/management\","
+        "\"samples_per_second\":%.3f,\"sample_rate_basis\":\"four decoded states plus one DDS command offered per notification batch; excludes Probe/management\","
         "\"offered_can_frames\":%" PRIu64 ",\"received_can_frames\":%" PRIu64 ",\"decoded_states\":%" PRIu64 ","
         "\"local_accepted_states\":%" PRIu64 ",\"local_dds_accepted_commands\":%" PRIu64 ","
         "\"local_can_accepted_commands\":%" PRIu64 ",\"peer_observed_state_samples\":%" PRIu64 ","
@@ -556,7 +593,7 @@ int main(int argc, char **argv)
         "\"management_exports\":%" PRIu64 ",\"peer_observed_management_samples\":%" PRIu64 ","
         "\"backpressure_commands\":%" PRIu64 ",\"invalid_commands\":%" PRIu64 ","
         "\"rx_dropped_signals\":%" PRIu64 ",\"dds_state_backpressure\":%" PRIu64 ",\"outstanding_loans\":0,"
-        "\"bounded_poll_calls\":%" PRIu64 ",\"backpressure_period_steps\":8,"
+        "\"peer_read_attempts\":%" PRIu64 ",\"backpressure_period_batches\":8,"
         "\"gateway_runtime_allocations\":null,\"gateway_arena_runtime_requests\":0,"
         "\"observed_libc_runtime_allocations\":%" PRIu64 ",\"osapi_runtime_allocations\":%" PRIu64 ","
         "\"observed_libc_initialization_allocations\":%" PRIu64 ",\"observed_osapi_initialization_allocations\":%" PRIu64 ","
@@ -571,9 +608,9 @@ int main(int argc, char **argv)
         "\"queue_high_water\":%zu,\"schema_fingerprint\":\"%s\","
         "\"getrusage_maxrss_kib\":%ld,\"cpu_user_us\":%ld,\"cpu_system_us\":%ld,"
         "\"configuration\":{\"domain\":%d,\"transport\":\"UDP loopback only\",\"discovery\":\"DPDE\","
-        "\"diagnostics\":%s,\"poll_timeout_iterations\":2000,\"poll_sleep_ms\":1,"
-        "\"route_budget\":%u,\"sample_budget\":%u,\"can_receive_budget\":%u,"
-        "\"can_write_capacity\":%u,\"diagnostic_period_steps\":%u},"
+        "\"diagnostics\":%s,\"peer_wait_timeout_iterations\":2000,\"peer_wait_sleep_ms\":1,"
+        "\"sample_budget\":%u,\"can_receive_budget\":%u,"
+        "\"can_write_capacity\":%u,\"diagnostic_period_ms\":%u},"
         "\"metadata_capture\":{\"DDS_public_SampleInfo\":true,\"CAN_context\":true},"
         "\"metadata_preservation\":{\"probe_source_timestamp\":%s,\"source\":\"explicit synthetic portable DDS timestamp 123s plus ordinal nanoseconds; never the monotonic observation clock\"},"
         "\"dds_effective_resources\":{\"factory_participants\":%d,\"factory_components\":%d,"
@@ -582,16 +619,16 @@ int main(int argc, char **argv)
         "\"instances\":%d,\"samples\":%d,\"per_instance\":%d,\"history_depth\":%d,"
         "\"writer_blocking_seconds\":%d,\"writer_blocking_nanoseconds\":%u,"
         "\"memory\":\"entity limits are actual getters; exact middleware bytes not inferred\"},"
-        "\"step_latency_ns\":{\"boundary\":\"POSIX CLOCK_MONOTONIC CAN poll/dequeue/decode plus PGW_Service_step through local DDS acceptance and loan return; not wire latency\","
+        "\"dispatch_latency_ns\":{\"boundary\":\"RTI OSAPI monotonic ticktime CAN injection to bounded session dispatch, local DDS acceptance, and loan return; not wire latency\","
         "\"count\":%" PRIu64 ",\"min\":%" PRIu64 ",\"max\":%" PRIu64 ",\"mean\":%.3f,"
         "\"p50_upper\":%" PRIu64 ",\"p95_upper\":%" PRIu64 ",\"p99_upper\":%" PRIu64 ","
         "\"histogram\":\"64 power-of-two buckets; upper-bound percentiles\"},"
-        "\"roundtrip_latency_ns\":{\"boundary\":\"same-process POSIX CLOCK_MONOTONIC CAN dequeue to memory-CAN TX dequeue through real DDS companion; includes cooperative polling/sleep; blocked iterations end at explicit drop, not delivery\","
+        "\"roundtrip_latency_ns\":{\"boundary\":\"same-process RTI OSAPI monotonic ticktime CAN injection through the asynchronous DDS-to-CAN route; blocked batches end at explicit backpressure, not delivery\","
         "\"count\":%" PRIu64 ",\"min\":%" PRIu64 ",\"max\":%" PRIu64 ",\"mean\":%.3f,"
         "\"p50_upper\":%" PRIu64 ",\"p95_upper\":%" PRIu64 ",\"p99_upper\":%" PRIu64 ","
         "\"histogram\":\"64 power-of-two buckets; upper-bound percentiles\"}",
-        steps, steps * 5, timing ? "true" : "false", elapsed, initialization_ns, matching_ns,
-        elapsed ? steps * 5.0 * 1e9 / elapsed : 0.0, steps, can_stats.received_frames,
+        batches, batches * 5, timing ? "true" : "false", elapsed, initialization_ns, matching_ns,
+        elapsed ? batches * 5.0 * 1e9 / elapsed : 0.0, batches, can_stats.received_frames,
         can_stats.decoded_samples, local_states, commands.accepted, can_stats.accepted_commands,
         peer_states, sent_frames, peer_probes, exports, peer_diagnostics, blocked, invalid,
         can_stats.receive_drops, counter(&routes[0], PGW_COUNT_BACKPRESSURE),
@@ -606,9 +643,9 @@ int main(int argc, char **argv)
         usage_stats.ru_utime.tv_sec * 1000000 + usage_stats.ru_utime.tv_usec,
         usage_stats.ru_stime.tv_sec * 1000000 + usage_stats.ru_stime.tv_usec,
         PGW_BENCHMARK_DDS_DOMAIN, PGW_DDS_DIAGNOSTICS ? "true" : "false",
-        pgw_config_route_budget, pgw_config_sample_budget,
-        pgw_config_can_receive_budget, pgw_config_can_write_capacity,
-        pgw_config_diagnostic_period_steps,
+        pgw_config_sample_budget, pgw_config_can_receive_budget,
+        pgw_config_can_write_capacity,
+        PGW_DDS_DIAGNOSTICS ? 100u : 0u,
         preserve ? "true" : "false", gateway_resources.factory_participants,
         gateway_resources.factory_components, gateway_resources.local_readers,
         gateway_resources.local_writers, gateway_resources.local_topics,

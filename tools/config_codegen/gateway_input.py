@@ -37,22 +37,25 @@ for name, path in (("probe", args.probe_idl), ("diagnostics", args.diagnostics_i
 Path(args.schema_header).write_text("\n".join(macros) + "\n")
 root = ET.fromstring(text)
 if args.diagnostics == "0":
-    root.set("diagnostic-period-steps", "0")
     for parent in root.iter():
         for child in list(parent):
-            if child.get("id") == "diagnostics" or child.get("binding") == "diagnostics":
+            if child.get("id") == "diagnostics" or child.get("type-binding") == "diagnostics":
                 parent.remove(child)
 if args.remote_control:
     if not 1 <= args.max_controller_peers <= 32:
         parser.error("maximum controller peers must be 1..32")
+    sessions = root.findall("session")
+    if not sessions:
+        parser.error("remote control requires at least one explicit session")
     control_attributes = {
-        "max-controller-peers": str(args.max_controller_peers)
+        "max-controller-peers": str(args.max_controller_peers),
+        "session": sessions[0].get("name")
     }
     if args.telemetry:
         control_attributes["minimum-telemetry-period-ms"] = "100"
     control = ET.SubElement(root, "control", control_attributes)
     controlled_connections = {"can", "gateway"}
-    for connection in root.findall("connection") + root.findall("native-connection"):
+    for connection in root.findall("connection"):
         connection_id = connection.get("id")
         if connection_id not in controlled_connections:
             continue
@@ -70,9 +73,10 @@ if args.remote_control:
                     "kind": "output",
                     "ref": f"{connection_id}::{stream.get('name')}",
                     "actions": "enable disable"})
-    for route in root.findall("route"):
-        ET.SubElement(control, "resource", {
-            "kind": "route", "ref": route.get("id"), "actions": "pause resume"})
+    for session in sessions:
+        for route in session.findall("route"):
+            ET.SubElement(control, "resource", {
+                "kind": "route", "ref": route.get("id"), "actions": "pause resume"})
     if args.telemetry:
         ET.SubElement(control, "metric", {
             "resource-kind": "connection",
